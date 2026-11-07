@@ -40,7 +40,7 @@ It's a modular monolith with one central agent.
 | SpacetimeDB module | `spacetime/module` | The system of record. Every table is private: browsers read their own rows through `my_*` views, and services read through worker-only `worker_*` views. Reducers enforce the workload lifecycle, monotonic spend, and ownership. Users can only change their own preferences and desktop control; anything that spends money goes through the control plane. |
 | Client bindings | `spacetime/bindings` | `@anywhere/stdb`, typed tables, views and reducers shared by the web app and the bridge. It's hand-written in `spacetime generate`'s format, so regenerating overwrites it in place. |
 | Control plane | `services/control` | FastAPI on Python 3.13. Details in the list below the table. |
-| Web | `apps/web` | Next.js 16, Tailwind v4 and Base UI primitives with a hand-built design system and icon set. It renders entirely from live SpacetimeDB subscriptions. |
+| Web | `apps/web` | Next.js 16, Tailwind v4, shadcn/ui on Base UI, lucide icons, react-markdown. Chat tool-call rendering is adapted from Beautiful UI. It renders entirely from live SpacetimeDB subscriptions. |
 | Messaging bridge | `services/messaging` | A TypeScript service using Photon Spectrum. Inbound iMessages go to the control plane, and queued notifications come back out from the SpacetimeDB outbox. |
 | Deploy | `deploy/` | Docker Compose and Caddy for a single general-purpose VM (639Cloud). |
 
@@ -59,7 +59,7 @@ What the control plane does:
 3. The budget policy checks it. A `planned` workload and a plan card appear in the thread.
 4. The user approves. The supervisor runs `brev create`, waits for the machine, runs a checksum-verified setup script (Docker, Cua Linux desktop, Blender), restores the saved project from S3, and moves the workload through `provisioning → configuring → running`.
 5. The browser opens the desktop. It gets a 60-second HMAC ticket, and the control plane relays noVNC over an SSH tunnel to the instance's loopback-only VNC server. The VM is never exposed.
-6. "Make a low-poly tree" starts the operator loop: screenshot → Nemotron vision picks one action → Cua executes it → verify. Each step streams into `agent_step`. **Take over** stops the run and makes the stream interactive. **Hand to agent** resumes it.
+6. Every desktop and job has its own page (`/w/{id}`): the live screen or the job's metrics and logs, plus an agent panel that continues that machine's conversation with the agent focused on it. Every agent tool call streams into the chat as it happens. "Make a low-poly tree" starts the operator loop: screenshot → Nemotron vision picks one action → Cua executes it → verify. Each step streams into `agent_step`. **Take over** stops the run and makes the stream interactive. **Hand to agent** resumes it.
 7. **Stop** copies `~/Projects` to S3 before stopping the machine. Billing pauses, and **Resume** restores it.
 
 ### Safety and budget
@@ -88,10 +88,11 @@ What the control plane does:
 | Browser identity → control-plane auth | **Verified** | Token verified through SpacetimeDB `/v1/identity/{id}/verify` |
 | Onboarding (name, invite code), realtime gate | **Verified** | |
 | Chat → message persistence → live thread | **Verified** | |
+| Agent tool calls streamed into chat; machine-focused agent panel | **Verified** | Tool runs recorded through the real tool wrappers; 4 pytest tests |
 | Deterministic planner, catalog, cost estimate, plan card | **Verified** | Driven with a structured intent; planner and budget have unit tests |
 | Approve → supervisor launch → cleanup on failure | **Verified** | With no Brev key: refused, cleaned up, user told why |
 | Boot progress, live cost ticker, workload/desktop pages | **Verified** | Lifecycle stepped through real reducers |
-| Budget policy, lifecycle mirror, supervisor guard and cleanup | **Tested** | 59 pytest tests |
+| Budget policy, lifecycle mirror, supervisor guard and cleanup | **Tested** | 63 pytest tests |
 | Nemotron intent extraction and agent tools | Built | Needs `NVIDIA_API_KEY` |
 | Brev provisioning, stop/resume, reconcile | Built | Needs `BREV_API_KEY` and approval before spending credits |
 | Desktop on Brev (Cua Linux image, Blender, x11vnc/websockify) | Built | Not yet run on a Brev GPU. Xvfb has no hardware GL, so viewport rendering is software and Cycles renders use the GPU via CUDA/OptiX |
@@ -138,14 +139,14 @@ Put the printed token in `SPACETIME_WORKER_TOKEN` in `services/control/.env`.
 **3. Run the control plane and the web app.**
 
 ```bash
-cd services/control && uv run anywhere serve --port 8000
+cd services/control && uv run python -m anywhere.main serve --port 8001
 ```
 
 ```bash
 cp apps/web/.env.example apps/web/.env.local && pnpm dev:web
 ```
 
-Open http://localhost:3000. In development with no `INVITE_CODE` set, any invite code works.
+Open http://localhost:3001. In development with no `INVITE_CODE` set, any invite code works.
 
 **4. (Optional) iMessage bridge.** Fill in `services/messaging/.env`, then run:
 
@@ -178,7 +179,7 @@ pnpm -r typecheck && pnpm --filter web lint
 | `SPACETIME_HOST`, `SPACETIME_DATABASE` | control, bridge | SpacetimeDB HTTP base URL and database name |
 | `SPACETIME_WORKER_TOKEN` | control, bridge | Token of an allowlisted worker identity |
 | `NEXT_PUBLIC_SPACETIME_HOST` / `SPACETIME_PUBLIC_URL` | web | WebSocket URL browsers use (fixed at build time) |
-| `NEXT_PUBLIC_API_URL` | web | Control plane base URL: `/api` behind Caddy, `http://localhost:8000` locally |
+| `NEXT_PUBLIC_API_URL` | web | Control plane base URL: `/api` behind Caddy, `http://localhost:8001` locally |
 | `PROVISIONING_MODE` | control | `disabled` (default), `dry_run`, or `live` |
 | `GLOBAL_BUDGET_CENTS`, `MAX_CONCURRENT_INSTANCES`, `MAX_SESSION_HOURS`, `DESKTOP_IDLE_MINUTES` | control | Platform guardrails |
 | `INVITE_CODE` | control | Required to activate accounts outside development |

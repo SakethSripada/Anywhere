@@ -1,44 +1,31 @@
 "use client";
 
 import type { Account } from "@anywhere/stdb";
+import { AlertCircle } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ApiError, useApi } from "@/lib/api";
 import { reducers, useReducer, type Session } from "@/lib/stdb";
-import { IconAlert, IconArrowRight, IconLock, Mark } from "../icons";
-import { Button } from "../ui/button";
-import { Field, Input } from "../ui/field";
-import { Spinner } from "../ui/spinner";
+import { Logo } from "./logo";
 
-export function Onboarding({
-  session,
-  account,
-  accountReady,
-}: {
-  session: Session;
-  account: Account | null;
-  accountReady: boolean;
-}) {
+export function Onboarding({ session, account, accountReady }: { session: Session; account: Account | null; accountReady: boolean }) {
   if (!session.ready || !accountReady) {
     return (
       <Stage>
         {session.error ? (
-          <Card
-            icon={<IconAlert size={16} className="text-bad" />}
-            title="Can't reach Anywhere"
-            body="The realtime backend didn't answer. Check that SpacetimeDB is running and the web app points at it."
-          >
-            <code className="block truncate rounded-md bg-canvas/70 px-2.5 py-2 font-mono text-2xs text-fg-subtle shadow-[inset_0_0_0_1px_var(--color-line)]">
+          <Panel title="Can’t reach Anywhere" body="The realtime backend didn’t answer. Check that SpacetimeDB is running and that the web app points at it.">
+            <div className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3 font-mono text-xs break-all text-muted-foreground">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
               {session.error}
-            </code>
-            <Button variant="secondary" className="mt-4 w-full" onClick={() => window.location.reload()}>
+            </div>
+            <Button className="mt-4 w-full" size="lg" onClick={() => window.location.reload()}>
               Try again
             </Button>
-          </Card>
+          </Panel>
         ) : (
-          <div className="flex animate-fade-in [animation-delay:300ms] [animation-duration:400ms] flex-col items-center gap-4 text-fg-subtle">
-            <Spinner size={18} />
-            <span className="text-sm">Connecting</span>
-          </div>
+          <span className="shimmer-text text-sm">Connecting</span>
         )}
       </Stage>
     );
@@ -48,28 +35,21 @@ export function Onboarding({
 
 function Stage({ children }: { children: ReactNode }) {
   return (
-    <div className="relative grid h-full place-items-center overflow-hidden px-4">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -top-64 left-1/2 h-96 w-[40rem] -translate-x-1/2 rounded-full bg-accent/[0.035] blur-3xl"
-      />
-      <div className="relative flex w-full max-w-sm flex-col items-center">
-        <div className="mb-8 flex items-center gap-2">
-          <Mark size={22} />
-          <span className="text-lg font-semibold tracking-tighter">Anywhere</span>
-        </div>
-        {children}
+    <div className="flex h-full flex-col items-center justify-center px-4">
+      <div className="mb-10 flex items-center gap-2">
+        <Logo className="size-6" />
+        <span className="text-lg font-semibold tracking-tight">Anywhere</span>
       </div>
+      <div className="w-full max-w-[360px]">{children}</div>
     </div>
   );
 }
 
-function Card({ icon, title, body, children }: { icon?: ReactNode; title: string; body: string; children: ReactNode }) {
+function Panel({ title, body, children }: { title: string; body: string; children: ReactNode }) {
   return (
-    <div className="w-full animate-rise rounded-2xl bg-surface p-6 shadow-overlay">
-      {icon && <div className="mb-4 grid size-8 place-items-center rounded-lg bg-white/[0.05]">{icon}</div>}
-      <h1 className="text-lg font-semibold tracking-tight text-fg">{title}</h1>
-      <p className="mt-1.5 mb-5 text-sm text-fg-subtle">{body}</p>
+    <div className="animate-in duration-300 fade-in-0 slide-in-from-bottom-1">
+      <h1 className="text-center text-2xl font-semibold tracking-[-0.02em]">{title}</h1>
+      <p className="mt-2 mb-7 text-center text-sm leading-6 text-muted-foreground">{body}</p>
       {children}
     </div>
   );
@@ -95,16 +75,16 @@ function Register() {
   }
 
   return (
-    <Card title="Powerful computers, on request" body="Describe what you want to do. Anywhere picks the hardware, sets it up, and can operate it for you.">
-      <form onSubmit={submit} className="flex flex-col gap-4">
-        <Field label="What should we call you?" htmlFor="name" error={error}>
-          <Input id="name" autoFocus autoComplete="name" value={name} maxLength={64} onChange={(e) => setName(e.target.value)} placeholder="Ada Lovelace" />
-        </Field>
-        <Button type="submit" variant="primary" size="lg" loading={busy} disabled={!name.trim()} trailing={<IconArrowRight />}>
-          Continue
+    <Panel title="Welcome to Anywhere" body="Describe what you want to do. Anywhere picks the hardware, sets it up, and can operate it for you.">
+      <form onSubmit={submit} className="flex flex-col gap-3">
+        <Label htmlFor="name">Your name</Label>
+        <Input id="name" autoFocus autoComplete="name" value={name} maxLength={64} onChange={(e) => setName(e.target.value)} className="h-11" />
+        {error && <p className="text-xs text-destructive">{error}</p>}
+        <Button type="submit" size="lg" className="mt-2 h-11" disabled={!name.trim() || busy}>
+          {busy ? "Creating account…" : "Continue"}
         </Button>
       </form>
-    </Card>
+    </Panel>
   );
 }
 
@@ -120,7 +100,6 @@ function Activate() {
     setError(null);
     try {
       await api.post("/v1/account/activate", { code: code.trim() || "dev" });
-      // The account row flips to activated over the subscription; the gate lifts on its own.
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong");
       setBusy(false);
@@ -128,28 +107,15 @@ function Activate() {
   }
 
   return (
-    <Card
-      icon={<IconLock size={16} className="text-accent" />}
-      title="Enter your invite code"
-      body="GPU time is real money, so access is invite-only while we're in preview."
-    >
-      <form onSubmit={submit} className="flex flex-col gap-4">
-        <Field label="Invite code" htmlFor="code" error={error}>
-          <Input
-            id="code"
-            autoFocus
-            autoComplete="off"
-            spellCheck={false}
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            className="font-mono tracking-wide"
-            placeholder="ANYWHERE-…"
-          />
-        </Field>
-        <Button type="submit" variant="primary" size="lg" loading={busy} trailing={<IconArrowRight />}>
-          Unlock Anywhere
+    <Panel title="Enter your invite code" body="GPU time costs real money, so access is invite-only during the preview.">
+      <form onSubmit={submit} className="flex flex-col gap-3">
+        <Label htmlFor="code">Invite code</Label>
+        <Input id="code" autoFocus autoComplete="off" spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} className="h-11 font-mono" />
+        {error && <p className="text-xs text-destructive">{error}</p>}
+        <Button type="submit" size="lg" className="mt-2 h-11" disabled={busy}>
+          {busy ? "Checking…" : "Continue"}
         </Button>
       </form>
-    </Card>
+    </Panel>
   );
 }

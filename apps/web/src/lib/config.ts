@@ -4,7 +4,7 @@ export const config = {
   spacetimeHost: process.env.NEXT_PUBLIC_SPACETIME_HOST ?? "ws://127.0.0.1:3000",
   spacetimeDatabase: process.env.NEXT_PUBLIC_SPACETIME_DATABASE ?? "anywhere",
   /** Control plane base URL. Same-origin `/api` in production (Caddy strips the prefix). */
-  apiUrl: (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, ""),
+  apiUrl: (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001").replace(/\/$/, ""),
 };
 
 /** WebSocket form of the control plane URL, resolved against the page origin. */
