@@ -89,6 +89,7 @@ async def test_reconcile_deletes_only_orphans(tmp_path):
     store.add(status="running")
     brev.instances = {instance_name(1): "RUNNING", "anywhere-dead": "RUNNING", "someone-elses-box": "RUNNING"}
     await sup.reconcile(await store.workloads())
+    await sup.reconcile(await store.workloads())  # orphans are confirmed on a second pass
     assert set(brev.instances) == {instance_name(1), "someone-elses-box"}
 
 
@@ -133,3 +134,24 @@ async def test_running_training_job_is_guarded_and_stoppable(tmp_path):
     assert store.rows[1]["status"] == "terminated"
     assert ("delete", instance_name(1)) in brev.calls
     assert sup._monitors.get(1) is None or sup._monitors[1].done()
+
+
+async def test_reconcile_spares_a_machine_created_mid_tick(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    stale = [store.add(status="approved")]  # snapshot taken before the launch
+    brev.instances[instance_name(1)] = "DEPLOYING"
+    store.rows[1]["status"] = "provisioning"
+    await sup.reconcile(stale)
+    await sup.reconcile(stale)
+    assert ("delete", instance_name(1)) not in brev.calls
+
+
+async def test_reconcile_deletes_orphans_on_the_second_pass(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    brev.instances[instance_name(99)] = "RUNNING"
+    await sup.reconcile([])
+    assert ("delete", instance_name(99)) not in brev.calls
+    await sup.reconcile([])
+    assert ("delete", instance_name(99)) in brev.calls

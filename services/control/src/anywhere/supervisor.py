@@ -87,6 +87,9 @@ class Supervisor:
         self._locks: dict[int, asyncio.Lock] = {}
         self.vnc = VncTunnels()
         self._guard_task: asyncio.Task | None = None
+        #: Unowned instances seen on the previous reconcile pass. An instance is only
+        #: deleted after it is unowned on two passes in a row.
+        self._orphan_candidates: set[str] = set()
 
     # ── Task plumbing ─────────────────────────────────────────────────────
 
@@ -622,12 +625,33 @@ class Supervisor:
         except BrevError as exc:
             log.warning("reconcile.list_failed", error=str(exc))
             return
-        owned = {instance_name(w["id"]) for w in workloads if w["status"] in BILLABLE | {Status.STOPPED}}
-        for inst in instances:
-            if inst.name.startswith("anywhere-") and inst.name not in owned and inst.status != "DELETING":
-                log.warning("reconcile.orphan", instance=inst.name)
-                with contextlib.suppress(BrevError):
-                    await self.brev.delete(inst.name)
+        # `workloads` was read at the start of the tick, before the (slow) Brev list,
+        # so a launch may have created its machine in between. Count anything that
+        # is approved, mid-operation, or has a vault entry as owned, and only delete
+        # an instance that is still unowned on the next pass as well.
+        owned = {
+            instance_name(w["id"])
+            for w in workloads
+            if w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])
+        }
+        owned |= {instance_name(wid) for wid, t in self._tasks.items() if not t.done()}
+        candidates = {
+            inst.name
+            for inst in instances
+            if inst.name.startswith("anywhere-") and inst.name not in owned and inst.status != "DELETING"
+        }
+        confirmed = candidates & self._orphan_candidates
+        self._orphan_candidates = candidates - confirmed
+        if not confirmed:
+            return
+        fresh = {w["id"]: w for w in await self.store.workloads()}
+        for name in sorted(confirmed):
+            w = next((w for w in fresh.values() if instance_name(w["id"]) == name), None)
+            if w and (w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])):
+                continue
+            log.warning("reconcile.orphan", instance=name)
+            with contextlib.suppress(BrevError):
+                await self.brev.delete(name)
 
     async def recover(self) -> None:
         """Reattach after a control-plane restart."""
