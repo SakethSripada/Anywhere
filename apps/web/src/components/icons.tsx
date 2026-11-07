@@ -366,3 +366,11 @@ export const IconBrain = make(
   </>,
   "IconBrain",
 );
+
+export const IconTrash = make(
+  <>
+    <path d="M3.75 5.75h12.5M8 5.75V4.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.25" />
+    <path d="m5.25 5.75.7 9.4a1.5 1.5 0 0 0 1.5 1.35h5.1a1.5 1.5 0 0 0 1.5-1.35l.7-9.4M8.5 9v4.25M11.5 9v4.25" />
+  </>,
+  "IconTrash",
+);

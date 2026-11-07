@@ -1,9 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  // Shared SpacetimeDB bindings ship as TypeScript source from the workspace.
+  transpilePackages: ["@anywhere/stdb"],
+  // Self-contained server bundle for the Docker image.
+  output: "standalone",
+  outputFileTracingRoot: new URL("../..", import.meta.url).pathname,
   turbopack: {
     rules: {
       "*.css": {
