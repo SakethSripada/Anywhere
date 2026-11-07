@@ -1,15 +1,17 @@
-"""Time-ordered 63-bit identifiers.
+"""Time-ordered 53-bit identifiers.
 
 Reducers cannot return values, so the control plane assigns primary keys for
-the rows it creates. 43 bits of milliseconds (good until 2248) followed by 20
-random bits keeps ids sortable and collision-safe at our write rates, and below
-2**63 so they stay positive in every language that touches them.
+rows it creates. SATS-JSON encodes integers as JSON numbers, so ids must stay
+within 2**53 to survive every JSON parser between here and the browser:
+32 bits of seconds since 2026-01-01 (good for 136 years) + 21 random bits.
 """
 
 import secrets
 import time
 
+EPOCH = 1767225600  # 2026-01-01T00:00:00Z
+
 
 def new_id() -> int:
-    millis = int(time.time() * 1000) & ((1 << 43) - 1)
-    return (millis << 20) | secrets.randbits(20)
+    seconds = (int(time.time()) - EPOCH) & 0xFFFFFFFF
+    return (seconds << 21) | secrets.randbits(21)

@@ -17,13 +17,20 @@ dependencies = [
   "boto3>=1.43",
   "websockets>=15",
   "pyyaml>=6",
+  "pillow>=11",
+  "cua-sandbox>=0.9.1",
+  "langgraph-checkpoint-sqlite>=3.1",
+  "aiosqlite>=0.21",
 ]
 
-[project.optional-dependencies]
-desktop = ["cua-sandbox>=0.9.1"]
-
 [dependency-groups]
-dev = ["pytest>=9", "pytest-asyncio>=1.2", "ruff>=0.14", "respx>=0.22"]
+dev = [
+    "pytest>=9",
+    "pytest-asyncio>=1.2",
+    "ruff>=0.14",
+    "respx>=0.22",
+    "pytest-timeout>=2.4.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,6 +42,8 @@ packages = ["src/anywhere"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 30
 
 [tool.ruff]
 line-length = 120
@@ -42,3 +51,5 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+# Line length is owned by `ruff format`; explicit timeouts are clearer than asyncio.timeout here.
+ignore = ["E501", "ASYNC109", "UP047"]

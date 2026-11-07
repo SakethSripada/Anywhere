@@ -71,7 +71,7 @@ class Settings(BaseSettings):
 
     # Desktop environment
     desktop_image: str = "ghcr.io/trycua/linux:24.04"
-    blender_version: str = "4.5.3"
+    blender_version: str = "4.5.15"
     desktop_resolution: str = "1600x900"
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
