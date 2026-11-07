@@ -1,5 +1,5 @@
 import { ScheduleAt, Timestamp } from "spacetimedb";
-import { schema, SenderError, t, table } from "spacetimedb/server";
+import { CaseConversionPolicy, schema, SenderError, t, table } from "spacetimedb/server";
 import { canTransition, CONTROLLERS, validatePreferences } from "./lifecycle";
 
 /*
@@ -258,7 +258,11 @@ const spacetimedb = schema({
   notification,
   platform,
   maintenance,
-});
+},
+  // Keep canonical (SQL) names identical to the declared ones so the control
+  // plane, which reads rows over the HTTP SQL API, sees the same field names.
+  { CASE_CONVERSION_POLICY: CaseConversionPolicy.None },
+);
 export default spacetimedb;
 
 /* ── Guards ────────────────────────────────────────────────────────────── */
