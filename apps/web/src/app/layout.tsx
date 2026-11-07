@@ -1,12 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { GeistMono } from "geist/font/mono";
-import { Inter } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
 import { Providers } from "@/components/app/providers";
 import { Shell } from "@/components/app/shell";
 import { cn } from "@/lib/utils";
 import "./globals.css";
-
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
   title: { default: "Anywhere", template: "%s · Anywhere" },
@@ -20,14 +18,14 @@ export const instant = false;
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#171717" },
+    { media: "(prefers-color-scheme: light)", color: "#f4f5f8" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0b0e" },
   ],
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" suppressHydrationWarning className={cn("h-full", inter.variable, GeistMono.variable)}>
+    <html lang="en" suppressHydrationWarning className={cn("h-full", GeistSans.variable, GeistMono.variable)}>
       <body className="h-full overflow-hidden font-sans">
         <Providers>
           <Shell>{children}</Shell>

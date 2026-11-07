@@ -1,147 +1,145 @@
 "use client";
 
-import type { Workload } from "@anywhere/stdb";
-import { Plus } from "lucide-react";
+import { Plus, Server } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useAccount, useMonthSpend, useNow, usePlatform, useWorkloads } from "@/lib/data";
+import { useAccount, useMonthSpend, usePlatform, useWorkloads } from "@/lib/data";
 import { ago, cents } from "@/lib/format";
-import { BILLABLE, href, liveCents } from "@/lib/workloads";
+import { ACTIVE, BILLABLE, href } from "@/lib/workloads";
 import { PageHeader } from "../app/page-header";
-import { Uptime } from "./shared";
-import { StatusBadge } from "./status";
-
-type Filter = "all" | "running" | "desktop" | "batch" | "ended";
-
-const MATCH: Record<Filter, (w: Workload) => boolean> = {
-  all: () => true,
-  running: (w) => BILLABLE.has(w.status) || w.status === "approved",
-  desktop: (w) => w.kind === "desktop",
-  batch: (w) => w.kind === "batch",
-  ended: (w) => ["succeeded", "stopped", "cancelled", "failed"].includes(w.status),
-};
+import { MachineCard } from "./machine-card";
+import { StatusChip } from "./status";
 
 export function MachineList() {
   const { workloads, ready } = useWorkloads();
   const { account } = useAccount();
   const { platform } = usePlatform();
   const spent = useMonthSpend();
-  const [filter, setFilter] = useState<Filter>("all");
   const router = useRouter();
-  const now = useNow(5000);
-  const rows = useMemo(() => workloads.filter(MATCH[filter]), [workloads, filter]);
+  const live = workloads.filter((w) => ACTIVE.has(w.status) || w.status === "planned");
+  const stopped = workloads.filter((w) => w.status === "stopped");
+  const history = workloads.filter((w) => ["succeeded", "failed", "cancelled"].includes(w.status));
   const running = workloads.filter((w) => BILLABLE.has(w.status));
   const burn = running.reduce((s, w) => s + w.hourlyCents, 0);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <PageHeader title="Machines">
+      <PageHeader title="Machines" className="border-b">
         <Button size="sm" nativeButton={false} render={<Link href="/" />}>
-          <Plus /> New
+          <Plus /> New task
         </Button>
       </PageHeader>
-      <div className="mx-auto w-full max-w-6xl px-4 pb-12 sm:px-8">
-        <div className="mt-2 grid grid-cols-2 overflow-hidden rounded-xl border md:grid-cols-4">
-          <Summary label="Running now" value={String(running.length)} sub={running.length ? `${cents(burn)}/hr combined` : "Nothing is billing"} />
-          <Summary label="Spent this month" value={cents(spent)} sub={`of ${cents(account?.monthlyCapCents ?? 0)} cap`} />
-          <Summary
-            label="Shared GPU credit"
-            value={platform ? cents(Math.max(0, platform.globalBudgetCents - platform.globalSpentCents)) : "—"}
-            sub={platform ? `left of ${cents(platform.globalBudgetCents)}` : ""}
-          />
-          <Summary
+      <div className="@container mx-auto w-full max-w-6xl px-5 pt-6 pb-16 sm:px-8">
+        <div className="grid grid-cols-2 gap-3 @3xl:grid-cols-4">
+          <Stat label="Running now" value={String(running.length)} sub={running.length ? `${cents(burn)}/hr combined` : "Nothing is billing"} />
+          <Stat label="Spent this month" value={cents(spent)} sub={`of your ${cents(account?.monthlyCapCents ?? 0)} limit`} />
+          <Stat label="Shared credit left" value={platform ? cents(Math.max(0, platform.globalBudgetCents - platform.globalSpentCents)) : "—"} sub={platform ? `of ${cents(platform.globalBudgetCents)}` : ""} />
+          <Stat
             label="Provisioning"
-            value={platform?.provisioningMode === "live" ? "Live" : platform?.provisioningMode === "dry_run" ? "Dry run" : "Off"}
-            sub={platform?.provisioningMode === "live" ? "Approved plans create machines" : "Plans only — nothing is billed"}
+            value={platform?.provisioningMode === "live" ? "Live" : platform?.provisioningMode === "dry_run" ? "Dry run" : "Plans only"}
+            sub={platform ? `${platform.activeInstances} of ${platform.maxConcurrentInstances} machines in use` : ""}
           />
         </div>
 
-        <div className="mt-8 mb-3 flex items-center justify-between gap-3">
-          <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
-            <TabsList>
-              <TabsTrigger value="all">All</TabsTrigger>
-              <TabsTrigger value="running">Running</TabsTrigger>
-              <TabsTrigger value="desktop">Desktops</TabsTrigger>
-              <TabsTrigger value="batch">Jobs</TabsTrigger>
-              <TabsTrigger value="ended">Ended</TabsTrigger>
-            </TabsList>
-          </Tabs>
-          <span className="text-xs text-muted-foreground tabular">{rows.length} shown</span>
-        </div>
-
-        <div className="overflow-hidden rounded-xl border">
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead className="pl-4">Name</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="hidden md:table-cell">GPU</TableHead>
-                <TableHead className="hidden md:table-cell">Runtime</TableHead>
-                <TableHead className="text-right">Cost</TableHead>
-                <TableHead className="hidden pr-4 text-right lg:table-cell">Updated</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {!ready &&
-                [0, 1, 2].map((i) => (
-                  <TableRow key={i}>
-                    <TableCell colSpan={6} className="pl-4">
-                      <Skeleton className="h-4 w-1/3" />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              {ready && rows.length === 0 && (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={6} className="py-16 text-center">
-                    <div className="text-sm font-medium">No machines here yet</div>
-                    <div className="mt-1 text-[13px] text-muted-foreground">Describe a task in a new chat and Anywhere will plan the compute.</div>
-                  </TableCell>
-                </TableRow>
-              )}
-              {rows.map((w) => (
-                <TableRow key={String(w.id)} className="cursor-pointer" onClick={() => router.push(href(w))}>
-                  <TableCell className="max-w-0 py-3 pl-4">
-                    <div>
-                      <span className="block min-w-0">
-                        <Link href={href(w)} className="block truncate font-medium" onClick={(e) => e.stopPropagation()}>
-                          {w.title}
-                        </Link>
-                        <span className="block truncate text-xs text-muted-foreground">{w.summary}</span>
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={w.status} />
-                  </TableCell>
-                  <TableCell className="hidden text-muted-foreground md:table-cell">{w.gpuName}</TableCell>
-                  <TableCell className="hidden text-muted-foreground tabular md:table-cell">
-                    <Uptime w={w} />
-                  </TableCell>
-                  <TableCell className="text-right tabular">
-                    {w.status === "planned" ? <span className="text-muted-foreground">≤ {cents(w.estHighCents)}</span> : cents(now ? liveCents(w, now) : w.accruedCents, { precise: true })}
-                  </TableCell>
-                  <TableCell className="hidden pr-4 text-right text-muted-foreground lg:table-cell">{ago(w.updatedAt, now || undefined)}</TableCell>
-                </TableRow>
+        {!ready ? (
+          <div className="mt-8 grid grid-cols-1 gap-3 @lg:grid-cols-2 @4xl:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-44 rounded-xl" />
+            ))}
+          </div>
+        ) : workloads.length === 0 ? (
+          <div className="mt-8 flex flex-col items-center rounded-xl border border-dashed px-6 py-16 text-center">
+            <span className="mb-3 grid size-10 place-items-center rounded-xl bg-accent text-accent-foreground">
+              <Server className="size-5" />
+            </span>
+            <p className="text-sm font-medium">No machines yet</p>
+            <p className="mt-1 max-w-sm text-[13px] text-muted-foreground">Start a template or describe what you need on the home page. Anywhere plans the hardware and asks before billing.</p>
+            <Button className="mt-5" nativeButton={false} render={<Link href="/" />}>
+              <Plus /> New task
+            </Button>
+          </div>
+        ) : (
+          <>
+            <Group title="Live" empty="Nothing is running or waiting for approval." count={live.length}>
+              {live.map((w) => (
+                <MachineCard key={String(w.id)} w={w} />
               ))}
-            </TableBody>
-          </Table>
-        </div>
+            </Group>
+            {stopped.length > 0 && (
+              <Group title="Stopped" count={stopped.length} note="Files are saved; resume any time. Stopped machines don’t bill.">
+                {stopped.map((w) => (
+                  <MachineCard key={String(w.id)} w={w} />
+                ))}
+              </Group>
+            )}
+            {history.length > 0 && (
+              <section className="mt-10">
+                <h2 className="mb-3 text-sm font-semibold">History</h2>
+                <div className="overflow-hidden rounded-xl border bg-card">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="hover:bg-transparent">
+                        <TableHead className="pl-4">Name</TableHead>
+                        <TableHead>Result</TableHead>
+                        <TableHead className="hidden md:table-cell">GPU</TableHead>
+                        <TableHead className="text-right">Cost</TableHead>
+                        <TableHead className="hidden pr-4 text-right md:table-cell">Finished</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {history.map((w) => (
+                        <TableRow key={String(w.id)} className="cursor-pointer" onClick={() => router.push(href(w))}>
+                          <TableCell className="max-w-0 py-3 pl-4">
+                            <div className="truncate font-medium">{w.title}</div>
+                            <div className="truncate text-xs text-muted-foreground">{w.statusDetail || w.summary}</div>
+                          </TableCell>
+                          <TableCell>
+                            <StatusChip status={w.status} />
+                          </TableCell>
+                          <TableCell className="hidden text-muted-foreground md:table-cell">{w.gpuName}</TableCell>
+                          <TableCell className="text-right tabular">{cents(w.accruedCents, { precise: true })}</TableCell>
+                          <TableCell className="hidden pr-4 text-right text-muted-foreground md:table-cell">{ago(w.updatedAt)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </section>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-function Summary({ label, value, sub }: { label: string; value: string; sub: string }) {
+function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
-    <div className="border-r border-b p-4 md:border-b-0 [&:nth-child(2)]:border-r-0 md:[&:nth-child(2)]:border-r md:last:border-r-0 [&:nth-child(n+3)]:border-b-0">
+    <div className="rounded-xl border bg-card p-4">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1.5 text-2xl font-semibold tracking-tight tabular">{value}</div>
       <div className="mt-0.5 truncate text-xs text-muted-foreground">{sub}</div>
     </div>
+  );
+}
+
+function Group({ title, count, note, empty, children }: { title: string; count: number; note?: string; empty?: string; children: ReactNode }) {
+  return (
+    <section className="mt-10">
+      <div className="mb-3 flex items-baseline gap-2">
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <span className="text-xs text-muted-foreground tabular">{count}</span>
+        {note && <span className="ml-auto text-xs text-muted-foreground">{note}</span>}
+      </div>
+      {count === 0 && empty ? (
+        <p className="rounded-xl border border-dashed px-4 py-6 text-center text-[13px] text-muted-foreground">{empty}</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 @lg:grid-cols-2 @4xl:grid-cols-3">{children}</div>
+      )}
+    </section>
   );
 }

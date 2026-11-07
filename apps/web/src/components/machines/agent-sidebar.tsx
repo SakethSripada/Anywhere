@@ -7,8 +7,10 @@ import { Button } from "@/components/ui/button";
 import { ApiError, useApi } from "@/lib/api";
 import { tables, useTable } from "@/lib/stdb";
 import { useChat } from "@/lib/use-chat";
+import { cn } from "@/lib/utils";
 import { Composer, type ComposerHandle } from "../chat/composer";
 import { Thread } from "../chat/thread";
+import { EventFeed } from "./shared";
 
 const PROMPTS: Record<string, string[]> = {
   desktop: ["Open Blender and model a simple low-poly tree", "What’s on the screen right now?", "Save my project"],
@@ -21,6 +23,7 @@ export function AgentSidebar({ w }: { w: Workload }) {
   const { messages, pending, send } = useChat(cid, { workloadId: w.id });
   const composer = useRef<ComposerHandle>(null);
   const live = w.status === "running" || w.status === "saving";
+  const [tab, setTab] = useState<"agent" | "activity">("agent");
 
   async function submit(text: string) {
     const id = await send(text);
@@ -29,13 +32,30 @@ export function AgentSidebar({ w }: { w: Workload }) {
 
   return (
     <aside className="flex h-full min-h-0 flex-col bg-background">
-      <div className="flex h-11 shrink-0 items-center border-b px-4">
-        <span className="text-sm font-medium">Agent</span>
+      <div className="flex h-11 shrink-0 items-center gap-1 border-b px-2">
+        {(["agent", "activity"] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setTab(t)}
+            className={cn(
+              "h-7 rounded-md px-2.5 text-[13px] capitalize transition-colors",
+              tab === t ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {t}
+          </button>
+        ))}
       </div>
+      {tab === "activity" && (
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <EventFeed workloadId={w.id} />
+        </div>
+      )}
 
-      {w.kind === "desktop" && <LiveRunBanner w={w} />}
+      {tab === "agent" && w.kind === "desktop" && <LiveRunBanner w={w} />}
 
-      {messages.length === 0 && pending.length === 0 ? (
+      {tab !== "agent" ? null : messages.length === 0 && pending.length === 0 ? (
         <div className="flex min-h-0 flex-1 flex-col justify-end gap-2 p-4">
           <p className="mb-3 text-sm leading-6 text-muted-foreground">
             {w.kind === "desktop"
@@ -58,7 +78,7 @@ export function AgentSidebar({ w }: { w: Workload }) {
         <Thread messages={messages} pending={pending} compact />
       )}
 
-      <div className="shrink-0 p-3 pt-0">
+      <div className={cn("shrink-0 p-3 pt-0", tab !== "agent" && "hidden")}>
         <Composer
           ref={composer}
           compact
