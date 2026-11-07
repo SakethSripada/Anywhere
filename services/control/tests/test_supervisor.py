@@ -118,3 +118,18 @@ async def test_one_operation_per_workload(tmp_path):
     with pytest.raises(RuntimeError):
         sup.launch(w)
     await drain(sup)
+
+
+async def test_running_training_job_is_guarded_and_stoppable(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev, max_session_hours=4)
+    store.add(kind="batch", status="running", stoppable=False)
+    sup.vault.update(1, instance=instance_name(1), segment_start=ago(5 * 60).isoformat(), segment_base=0)
+    brev.instances[instance_name(1)] = "RUNNING"
+    await sup.recover()  # reattaches the training monitor
+    assert 1 in sup._monitors and not sup.busy(1)
+    await sup.tick()  # 5 h > 4 h session limit: the guard must act despite the monitor
+    await drain(sup)
+    assert store.rows[1]["status"] == "terminated"
+    assert ("delete", instance_name(1)) in brev.calls
+    assert sup._monitors.get(1) is None or sup._monitors[1].done()
