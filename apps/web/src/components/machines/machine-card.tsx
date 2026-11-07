@@ -87,7 +87,7 @@ export function MachineCard({ w }: { w: Workload }) {
   return (
     <Link
       href={href(w)}
-      className="group flex flex-col gap-3 rounded-xl border bg-card p-3 shadow-(--shadow-card) transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-foreground/15 hover:shadow-(--shadow-float)"
+      className="group flex flex-col gap-3 rounded-xl border bg-card p-3 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-foreground/15 hover:shadow-lg"
     >
       <div className="h-24">{w.kind === "desktop" ? <DesktopPreview w={w} /> : <JobPreview w={w} />}</div>
       <div className="flex items-start justify-between gap-2 px-0.5">

@@ -1,12 +1,12 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, ViewTransition, type ReactNode } from "react";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useAccount } from "@/lib/data";
 import { useSession } from "@/lib/stdb";
-import { MobileNavProvider } from "./mobile-nav";
 import { Onboarding } from "./onboarding";
-import { Sidebar } from "./sidebar";
+import { AppSidebar } from "./sidebar";
 
 export function Shell({ children }: { children: ReactNode }) {
   const session = useSession();
@@ -30,15 +30,13 @@ export function Shell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <MobileNavProvider sidebar={(close) => <Sidebar onNavigate={close} />}>
-      <div className="flex h-full bg-canvas">
-        <aside className="hidden w-[248px] shrink-0 md:block">
-          <Sidebar />
-        </aside>
-        <main className="flex min-w-0 flex-1 flex-col md:py-2 md:pr-2">
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background md:rounded-xl md:shadow-(--shadow-sheet)">{children}</div>
-        </main>
-      </div>
-    </MobileNavProvider>
+    <SidebarProvider className="h-full min-h-0">
+      <AppSidebar />
+      <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
+        <ViewTransition name="page">
+          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+        </ViewTransition>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }

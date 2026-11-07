@@ -5,123 +5,108 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Anywhere design tokens.
+ * Anywhere design tokens — infrastructure-console style.
  *
- * Cool, slightly blue-tinted neutrals; the app sits on a soft canvas with the
- * working area raised as a white "sheet". One confident accent — cobalt — marks
- * primary actions, focus and selection. Status colours carry meaning and are
- * used the same way everywhere: emerald running, cobalt in progress, amber
- * needs you, red failed, grey idle. Flat surfaces, hairline borders, small
- * shadows only where something floats. No gradients, glow or glass.
+ * Dark-first, pure neutral greys (no tint), hairline dividers, dense type.
+ * One accent, mint green, marks what is live or selected; it never fills
+ * large areas. Primary actions are monochrome pills. Flat surfaces; shadows
+ * only on things that float.
  */
 
 :root {
-  --radius: 0.625rem;
+  --radius: 0.5rem;
 
-  --canvas: #f4f5f8;
   --background: #ffffff;
-  --foreground: #0f1115;
+  --foreground: #0b0b0b;
   --card: #ffffff;
-  --card-foreground: #0f1115;
+  --card-foreground: #0b0b0b;
   --popover: #ffffff;
-  --popover-foreground: #0f1115;
-
-  --primary: #2f5bff;
+  --popover-foreground: #0b0b0b;
+  --primary: #111111;
   --primary-foreground: #ffffff;
-  --secondary: #eef0f4;
-  --secondary-foreground: #0f1115;
-  --muted: #f1f3f6;
-  --muted-foreground: #646b78;
-  --accent: #eef1fb;
-  --accent-foreground: #1f3fd1;
-  --subtle: #f7f8fa;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #111111;
+  --muted: #f4f4f4;
+  --muted-foreground: #6b6b6b;
+  --faint: #9a9a9a;
+  --accent: #f0f0f0;
+  --accent-foreground: #0b0b0b;
+  --subtle: #fafafa;
+  --border: #e8e8e8;
+  --input: #e0e0e0;
+  --ring: #16a34a;
 
-  --border: #e3e6ec;
-  --input: #dadee6;
-  --ring: #2f5bff;
-
-  --success: #0f9d63;
-  --success-soft: #e7f6ef;
+  --brand: #15924a;
+  --success: #15924a;
   --warning: #b7791f;
-  --warning-soft: #fdf4e3;
-  --destructive: #d93636;
-  --destructive-soft: #fdecec;
-  --info: #2f5bff;
-  --info-soft: #ebefff;
-  --idle-soft: #eff1f4;
+  --destructive: #d23a3a;
+  --info: #2b7fd1;
 
-  --sidebar: #f4f5f8;
-  --sidebar-foreground: #0f1115;
-  --sidebar-accent: #e8eaf0;
-  --sidebar-accent-foreground: #0f1115;
-  --sidebar-border: #e3e6ec;
-  --sidebar-primary: #2f5bff;
+  --sidebar: #fafafa;
+  --sidebar-foreground: #0b0b0b;
+  --sidebar-primary: #111111;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-ring: #2f5bff;
+  --sidebar-accent: #efefef;
+  --sidebar-accent-foreground: #0b0b0b;
+  --sidebar-border: #ebebeb;
+  --sidebar-ring: #16a34a;
 
-  --chart-1: #2f5bff;
-  --chart-2: #0f9d63;
+  --chart-1: #15924a;
+  --chart-2: #2b7fd1;
   --chart-3: #b7791f;
-  --chart-4: #8a919e;
-  --chart-5: #d93636;
+  --chart-4: #8a8a8a;
+  --chart-5: #d23a3a;
 
-  --screen: #0c0d10;
+  --screen: #0b0b0b;
 }
 
 .dark {
-  --canvas: #0a0b0e;
-  --background: #111318;
-  --foreground: #eceef2;
-  --card: #15181e;
-  --card-foreground: #eceef2;
-  --popover: #181b22;
-  --popover-foreground: #eceef2;
+  --background: #141414;
+  --foreground: #ececec;
+  --card: #181818;
+  --card-foreground: #ececec;
+  --popover: #1b1b1b;
+  --popover-foreground: #ececec;
+  --primary: #ececec;
+  --primary-foreground: #111111;
+  --secondary: #222222;
+  --secondary-foreground: #ececec;
+  --muted: #1e1e1e;
+  --muted-foreground: #9d9d9d;
+  --faint: #6e6e6e;
+  --accent: #222222;
+  --accent-foreground: #ffffff;
+  --subtle: #171717;
+  --border: #262626;
+  --input: #2f2f2f;
+  --ring: #5fd38b;
 
-  --primary: #5b7cff;
-  --primary-foreground: #ffffff;
-  --secondary: #1d2028;
-  --secondary-foreground: #eceef2;
-  --muted: #1a1d24;
-  --muted-foreground: #959cab;
-  --accent: #1c2238;
-  --accent-foreground: #a9baff;
-  --subtle: #14161c;
+  --brand: #5fd38b;
+  --success: #5fd38b;
+  --warning: #e6b450;
+  --destructive: #f06a6a;
+  --info: #6aaef0;
 
-  --border: #252932;
-  --input: #2d323c;
-  --ring: #5b7cff;
+  --sidebar: #101010;
+  --sidebar-foreground: #ececec;
+  --sidebar-primary: #ececec;
+  --sidebar-primary-foreground: #111111;
+  --sidebar-accent: #1c1c1c;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #1f1f1f;
+  --sidebar-ring: #5fd38b;
 
-  --success: #34c788;
-  --success-soft: #11291f;
-  --warning: #e0a948;
-  --warning-soft: #2b2212;
-  --destructive: #f26464;
-  --destructive-soft: #2e1617;
-  --info: #7b96ff;
-  --info-soft: #1a2140;
-  --idle-soft: #1d2028;
-
-  --sidebar: #0a0b0e;
-  --sidebar-foreground: #eceef2;
-  --sidebar-accent: #191c23;
-  --sidebar-accent-foreground: #eceef2;
-  --sidebar-border: #1d2028;
-  --sidebar-primary: #5b7cff;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-ring: #5b7cff;
-
-  --chart-1: #7b96ff;
-  --chart-2: #34c788;
-  --chart-3: #e0a948;
-  --chart-4: #6b7280;
-  --chart-5: #f26464;
+  --chart-1: #5fd38b;
+  --chart-2: #6aaef0;
+  --chart-3: #e6b450;
+  --chart-4: #7a7a7a;
+  --chart-5: #f06a6a;
 }
 
 @theme inline {
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
 
-  --color-canvas: var(--canvas);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -134,21 +119,18 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-subtle: var(--subtle);
   --color-destructive: var(--destructive);
-  --color-destructive-soft: var(--destructive-soft);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-brand: var(--brand);
   --color-success: var(--success);
-  --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
-  --color-warning-soft: var(--warning-soft);
   --color-info: var(--info);
-  --color-info-soft: var(--info-soft);
-  --color-idle-soft: var(--idle-soft);
   --color-screen: var(--screen);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
@@ -167,12 +149,8 @@
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-
-  --shadow-sheet: 0 0 0 1px var(--border), 0 1px 2px rgb(15 17 21 / 0.04), 0 4px 12px rgb(15 17 21 / 0.03);
-  --shadow-card: 0 1px 2px rgb(15 17 21 / 0.04);
-  --shadow-float: 0 0 0 1px var(--border), 0 8px 24px rgb(15 17 21 / 0.08);
+  --radius-xl: calc(var(--radius) * 1.25);
+  --radius-2xl: calc(var(--radius) * 1.5);
 }
 
 @layer base {
@@ -182,34 +160,22 @@
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv11", "ss03";
   }
   body {
-    @apply bg-canvas text-foreground text-sm;
+    @apply bg-background text-foreground text-sm;
   }
   ::selection {
-    background: color-mix(in srgb, var(--primary) 20%, transparent);
+    background: color-mix(in srgb, var(--brand) 28%, transparent);
   }
   * {
     scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--foreground) 14%, transparent) transparent;
-  }
-  .dark {
-    --shadow-sheet: 0 0 0 1px var(--border);
-    --shadow-card: none;
-    --shadow-float: 0 0 0 1px var(--border), 0 12px 32px rgb(0 0 0 / 0.45);
+    scrollbar-color: color-mix(in srgb, var(--foreground) 16%, transparent) transparent;
   }
 }
 
-/* In-progress text: a soft sheen that sweeps across the words. */
 @utility shimmer-text {
-  background: linear-gradient(
-    90deg,
-    var(--muted-foreground) 0%,
-    var(--muted-foreground) 40%,
-    var(--foreground) 50%,
-    var(--muted-foreground) 60%,
-    var(--muted-foreground) 100%
-  );
+  background: linear-gradient(90deg, var(--muted-foreground) 0%, var(--muted-foreground) 40%, var(--foreground) 50%, var(--muted-foreground) 60%, var(--muted-foreground) 100%);
   background-size: 300% 100%;
   background-clip: text;
   -webkit-background-clip: text;
@@ -226,7 +192,6 @@
   }
 }
 
-/* Indeterminate progress for things like provisioning. */
 @utility progress-indeterminate {
   position: relative;
   overflow: hidden;
@@ -236,7 +201,7 @@
     inset: 0;
     width: 35%;
     border-radius: inherit;
-    background: var(--primary);
+    background: var(--brand);
     animation: progress-slide 1.4s ease-in-out infinite;
   }
 }
@@ -262,4 +227,73 @@
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
+}
+
+/* ── Motion ────────────────────────────────────────────────────────────
+ * One easing family for the whole app: fast expo-out for things appearing,
+ * slightly quicker for things leaving. Page changes cross-fade via the View
+ * Transitions API (React <ViewTransition>); popups share the same curve.
+ */
+:root {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0s;
+}
+::view-transition-old(page) {
+  animation: vt-out 120ms var(--ease-in) both;
+}
+::view-transition-new(page) {
+  animation: vt-in 220ms var(--ease-out) both;
+}
+@keyframes vt-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes vt-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+[data-slot="dropdown-menu-content"],
+[data-slot="dropdown-menu-sub-content"],
+[data-slot="popover-content"],
+[data-slot="select-content"],
+[data-slot="hover-card-content"],
+[data-slot="tooltip-content"] {
+  animation-duration: 160ms !important;
+  animation-timing-function: var(--ease-out) !important;
+  transform-origin: var(--transform-origin);
+}
+[data-slot="dialog-content"],
+[data-slot="alert-dialog-content"] {
+  animation-duration: 220ms !important;
+  animation-timing-function: var(--ease-out) !important;
+}
+[data-slot="dialog-overlay"],
+[data-slot="alert-dialog-overlay"],
+[data-slot="sheet-overlay"] {
+  animation-duration: 200ms !important;
+}
+[data-slot="sheet-content"] {
+  transition-duration: 280ms !important;
+  transition-timing-function: var(--ease-out) !important;
+}
+[data-slot="sidebar-container"],
+[data-slot="sidebar-gap"] {
+  transition-duration: 240ms !important;
+  transition-timing-function: var(--ease-out) !important;
+}
+[data-slot="sidebar-menu-button"],
+[data-slot="table-row"],
+[data-slot="button"] {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: 150ms;
+  transition-timing-function: var(--ease-out);
 }

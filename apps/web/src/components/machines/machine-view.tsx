@@ -61,7 +61,7 @@ function Machine({ w }: { w: Workload }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Header w={w} chatOpen={chatOpen} onToggleChat={() => setChatOpen((o) => !o)} />
-      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 border-t">
+      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
         <ResizablePanel defaultSize="68%" minSize="40%">
           <div className="h-full min-h-0">{w.kind === "desktop" ? <DesktopMain w={w} /> : <JobMain w={w} />}</div>
         </ResizablePanel>
@@ -86,7 +86,7 @@ function Header({ w, chatOpen, onToggleChat }: { w: Workload; chatOpen: boolean;
   const canDelete = !["terminated", "cancelled", "planned"].includes(w.status);
 
   return (
-    <header className="flex h-13 shrink-0 items-center gap-2 px-3 sm:px-4">
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
       <MobileNavTrigger />
       <Button variant="ghost" size="icon-sm" aria-label="All machines" nativeButton={false} render={<Link href="/machines" />}>
         <ChevronLeft />
@@ -245,7 +245,7 @@ function LiveDesktop({ w }: { w: Workload }) {
       overlay={
         (working || paused || w.status === "saving") && (
           <div className="absolute inset-x-0 bottom-4 flex justify-center px-4">
-            <div className="flex max-w-xl min-w-0 items-center gap-3 rounded-full border bg-background py-1 pr-1 pl-4 shadow-(--shadow-float)">
+            <div className="flex max-w-xl min-w-0 items-center gap-3 rounded-full border bg-background py-1 pr-1 pl-4 shadow-lg">
               <span className="min-w-0 truncate text-[13px]">
                 {working ? (
                   <>

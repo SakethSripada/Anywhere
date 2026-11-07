@@ -16,7 +16,7 @@ function Booting() {
 
 export function Providers({ children }: { children: ReactNode }) {
   return (
-    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+    <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
       <StdbProvider fallback={<Booting />}>
         <TooltipProvider delay={300}>
           {children}

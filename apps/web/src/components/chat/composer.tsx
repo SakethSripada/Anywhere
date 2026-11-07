@@ -108,7 +108,7 @@ export const Composer = forwardRef<
 
   return (
     <div
-      className="w-full rounded-2xl border bg-card shadow-(--shadow-card) transition-[border-color,box-shadow] focus-within:border-primary/50 focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_14%,transparent)]"
+      className="w-full rounded-2xl border bg-card transition-[border-color,box-shadow] focus-within:border-foreground/25"
       onDragOver={(e) => allowAttachments && e.preventDefault()}
       onDrop={(e) => {
         if (!allowAttachments) return;

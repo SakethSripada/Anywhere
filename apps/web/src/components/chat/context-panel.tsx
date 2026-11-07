@@ -24,7 +24,7 @@ export function ContextPanel({ conversationId }: { conversationId: bigint | null
 
   return (
     <aside className="hidden w-[380px] shrink-0 flex-col overflow-y-auto border-l bg-subtle xl:flex">
-      <div className="flex h-13 shrink-0 items-center border-b px-5 text-sm font-medium">This task</div>
+      <div className="flex h-12 shrink-0 items-center border-b px-4 text-[13px] font-medium text-muted-foreground">This task</div>
       {items.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
           <span className="mb-3 grid size-10 place-items-center rounded-xl border bg-background text-muted-foreground">

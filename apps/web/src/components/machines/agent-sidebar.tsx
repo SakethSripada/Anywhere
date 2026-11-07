@@ -9,6 +9,7 @@ import { tables, useTable } from "@/lib/stdb";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 import { Composer, type ComposerHandle } from "../chat/composer";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Thread } from "../chat/thread";
 import { EventFeed } from "./shared";
 
@@ -32,20 +33,13 @@ export function AgentSidebar({ w }: { w: Workload }) {
 
   return (
     <aside className="flex h-full min-h-0 flex-col bg-background">
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b px-2">
-        {(["agent", "activity"] as const).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setTab(t)}
-            className={cn(
-              "h-7 rounded-md px-2.5 text-[13px] capitalize transition-colors",
-              tab === t ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            {t}
-          </button>
-        ))}
+      <div className="flex h-12 shrink-0 items-end border-b px-3">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as "agent" | "activity")} className="gap-0">
+          <TabsList variant="line" className="h-12 border-0">
+            <TabsTrigger value="agent">Agent</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
       {tab === "activity" && (
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
