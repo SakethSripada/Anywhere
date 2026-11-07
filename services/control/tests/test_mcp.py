@@ -129,6 +129,7 @@ class Harness:
         sup.remote = lambda w: None
         monkeypatch.setattr(api_module, "build", lambda s: (self.app, Agent(self.app)))
         self.api = api_module.create_app(settings)
+        self.live = False
 
     def token(self, owner=ALICE, scopes=("read", "plan", "control"), days=30):
         secret, _ = mint_token(self.app, owner, "test agent", list(scopes), days)
@@ -136,11 +137,23 @@ class Harness:
 
     @asynccontextmanager
     async def running(self):
-        async with self.api.router.lifespan_context(self.api):
+        if self.live:
             yield self
+            return
+        self.live = True
+        try:
+            async with self.api.router.lifespan_context(self.api):
+                yield self
+        finally:
+            self.live = False
 
     @asynccontextmanager
     async def client(self, token):
+        async with self.running(), self._client(token) as c:
+            yield c
+
+    @asynccontextmanager
+    async def _client(self, token):
         http = httpx2.AsyncClient(
             transport=httpx2.ASGITransport(app=self.api),
             base_url=BASE,
