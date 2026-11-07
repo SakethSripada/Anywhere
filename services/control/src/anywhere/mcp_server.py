@@ -74,6 +74,8 @@ class Principal:
     owner: str
     name: str
     scopes: frozenset[str]
+    #: Set for tokens issued through OAuth; revoking the grant revokes the token.
+    grant_id: int | None = None
 
 
 def digest(token: str) -> str:
@@ -120,8 +122,11 @@ def authenticate(app: Anywhere, authorization: str | None) -> Principal | None:
             return None
     except (KeyError, TypeError, ValueError):
         return None
+    grant_id = record.get("grant_id")
+    if grant_id is not None and not app.vault.section_get("oauth_grants", str(grant_id)):
+        return None
     _touch(app, d, record)
-    return Principal(record["id"], d, record["owner"], record["name"], frozenset(record.get("scopes", ())))
+    return Principal(record["id"], d, record["owner"], record["name"], frozenset(record.get("scopes", ())), grant_id)
 
 
 _last_touch: dict[str, float] = {}
@@ -133,7 +138,12 @@ def _touch(app: Anywhere, d: str, record: dict) -> None:
         return
     _last_touch[d] = time.monotonic()
     try:
-        app.vault.update_mcp_token(d, last_used_at=datetime.now(UTC).isoformat())
+        now = datetime.now(UTC).isoformat()
+        app.vault.update_mcp_token(d, last_used_at=now)
+        if (grant_id := record.get("grant_id")) is not None:
+            grant = app.vault.section_get("oauth_grants", str(grant_id))
+            if grant:
+                app.vault.section_put("oauth_grants", str(grant_id), {**grant, "last_used_at": now})
     except OSError as exc:
         log.warning("mcp.touch_failed", error=str(exc))
 
@@ -166,10 +176,15 @@ class McpEndpoint:
 
         principal = authenticate(app, headers.get("authorization"))
         if principal is None:
+            challenge = 'Bearer realm="anywhere", error="invalid_token"'
+            if settings.mcp_oauth_enabled:
+                from .oauth import resource_metadata_url
+
+                challenge += f', resource_metadata="{resource_metadata_url(settings.public_api_url)}"'
             return await _reject(
                 401,
-                "A valid Anywhere MCP token is required. Create one in Settings → Agents.",
-                **{"WWW-Authenticate": 'Bearer realm="anywhere", error="invalid_token"'},
+                "Sign in with OAuth, or use a token from Settings → Agents.",
+                **{"WWW-Authenticate": challenge},
             )(scope, receive, send)
 
         try:
@@ -257,14 +272,19 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
 
 
 async def _conversation(app: Anywhere, p: Principal) -> int:
-    """One conversation per token, so the user can see in the web app what the agent asked for."""
-    record = app.vault.mcp_token(p.digest) or {}
+    """One conversation per token (or per OAuth connection, whose access tokens rotate hourly),
+    so the user can see in the web app what the agent asked for."""
+    grant = app.vault.section_get("oauth_grants", str(p.grant_id)) if p.grant_id is not None else None
+    record = grant if grant is not None else (app.vault.mcp_token(p.digest) or {})
     cid = record.get("conversation_id")
     if cid:
         return int(cid)
     cid = new_id()
     await app.store.upsert_conversation(cid, p.owner, f"Agent: {p.name}"[:60], "mcp")
-    app.vault.update_mcp_token(p.digest, conversation_id=cid)
+    if grant is not None:
+        app.vault.section_put("oauth_grants", str(p.grant_id), {**grant, "conversation_id": cid})
+    else:
+        app.vault.update_mcp_token(p.digest, conversation_id=cid)
     return cid
 
 

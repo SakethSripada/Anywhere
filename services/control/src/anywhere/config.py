@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     mcp_enabled: bool = True
     mcp_max_tokens_per_account: int = 10
     mcp_max_token_days: int = 365
+    #: OAuth sign-in for MCP clients (claude.ai connectors, Claude Code). Needs public_api_url.
+    mcp_oauth_enabled: bool = True
+    #: Where clients reach this service: the OAuth issuer, and `/mcp` under it is the resource.
+    #: Behind Caddy that's https://$DOMAIN/api.
+    public_api_url: str = "http://localhost:8000"
 
     # Desktop environment
     desktop_image: str = "ghcr.io/trycua/linux:24.04"

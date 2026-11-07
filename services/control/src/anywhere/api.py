@@ -11,6 +11,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import AsyncExitStack, asynccontextmanager
+from urllib.parse import urlparse
 
 import structlog
 import websockets
@@ -30,6 +31,8 @@ from .ids import new_id
 from .lifecycle import Status
 from .llm import ModelUnavailable
 from .mcp_server import DEFAULT_SCOPES, SCOPES, McpEndpoint, build_server, mint_token, public_token
+from .oauth import AnywhereOAuth, grants_for
+from .oauth import routes as oauth_routes
 from .photon import PhotonClient, PhotonError, normalize_phone
 from .stdb import ReducerRejected, SpacetimeClient
 from .storage import Storage, StorageUnavailable, safe_filename
@@ -111,6 +114,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     api.include_router(_routes())
     api.router.routes.append(Route("/mcp", McpEndpoint(), methods=["GET", "POST", "DELETE"]))
+    api.state.oauth = None
+    if settings.mcp_enabled and settings.mcp_oauth_enabled:
+        provider = AnywhereOAuth(api)
+        try:
+            api.router.routes.extend(oauth_routes(api, provider, settings.public_api_url))
+            api.state.oauth = provider
+        except ValueError as exc:
+            # A bad PUBLIC_API_URL (say, plain HTTP on a public host) disables OAuth, not the service.
+            settings.mcp_oauth_enabled = False
+            log.warning("startup.oauth_disabled", reason=str(exc), public_api_url=settings.public_api_url)
     return api
 
 
@@ -192,6 +205,11 @@ class McpTokenIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_SCOPES), min_length=1, max_length=len(SCOPES))
     expires_days: int = Field(default=90, ge=1)
+
+
+class OAuthDecisionIn(BaseModel):
+    approve: bool
+    scopes: list[str] | None = Field(default=None, max_length=len(SCOPES))
 
 
 class InboundIn(BaseModel):
@@ -400,6 +418,61 @@ def _routes():
         if not app.vault.delete_mcp_token(owner, token_id):
             raise HTTPException(404, "Token not found")
         log.info("mcp.token_revoked", token=token_id, owner=owner[:12])
+        return {"ok": True}
+
+    # OAuth consent and connected apps ---------------------------------------
+    # The /connect page in the web app calls these with the browser identity.
+
+    def _oauth(request: Request) -> AnywhereOAuth:
+        provider = request.app.state.oauth
+        if provider is None:
+            raise HTTPException(404, "OAuth sign-in is turned off on this server")
+        return provider
+
+    @r.get("/v1/oauth/requests/{request_id}")
+    async def oauth_request(request_id: str, request: Request, owner: str = Identity):
+        record = _oauth(request).pending(request_id)
+        if not record:
+            raise HTTPException(404, "This sign-in request has expired. Start again from your app.")
+        return {
+            "client_name": record["client_name"],
+            "redirect_host": urlparse(record["redirect_uri"]).netloc,
+            "scopes": record["scopes"],
+            "scope_help": SCOPES,
+        }
+
+    @r.post("/v1/oauth/requests/{request_id}/decision")
+    async def oauth_decision(
+        request_id: str,
+        body: OAuthDecisionIn,
+        request: Request,
+        owner: str = Identity,
+        app: Anywhere = Depends(anywhere),
+    ):
+        provider = _oauth(request)
+        rate_limit(f"oauth-decision:{owner}", 10)
+        if body.approve:
+            acct = await app.account(owner)
+            if not acct["activated"]:
+                raise ActionError("Activate your account before connecting apps")
+        return {"redirect": provider.decide(request_id, owner, body.approve, body.scopes)}
+
+    @r.get("/v1/oauth/grants")
+    async def list_grants(owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        return {
+            "grants": [
+                {k: g.get(k) for k in ("id", "client_name", "scopes", "created_at", "last_used_at")}
+                for g in grants_for(app.vault, owner)
+            ]
+        }
+
+    @r.delete("/v1/oauth/grants/{grant_id}")
+    async def revoke_grant(grant_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        grant = app.vault.section_get("oauth_grants", str(grant_id))
+        if not grant or grant["owner"] != owner:
+            raise HTTPException(404, "Connection not found")
+        app.vault.drop_grant(grant_id)
+        log.info("oauth.grant_revoked", grant=grant_id, owner=owner[:12])
         return {"ok": True}
 
     # Messaging -------------------------------------------------------------
