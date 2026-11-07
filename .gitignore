@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.venv/
+__pycache__/
+*.pyc
+
+# Builds
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env & secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state
+*.db
+*.sqlite
+.data/
+.pytest_cache/
+.ruff_cache/
+.vitest/
+coverage/
+.DS_Store
+
+# Tooling
+.vscode/
+.idea/
+.claude/

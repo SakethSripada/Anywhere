@@ -1,0 +1,7 @@
+packages:
+  - apps/*
+  - spacetime/*
+  - services/messaging
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
