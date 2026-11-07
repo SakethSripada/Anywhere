@@ -10,7 +10,7 @@ import json
 import secrets
 import time
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import structlog
 import websockets
@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
+from starlette.routing import Route
 
 from . import budget
 from .agent import Agent, TurnContext
@@ -28,6 +29,7 @@ from .core import ActionError, Anywhere, parse_link_code
 from .ids import new_id
 from .lifecycle import Status
 from .llm import ModelUnavailable
+from .mcp_server import DEFAULT_SCOPES, SCOPES, McpEndpoint, build_server, mint_token, public_token
 from .photon import PhotonClient, PhotonError, normalize_phone
 from .stdb import ReducerRejected, SpacetimeClient
 from .storage import Storage, StorageUnavailable, safe_filename
@@ -68,15 +70,20 @@ async def lifespan(api: FastAPI):
     api.state.agent = agent
     api.state.ticket_key = secrets.token_bytes(32)
     await agent.start()
-    if settings.stdb_ready:
-        await app.supervisor.recover()
-        app.supervisor.start_guard()
-    else:
-        log.warning("startup.spacetime_unconfigured", hint="Set SPACETIME_WORKER_TOKEN; see README")
-    log.info("startup.ready", integrations=settings.integrations(), mode=settings.provisioning_mode.value)
-    yield
-    await app.supervisor.shutdown()
-    await agent.close()
+    async with AsyncExitStack() as stack:
+        if settings.mcp_enabled:
+            # The SDK's session manager runs once per instance, so each lifespan builds its own.
+            api.state.mcp = build_server()
+            await stack.enter_async_context(api.state.mcp.session_manager.run())
+        if settings.stdb_ready:
+            await app.supervisor.recover()
+            app.supervisor.start_guard()
+        else:
+            log.warning("startup.spacetime_unconfigured", hint="Set SPACETIME_WORKER_TOKEN; see README")
+        log.info("startup.ready", integrations=settings.integrations(), mode=settings.provisioning_mode.value)
+        yield
+        await app.supervisor.shutdown()
+        await agent.close()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -103,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
     api.include_router(_routes())
+    api.router.routes.append(Route("/mcp", McpEndpoint(), methods=["GET", "POST", "DELETE"]))
     return api
 
 
@@ -178,6 +186,12 @@ class UploadIn(BaseModel):
 
 class LinkIn(BaseModel):
     phone: str = Field(min_length=7, max_length=24)
+
+
+class McpTokenIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_SCOPES), min_length=1, max_length=len(SCOPES))
+    expires_days: int = Field(default=90, ge=1)
 
 
 class InboundIn(BaseModel):
@@ -352,6 +366,41 @@ def _routes():
             raise HTTPException(404, "File not found")
         url = app.storage.presign_get(key, filename=key.rsplit("/", 1)[-1] if download else None)
         return RedirectResponse(url) if download else {"url": url}
+
+    # MCP tokens ------------------------------------------------------------
+    # Managed only with a browser identity: an MCP token can never mint or list tokens.
+
+    @r.get("/v1/mcp/tokens")
+    async def list_mcp_tokens(owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        tokens = sorted(app.vault.mcp_tokens_for(owner), key=lambda t: t["created_at"], reverse=True)
+        return {"tokens": [public_token(t) for t in tokens], "scopes": SCOPES}
+
+    @r.post("/v1/mcp/tokens")
+    async def create_mcp_token(body: McpTokenIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"mcp-token:{owner}", 5)
+        s = app.settings
+        if not s.mcp_enabled:
+            raise HTTPException(404, "MCP is turned off on this server")
+        acct = await app.account(owner)
+        if not acct["activated"]:
+            raise ActionError("Activate your account before connecting agents")
+        unknown = set(body.scopes) - SCOPES.keys()
+        if unknown:
+            raise HTTPException(422, f"Unknown permission: {', '.join(sorted(unknown))}")
+        if body.expires_days > s.mcp_max_token_days:
+            raise HTTPException(422, f"Tokens can last at most {s.mcp_max_token_days} days")
+        if len(app.vault.mcp_tokens_for(owner)) >= s.mcp_max_tokens_per_account:
+            raise ActionError("You have too many agent tokens. Revoke one first.")
+        secret, token = mint_token(app, owner, body.name.strip(), body.scopes, body.expires_days)
+        log.info("mcp.token_created", token=token["id"], owner=owner[:12], scopes=token["scopes"])
+        return {"token": secret, **token}
+
+    @r.delete("/v1/mcp/tokens/{token_id}")
+    async def revoke_mcp_token(token_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        if not app.vault.delete_mcp_token(owner, token_id):
+            raise HTTPException(404, "Token not found")
+        log.info("mcp.token_revoked", token=token_id, owner=owner[:12])
+        return {"ok": True}
 
     # Messaging -------------------------------------------------------------
 

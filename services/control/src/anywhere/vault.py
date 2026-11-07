@@ -55,3 +55,35 @@ class Vault:
     def upload(self, upload_id: int) -> dict[str, Any] | None:
         with self._lock:
             return self._data.get("uploads", {}).get(str(upload_id))
+
+    # MCP access tokens, keyed by the SHA-256 of the secret. The secret itself is never stored.
+    def put_mcp_token(self, digest: str, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._data.setdefault("mcp_tokens", {})[digest] = record
+            self._flush()
+
+    def mcp_token(self, digest: str) -> dict[str, Any] | None:
+        with self._lock:
+            record = self._data.get("mcp_tokens", {}).get(digest)
+            return dict(record) if record else None
+
+    def mcp_tokens_for(self, owner: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._data.get("mcp_tokens", {}).values() if r["owner"] == owner]
+
+    def update_mcp_token(self, digest: str, **values: Any) -> None:
+        with self._lock:
+            record = self._data.get("mcp_tokens", {}).get(digest)
+            if record:
+                record.update(values)
+                self._flush()
+
+    def delete_mcp_token(self, owner: str, token_id: int) -> bool:
+        with self._lock:
+            tokens = self._data.get("mcp_tokens", {})
+            digest = next((d for d, r in tokens.items() if r["owner"] == owner and r["id"] == token_id), None)
+            if digest is None:
+                return False
+            del tokens[digest]
+            self._flush()
+            return True

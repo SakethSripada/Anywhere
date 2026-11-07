@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     #: Shared secret the messaging bridge uses to call this service.
     messaging_bridge_secret: SecretStr | None = None
 
+    # MCP server for external agents (Claude, Cursor, …). Tokens are minted per account in Settings.
+    mcp_enabled: bool = True
+    mcp_max_tokens_per_account: int = 10
+    mcp_max_token_days: int = 365
+
     # Desktop environment
     desktop_image: str = "ghcr.io/trycua/linux:24.04"
     blender_version: str = "4.5.15"
