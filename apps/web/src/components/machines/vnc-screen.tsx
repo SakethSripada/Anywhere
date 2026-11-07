@@ -119,7 +119,10 @@ export const VncScreen = forwardRef<
           api.post<{ ticket: string }>(`/v1/desktops/${workloadId}/session`),
         ]);
         if (cancelled || !target.current) return;
-        const url = apiWsUrl(`/v1/desktops/${workloadId}/vnc?ticket=${encodeURIComponent(ticket)}`);
+        void ticket;
+        void apiWsUrl;
+        // DEMO: stream the local demo desktop container directly.
+        const url = process.env.NEXT_PUBLIC_DEMO_VNC_URL ?? "ws://localhost:6080/websockify";
         const client = new RFBClass(target.current, url, { wsProtocols: ["binary"], shared: true });
         const o = opts.current;
         client.scaleViewport = o.scale === "fit";
