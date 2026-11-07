@@ -92,6 +92,14 @@ class Store:
     async def finish_agent_run(self, id: int, status: str, result: str) -> None:
         await self.client.call("finish_agent_run", id, status, result)
 
+    async def agent_runs(self, workload_id: int) -> list[dict]:
+        rows = await self.client.sql("SELECT * FROM worker_agent_runs")
+        return sorted((r for r in rows if r["workloadId"] == workload_id), key=lambda r: r["startedAt"], reverse=True)
+
+    async def agent_steps(self, run_id: int) -> list[dict]:
+        rows = await self.client.sql("SELECT * FROM worker_agent_steps")
+        return sorted((r for r in rows if r["runId"] == run_id), key=lambda r: r["seq"])
+
     # ── Files ─────────────────────────────────────────────────────────────
     async def upsert_project(
         self, id: int, owner: str, name: str, app: str, prefix: str, size: int, saved: bool

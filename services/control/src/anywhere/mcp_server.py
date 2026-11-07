@@ -27,7 +27,7 @@ from typing import Annotated, Any, Literal
 import httpx
 import structlog
 from fastapi import HTTPException
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
@@ -36,7 +36,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
-from . import budget
+from . import budget, desktop
 from .core import ActionError, Anywhere
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
@@ -300,6 +300,36 @@ def _workload_view(app: Anywhere, w: dict) -> dict[str, Any]:
     return view
 
 
+async def _agent_history(app: Anywhere, workload_id: int, steps: int = 15) -> dict | None:
+    """The latest desktop-agent run and its last few steps. History is best-effort: an older
+    database without the worker views still answers get_workload, just without it."""
+    try:
+        runs = await app.store.agent_runs(workload_id)
+        if not runs:
+            return None
+        latest = runs[0]
+        rows = await app.store.agent_steps(int(latest["id"]))
+    except (SpacetimeError, httpx.HTTPError) as exc:
+        log.info("mcp.agent_history_unavailable", error=str(exc)[:200])
+        return None
+    return {
+        "run_id": int(latest["id"]),
+        "goal": latest["goal"],
+        "status": latest["status"],
+        "result": latest.get("result") or "",
+        "total_runs": len(runs),
+        "steps": [
+            {
+                "seq": int(r["seq"]),
+                "kind": r["kind"],
+                "summary": r["summary"],
+                "has_screenshot": bool(r["screenshotKey"]),
+            }
+            for r in rows[-steps:]
+        ],
+    }
+
+
 async def _owned(app: Anywhere, p: Principal, workload_id: int) -> dict:
     return await app.owned(p.owner, workload_id)
 
@@ -392,7 +422,7 @@ def build_server() -> MCPServer:
 
     @server.tool(title="Machine status", annotations=read)
     async def get_workload(ctx: Context, workload_id: WorkloadId) -> dict:
-        """Get one machine's status, spend, and whether the desktop agent is working on it."""
+        """Get one machine's status and spend, plus what the desktop agent did in its latest run."""
 
         async def run(app: Anywhere, p: Principal):
             w = await _owned(app, p, workload_id)
@@ -400,9 +430,33 @@ def build_server() -> MCPServer:
             view["controller"] = w.get("controller", "")
             view["agent_running"] = app.supervisor.agent_running(int(w["id"]))
             view["busy"] = app.supervisor.busy(int(w["id"]))
+            view["agent"] = await _agent_history(app, int(w["id"]))
             return view
 
         return await _call(ctx, "read", "get_workload", run, limit=120)
+
+    @server.tool(title="Desktop screenshot", annotations=read)
+    async def get_desktop_screenshot(ctx: Context, workload_id: WorkloadId) -> Image:
+        """Take a live screenshot of a running desktop, to see what's on screen right now.
+
+        MCP can't carry the live video stream; for that, open the desktop's web_url."""
+
+        async def run(app: Anywhere, p: Principal):
+            w = await _owned(app, p, workload_id)
+            if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
+                raise ActionError("Screenshots need a running desktop")
+            try:
+                async with desktop.connect_screen(app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))) as sc:
+                    png = await asyncio.wait_for(sc.screenshot(), 20)
+                frame = await asyncio.to_thread(desktop.prepare_frame, png)
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                log.warning("mcp.screenshot_failed", workload=workload_id, error=str(exc)[:300])
+                raise ActionError("Couldn't reach the desktop to take a screenshot. Try again in a moment.") from exc
+            return Image(data=frame.jpeg, format="jpeg")
+
+        return await _call(ctx, "read", "get_desktop_screenshot", run, limit=10)
 
     @server.tool(title="Propose a machine", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def propose_workload(ctx: Context, request: ProposeIn) -> dict:

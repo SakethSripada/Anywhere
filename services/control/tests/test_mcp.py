@@ -1,5 +1,7 @@
 """The MCP server, end to end: real HTTP through the auth layer, the real SDK client, fake backends."""
 
+import base64
+import io
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -9,8 +11,10 @@ import pytest
 from fastapi.testclient import TestClient
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from PIL import Image as PILImage
 
 import anywhere.api as api_module
+import anywhere.desktop as desktop_module
 from anywhere.agent import Agent
 from anywhere.auth import current_identity
 from anywhere.config import ProvisioningMode, Settings
@@ -35,6 +39,9 @@ class McpStore(FakeStore):
         self.conversations: dict[int, dict] = {}
         self.messages: list[dict] = []
         self.fail_with: Exception | None = None
+        self.fail_history = False
+        self.runs: list[dict] = []
+        self.steps: list[dict] = []
 
     async def workloads(self):
         if self.fail_with:
@@ -52,6 +59,15 @@ class McpStore(FakeStore):
 
     async def append_message(self, conversation_id, role, kind, body, workload_id=0, channel="web"):
         self.messages.append({"cid": conversation_id, "kind": kind, "body": body, "channel": channel})
+
+    async def agent_runs(self, workload_id):
+        if self.fail_history:
+            raise SpacetimeError("sql failed (400): no such view worker_agent_runs")
+        runs = [r for r in self.runs if r["workloadId"] == workload_id]
+        return sorted(runs, key=lambda r: r["startedAt"], reverse=True)
+
+    async def agent_steps(self, run_id):
+        return [s for s in self.steps if s["runId"] == run_id]
 
     async def set_controller(self, workload_id, controller):
         self.rows[workload_id]["controller"] = controller
@@ -110,6 +126,7 @@ class Harness:
         sup.launch = lambda w: self.launched.append(w["id"])
         sup.stop = lambda w, reason="": self.stopped.append(w["id"])
         sup.terminate = lambda w, reason="": self.deleted.append(w["id"])
+        sup.remote = lambda w: None
         monkeypatch.setattr(api_module, "build", lambda s: (self.app, Agent(self.app)))
         self.api = api_module.create_app(settings)
 
@@ -235,6 +252,7 @@ async def test_lists_tools_with_honest_annotations(h):
         "get_catalog",
         "list_workloads",
         "get_workload",
+        "get_desktop_screenshot",
         "propose_workload",
         "cancel_plan",
         "approve_workload",
@@ -245,7 +263,7 @@ async def test_lists_tools_with_honest_annotations(h):
         "operate_desktop",
         "stop_desktop_agent",
     }
-    for name in ("get_account", "get_catalog", "list_workloads", "get_workload"):
+    for name in ("get_account", "get_catalog", "list_workloads", "get_workload", "get_desktop_screenshot"):
         assert tools[name].annotations.read_only_hint
     assert tools["delete_workload"].annotations.destructive_hint
     assert "money" in tools["approve_workload"].description
@@ -298,6 +316,72 @@ async def test_spend_permission_approves_and_leaves_an_audit_trail(h):
         assert again.is_error and "already" in text(again)
     assert h.launched == [result["workload_id"]]
     assert any("approved the plan" in m["body"] and m["channel"] == "mcp" for m in h.store.messages)
+
+
+async def test_status_includes_the_latest_agent_run(h):
+    h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
+    h.store.runs = [
+        {"id": 1, "workloadId": 11, "goal": "Old goal", "status": "succeeded", "result": "", "startedAt": 1},
+        {"id": 2, "workloadId": 11, "goal": "Make a low-poly tree", "status": "running", "result": "", "startedAt": 2},
+    ]
+    h.store.steps = [
+        {"runId": 2, "seq": i, "kind": "act", "summary": f"step {i}", "screenshotKey": "k" if i % 2 else ""}
+        for i in range(20)
+    ]
+    async with h.running(), h.client(h.token()) as c:
+        agent = data(await c.call_tool("get_workload", {"workload_id": 11}))["agent"]
+        assert agent["run_id"] == 2 and agent["goal"] == "Make a low-poly tree" and agent["total_runs"] == 2
+        assert [s["seq"] for s in agent["steps"]] == list(range(5, 20))
+        assert agent["steps"][0]["has_screenshot"]
+        # A database without the history views still answers, just without history.
+        h.store.fail_history = True
+        assert data(await c.call_tool("get_workload", {"workload_id": 11}))["agent"] is None
+
+
+def _png(width=1920, height=1080) -> bytes:
+    buf = io.BytesIO()
+    PILImage.new("RGB", (width, height), (40, 90, 160)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def test_screenshots_of_running_desktops(h, monkeypatch):
+    h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
+    h.store.add(id=12, owner=ALICE, status="stopped", conversationId=1)
+    calls = []
+
+    class Screen:
+        async def screenshot(self):
+            return _png()
+
+    @asynccontextmanager
+    async def connect(remote, token):
+        calls.append(token)
+        yield Screen()
+
+    monkeypatch.setattr(desktop_module, "connect_screen", connect)
+    async with h.running(), h.client(h.token(scopes=("read",))) as c:
+        shot = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
+        assert not shot.is_error, text(shot)
+        (image,) = shot.content
+        assert image.mime_type == "image/jpeg"
+        assert PILImage.open(io.BytesIO(base64.b64decode(image.data))).width == 1280
+        stopped = await c.call_tool("get_desktop_screenshot", {"workload_id": 12})
+        assert stopped.is_error and "running desktop" in text(stopped)
+    assert len(calls) == 1
+
+
+async def test_unreachable_desktops_fail_politely(h, monkeypatch):
+    h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
+
+    @asynccontextmanager
+    async def connect(remote, token):
+        raise OSError("ssh: connect to host 10.0.0.7 port 22: Connection refused")
+        yield
+
+    monkeypatch.setattr(desktop_module, "connect_screen", connect)
+    async with h.running(), h.client(h.token()) as c:
+        shot = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
+    assert shot.is_error and "Couldn't reach the desktop" in text(shot) and "10.0.0.7" not in text(shot)
 
 
 async def test_deleting_needs_explicit_confirmation(h):
