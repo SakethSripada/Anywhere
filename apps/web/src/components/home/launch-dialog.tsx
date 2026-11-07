@@ -140,7 +140,7 @@ export function LaunchDialog({ template, onOpenChange }: { template: Template | 
                           e.preventDefault();
                           pick(e.dataTransfer.files);
                         }}
-                        className="flex flex-col items-center gap-1.5 rounded-lg border border-dashed px-4 py-6 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:bg-accent/40 hover:text-foreground"
+                        className="flex flex-col items-center gap-1.5 rounded-lg border border-dashed border-input px-4 py-6 text-sm text-muted-foreground transition-colors hover:border-foreground/40 hover:bg-accent/50 hover:text-foreground"
                       >
                         <Upload className="size-4" />
                         Drop a file or click to upload
@@ -216,7 +216,7 @@ function Choice({ value, onChange, options }: { value: string; onChange: (v: str
   return (
     <ToggleGroup value={[value]} onValueChange={(v) => v[0] && onChange(String(v[0]))} variant="outline" className="w-fit">
       {options.map((o) => (
-        <ToggleGroupItem key={o.value} value={o.value} className="px-3 data-[pressed]:bg-accent data-[pressed]:text-accent-foreground">
+        <ToggleGroupItem key={o.value} value={o.value} className="px-3 text-muted-foreground data-[pressed]:border-foreground/50 data-[pressed]:bg-secondary data-[pressed]:text-foreground">
           {o.label}
         </ToggleGroupItem>
       ))}
