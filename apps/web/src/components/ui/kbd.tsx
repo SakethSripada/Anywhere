@@ -1,16 +1,26 @@
-import { cn } from "@/lib/cn";
+import { cn } from "@/lib/utils"
 
-export function Kbd({ children, className }: { children: React.ReactNode; className?: string }) {
+function Kbd({ className, ...props }: React.ComponentProps<"kbd">) {
   return (
     <kbd
+      data-slot="kbd"
       className={cn(
-        "inline-flex h-[18px] min-w-[18px] items-center justify-center gap-0.5 rounded-[5px] px-1",
-        "bg-white/[0.06] font-sans text-2xs font-medium text-fg-subtle",
-        "shadow-[inset_0_-1px_0_0_oklch(1_0_0/0.06)]",
-        className,
+        "pointer-events-none inline-flex h-5 w-fit min-w-5 items-center justify-center gap-1 rounded-sm bg-muted px-1 font-sans text-xs font-medium text-muted-foreground select-none in-data-[slot=tooltip-content]:bg-background/20 in-data-[slot=tooltip-content]:text-background dark:in-data-[slot=tooltip-content]:bg-background/10 [&_svg:not([class*='size-'])]:size-3",
+        className
       )}
-    >
-      {children}
-    </kbd>
-  );
+      {...props}
+    />
+  )
 }
+
+function KbdGroup({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <kbd
+      data-slot="kbd-group"
+      className={cn("inline-flex items-center gap-1", className)}
+      {...props}
+    />
+  )
+}
+
+export { Kbd, KbdGroup }

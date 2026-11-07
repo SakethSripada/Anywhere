@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # Service
     environment: str = "development"
-    public_web_origin: str = "http://localhost:3000"
+    public_web_origin: str = "http://localhost:3001"
     data_dir: Path = Path(".data")
     log_level: str = "INFO"
 
@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     blender_version: str = "4.5.15"
     desktop_resolution: str = "1600x900"
 
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3001"])
 
     @property
     def stdb_ready(self) -> bool:

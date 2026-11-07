@@ -59,8 +59,8 @@ export function liveCents(w: Workload, now = Date.now()): number {
   return Math.max(w.accruedCents, Math.round(w.accruedCents + extra));
 }
 
-export function href(w: Pick<Workload, "id" | "kind">): string {
-  return w.kind === "desktop" ? `/desktops/${w.id}` : `/workloads/${w.id}`;
+export function href(w: Pick<Workload, "id">): string {
+  return `/w/${w.id}`;
 }
 
 export function byRecent<T extends { updatedAt?: { toMillis(): bigint }; createdAt: { toMillis(): bigint } }>(

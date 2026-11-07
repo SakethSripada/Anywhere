@@ -1,221 +1,203 @@
 "use client";
 
+import { ChevronsUpDown, Moon, Plus, Settings, Sun, SunMoon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTheme } from "next-themes";
 import { Suspense, type ReactNode } from "react";
-import { cn } from "@/lib/cn";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Progress } from "@/components/ui/progress";
 import { useAccount, useConversations, useMonthSpend, usePlatform, useWorkloads } from "@/lib/data";
 import { cents } from "@/lib/format";
-import { BILLABLE } from "@/lib/workloads";
-import {
-  IconAgent,
-  IconDesktop,
-  IconMessage,
-  IconPlus,
-  IconSettings,
-  IconWorkload,
-  IconWorkspace,
-  Mark,
-} from "../icons";
-import { Kbd } from "../ui/kbd";
-import { Meter } from "../ui/meter";
-import { Dot } from "../ui/status";
-import { Tooltip } from "../ui/tooltip";
+import { cn } from "@/lib/utils";
+import { ACTIVE, href, statusMeta } from "@/lib/workloads";
+import { Logo } from "./logo";
 
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   return (
-    <nav className="flex h-full w-full flex-col gap-1 px-2.5 pt-3 pb-2.5">
-      <div className="flex h-8 items-center gap-2 px-1.5">
-        <Mark size={18} className="text-fg" />
-        <span className="text-md font-semibold tracking-tighter text-fg">Anywhere</span>
-        <ModeBadge />
+    <nav className="flex h-full flex-col bg-sidebar text-sidebar-foreground">
+      <div className="flex h-13 shrink-0 items-center justify-between px-4">
+        <Link href="/" onClick={onNavigate}>
+          <Logo />
+        </Link>
+        <ModeLabel />
       </div>
-
-      <Link
-        href="/"
-        onClick={onNavigate}
-        className={cn(
-          "group mt-3 mb-2 flex h-8 items-center gap-2 rounded-md bg-raised px-2.5 text-sm font-medium text-fg",
-          "shadow-[inset_0_1px_0_0_oklch(1_0_0/0.06),0_0_0_1px_var(--color-line-strong),0_1px_2px_oklch(0_0_0/0.3)]",
-          "transition-[background-color,transform] duration-150 hover:bg-overlay active:translate-y-px focus-ring",
-        )}
-      >
-        <IconPlus size={15} className="text-fg-muted transition-transform duration-200 ease-spring group-hover:rotate-90" />
-        New task
-        <Kbd className="ml-auto">N</Kbd>
-      </Link>
-
-      <Suspense fallback={<NavSkeleton />}>
-        <NavLinks onNavigate={onNavigate} />
+      <div className="px-2 pb-2">
+        <Link
+          href="/"
+          onClick={onNavigate}
+          className="flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-sm transition-colors hover:bg-sidebar-accent"
+        >
+          <span className="grid size-5 place-items-center rounded-full bg-foreground text-background">
+            <Plus className="size-3.5" strokeWidth={2.25} />
+          </span>
+          New chat
+        </Link>
+      </div>
+      <Suspense fallback={<div className="flex-1" />}>
+        <Lists onNavigate={onNavigate} />
       </Suspense>
-
-      <div className="mt-auto flex flex-col gap-2">
-        <SpendCard />
-      </div>
+      <AccountMenu onNavigate={onNavigate} />
     </nav>
   );
 }
 
-function NavSkeleton() {
+function Row({ href: to, active, children, onClick, trailing }: { href: string; active: boolean; children: ReactNode; onClick?: () => void; trailing?: ReactNode }) {
   return (
-    <div className="flex flex-col gap-0.5">
-      {[0, 1, 2, 3].map((i) => (
-        <div key={i} className="h-8 rounded-md px-2 py-2">
-          <div className="skeleton h-4 w-24" />
-        </div>
-      ))}
+    <Link
+      href={to}
+      onClick={onClick}
+      prefetch={false}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "flex h-8 items-center gap-2 rounded-lg px-2.5 text-[13.5px] text-foreground/85 transition-colors hover:bg-sidebar-accent hover:text-foreground",
+        active && "bg-sidebar-accent text-foreground",
+      )}
+    >
+      <span className="min-w-0 flex-1 truncate">{children}</span>
+      {trailing}
+    </Link>
+  );
+}
+
+function Lists({ onNavigate }: { onNavigate?: () => void }) {
+  const pathname = usePathname();
+  const { workloads } = useWorkloads();
+  const { conversations } = useConversations();
+  const machines = workloads.filter((w) => ACTIVE.has(w.status) || w.status === "stopped" || w.status === "planned").slice(0, 6);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-2 pt-2 pb-4">
+      <section>
+        <Heading href="/machines" active={pathname.startsWith("/machines")} onClick={onNavigate}>
+          Machines
+        </Heading>
+        {machines.length === 0 ? (
+          <p className="px-2.5 py-1 text-[13px] text-muted-foreground">Nothing running</p>
+        ) : (
+          machines.map((w) => {
+            const m = statusMeta(w.status);
+            return (
+              <Row
+                key={String(w.id)}
+                href={href(w)}
+                active={pathname === href(w)}
+                onClick={onNavigate}
+                trailing={
+                  <span className={cn("shrink-0 text-xs", m.live && w.status !== "running" ? "shimmer-text" : "text-muted-foreground")}>
+                    {w.status === "running" ? "Running" : w.status === "planned" ? "Plan" : m.label}
+                  </span>
+                }
+              >
+                {w.title}
+              </Row>
+            );
+          })
+        )}
+      </section>
+      {conversations.length > 0 && (
+        <section>
+          <div className="px-2.5 pb-1 text-xs text-muted-foreground">Chats</div>
+          {conversations.slice(0, 40).map((c) => (
+            <Row key={String(c.id)} href={`/c/${c.id}`} active={pathname === `/c/${c.id}`} onClick={onNavigate}>
+              {c.title || "Untitled"}
+            </Row>
+          ))}
+        </section>
+      )}
     </div>
   );
 }
 
-function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
-  const pathname = usePathname();
-  const { workloads } = useWorkloads();
-  const { conversations } = useConversations();
-  const runningDesktops = workloads.filter((w) => w.kind === "desktop" && BILLABLE.has(w.status)).length;
-  const activeJobs = workloads.filter((w) => w.kind === "batch" && BILLABLE.has(w.status)).length;
-
-  const isActive = (href: string) =>
-    href === "/" ? pathname === "/" || pathname.startsWith("/c/") : pathname.startsWith(href);
-
-  return (
-    <>
-      <div className="flex flex-col gap-px">
-        <NavItem href="/" icon={<IconWorkspace />} active={isActive("/")} onClick={onNavigate}>
-          Workspace
-        </NavItem>
-        <NavItem href="/desktops" icon={<IconDesktop />} active={isActive("/desktops")} onClick={onNavigate} live={runningDesktops}>
-          Desktops
-        </NavItem>
-        <NavItem href="/workloads" icon={<IconWorkload />} active={isActive("/workloads")} onClick={onNavigate} live={activeJobs}>
-          Workloads
-        </NavItem>
-        <NavItem href="/settings" icon={<IconSettings />} active={isActive("/settings")} onClick={onNavigate}>
-          Settings
-        </NavItem>
-      </div>
-
-      {conversations.length > 0 && (
-        <div className="mt-5 flex min-h-0 flex-1 flex-col">
-          <div className="px-2 pb-1.5 text-2xs font-medium uppercase tracking-[0.06em] text-fg-faint">Recent</div>
-          <div className="-mx-1 flex min-h-0 flex-col gap-px overflow-y-auto px-1 [mask-image:linear-gradient(to_bottom,black_calc(100%-24px),transparent)] pb-6">
-            {conversations.slice(0, 30).map((c) => {
-              const href = `/c/${c.id}`;
-              const active = pathname === href;
-              return (
-                <Link
-                  key={String(c.id)}
-                  href={href}
-                  onClick={onNavigate}
-                  prefetch={false}
-                  className={cn(
-                    "group flex h-7 shrink-0 items-center gap-2 rounded-md px-2 text-sm text-fg-subtle outline-none",
-                    "transition-colors duration-100 hover:bg-hover hover:text-fg-muted focus-ring",
-                    active && "bg-selected text-fg hover:bg-selected hover:text-fg",
-                  )}
-                >
-                  <span className="min-w-0 flex-1 truncate">{c.title || "Untitled"}</span>
-                  {c.channel === "imessage" && (
-                    <Tooltip content="From iMessage">
-                      <span className="text-fg-faint">
-                        <IconMessage size={13} />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {c.channel === "mcp" && (
-                    <Tooltip content="From a connected agent">
-                      <span className="text-fg-faint">
-                        <IconAgent size={13} />
-                      </span>
-                    </Tooltip>
-                  )}
-                </Link>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-function NavItem({
-  href,
-  icon,
-  active,
-  children,
-  onClick,
-  live,
-}: {
-  href: string;
-  icon: ReactNode;
-  active: boolean;
-  children: ReactNode;
-  onClick?: () => void;
-  live?: number;
-}) {
+function Heading({ href: to, active, onClick, children }: { href: string; active: boolean; onClick?: () => void; children: ReactNode }) {
   return (
     <Link
-      href={href}
+      href={to}
       onClick={onClick}
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "group flex h-8 items-center gap-2.5 rounded-md px-2 text-sm font-medium text-fg-subtle outline-none",
-        "transition-colors duration-100 hover:bg-hover hover:text-fg-muted focus-ring",
-        "[&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-fg-faint [&>svg]:transition-colors hover:[&>svg]:text-fg-subtle",
-        active && "bg-selected text-fg hover:bg-selected hover:text-fg [&>svg]:text-fg-muted hover:[&>svg]:text-fg-muted",
-      )}
+      className={cn("flex items-center justify-between rounded-md px-2.5 pb-1 text-xs text-muted-foreground transition-colors hover:text-foreground", active && "text-foreground")}
     >
-      {icon}
       {children}
-      {!!live && (
-        <span className="ml-auto flex items-center gap-1.5 text-2xs text-ok tabular">
-          <Dot tone="ok" live />
-          {live}
-        </span>
-      )}
+      <span className="text-[11px]">View all</span>
     </Link>
   );
 }
 
-function ModeBadge() {
+function ModeLabel() {
   const { platform } = usePlatform();
   const mode = platform?.provisioningMode;
   if (!mode || mode === "live") return null;
-  return (
-    <Tooltip content={mode === "dry_run" ? "Plans are validated with Brev but nothing is billed" : "Provisioning is off — plans only"}>
-      <span className="ml-auto rounded-[5px] bg-wait-soft px-1.5 py-0.5 text-2xs font-medium text-wait">
-        {mode === "dry_run" ? "Dry run" : "Plans only"}
-      </span>
-    </Tooltip>
-  );
+  return <span className="text-xs text-muted-foreground">{mode === "dry_run" ? "Dry run" : "Plans only"}</span>;
 }
 
-function SpendCard() {
+function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
   const { account } = useAccount();
   const spent = useMonthSpend();
-  const cap = account?.monthlyCapCents ?? 0;
+  const { theme, setTheme } = useTheme();
+  if (!account) return null;
+  const cap = account.monthlyCapCents;
+
   return (
-    <Link
-      href="/settings"
-      className="group block rounded-lg px-2.5 py-2.5 outline-none transition-colors duration-100 hover:bg-hover focus-ring"
-    >
-      <div className="flex items-baseline justify-between">
-        <span className="text-xs text-fg-subtle">This month</span>
-        <span className="tabular text-xs text-fg-muted">
-          <span className="font-medium text-fg">{cents(spent)}</span>
-          {cap > 0 && <span className="text-fg-faint"> / {cents(cap)}</span>}
-        </span>
-      </div>
-      <Meter value={spent} max={cap || 1} className="mt-2" />
-      {account && (
-        <div className="mt-2.5 flex items-center gap-2">
-          <span className="grid size-5 place-items-center rounded-full bg-accent-soft text-2xs font-semibold text-accent">
+    <div className="p-2">
+      <DropdownMenu>
+        <DropdownMenuTrigger className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors outline-none hover:bg-sidebar-accent data-[popup-open]:bg-sidebar-accent">
+          <span className="grid size-7 shrink-0 place-items-center rounded-full bg-muted text-xs font-medium">
             {account.displayName.slice(0, 1).toUpperCase()}
           </span>
-          <span className="min-w-0 flex-1 truncate text-xs text-fg-muted group-hover:text-fg">{account.displayName}</span>
-        </div>
-      )}
-    </Link>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13.5px]">{account.displayName}</span>
+            <span className="block truncate text-xs text-muted-foreground tabular">{cents(spent)} spent this month</span>
+          </span>
+          <ChevronsUpDown className="size-3.5 text-muted-foreground" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="start" className="w-(--anchor-width) min-w-60">
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="space-y-2 py-2 font-normal">
+              <span className="flex justify-between text-xs text-muted-foreground">
+                <span>Monthly spend</span>
+                <span className="tabular">
+                  {cents(spent)} of {cents(cap)}
+                </span>
+              </span>
+              <Progress value={cap ? Math.min(100, (spent / cap) * 100) : 0} className="h-1" />
+            </DropdownMenuLabel>
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem render={<Link href="/settings" onClick={onNavigate} />}>
+            <Settings /> Settings
+          </DropdownMenuItem>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <SunMoon /> Appearance
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuRadioGroup value={theme ?? "system"} onValueChange={(v) => setTheme(String(v))}>
+                <DropdownMenuRadioItem value="light">
+                  <Sun /> Light
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="dark">
+                  <Moon /> Dark
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="system">
+                  <SunMoon /> System
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }

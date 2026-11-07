@@ -857,6 +857,32 @@ export const workerOutbox = spacetimedb.view(
   (ctx) => (isWorker(ctx) ? [...ctx.db.notification.status.filter("pending")] : []),
 );
 
+/* Read-side for the agent's `inspect_workload` tool. */
+
+export const workerEvents = spacetimedb.view(
+  { name: "worker_events", public: true },
+  t.array(workloadEvent.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.workloadEvent.iter()] : []),
+);
+
+export const workerLogs = spacetimedb.view(
+  { name: "worker_logs", public: true },
+  t.array(logChunk.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.logChunk.iter()] : []),
+);
+
+export const workerMetrics = spacetimedb.view(
+  { name: "worker_metrics", public: true },
+  t.array(metricPoint.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.metricPoint.iter()] : []),
+);
+
+export const workerArtifacts = spacetimedb.view(
+  { name: "worker_artifacts", public: true },
+  t.array(artifact.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.artifact.iter()] : []),
+);
+
 export const workerAgentRuns = spacetimedb.view(
   { name: "worker_agent_runs", public: true },
   t.array(agentRun.rowType),

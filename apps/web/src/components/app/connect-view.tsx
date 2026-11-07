@@ -1,16 +1,27 @@
 "use client";
 
+import { Bot, CircleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, useApi } from "@/lib/api";
-import { cn } from "@/lib/cn";
-import { IconAgent, IconAlert, IconCheck } from "../icons";
-import { Button } from "../ui/button";
-import { Spinner } from "../ui/spinner";
-import { Card, Stage } from "./onboarding";
+import { PermissionSwitches } from "./agent-access";
+import { Logo } from "./logo";
 
 type Pending = { client_name: string; redirect_host: string; scopes: string[]; scope_help: Record<string, string> };
 
-const LABELS: Record<string, string> = { read: "View", plan: "Plan", control: "Control", spend: "Spend" };
+function Stage({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-4 py-10">
+      <div className="mb-8 flex items-center gap-2">
+        <Logo className="size-6" />
+        <span className="text-lg font-semibold tracking-tight">Anywhere</span>
+      </div>
+      <div className="w-full max-w-[400px]">{children}</div>
+    </div>
+  );
+}
 
 /** OAuth consent: an MCP client (claude.ai, Claude Code, …) asks to act on this account. */
 export function ConnectView({ requestId }: { requestId: string | null }) {
@@ -30,7 +41,7 @@ export function ConnectView({ requestId }: { requestId: string | null }) {
         // Spending is opt-in even when the app asks for it.
         setChosen(p.scopes.filter((s) => s !== "spend"));
       },
-      (err) => live && setError(err instanceof ApiError ? err.message : "Couldn't load this request."),
+      (err) => live && setError(err instanceof ApiError ? err.message : "Couldn’t load this request."),
     );
     return () => {
       live = false;
@@ -55,10 +66,13 @@ export function ConnectView({ requestId }: { requestId: string | null }) {
   if (error) {
     return (
       <Stage>
-        <Card icon={<IconAlert size={16} className="text-bad" />} title="Can't connect" body={error}>
-          <Button variant="secondary" className="w-full" onClick={() => window.close()}>
-            Close
-          </Button>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <CircleAlert className="size-4 text-destructive" /> Can’t connect
+            </CardTitle>
+            <CardDescription>{error}</CardDescription>
+          </CardHeader>
         </Card>
       </Stage>
     );
@@ -67,61 +81,36 @@ export function ConnectView({ requestId }: { requestId: string | null }) {
   if (!pending) {
     return (
       <Stage>
-        <Spinner size={18} />
+        <Skeleton className="h-72 w-full rounded-xl" />
       </Stage>
     );
   }
 
   return (
     <Stage>
-      <Card
-        icon={<IconAgent size={16} className="text-accent" />}
-        title={`Connect ${pending.client_name}?`}
-        body={`It will be able to use Anywhere on your behalf. You'll be sent back to ${pending.redirect_host}.`}
-      >
-        <div className="flex flex-col gap-2" role="group" aria-label="Permissions">
-          {pending.scopes.map((s) => {
-            const on = chosen.includes(s);
-            return (
-              <button
-                key={s}
-                type="button"
-                aria-pressed={on}
-                onClick={() => setChosen(on ? chosen.filter((x) => x !== s) : [...chosen, s])}
-                className={cn(
-                  "flex items-start gap-3 rounded-lg px-3 py-2.5 text-left outline-none transition-[box-shadow,background-color] duration-150 focus-ring",
-                  on ? "bg-accent-soft shadow-[inset_0_0_0_1px_var(--color-accent-line)]" : "shadow-[inset_0_0_0_1px_var(--color-line-strong)] hover:bg-hover",
-                )}
-              >
-                <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-sm", on ? "bg-accent text-fg-inverse" : "shadow-[inset_0_0_0_1px_var(--color-line-strong)]")}>
-                  {on && <IconCheck size={11} />}
-                </span>
-                <span>
-                  <span className="block text-sm font-medium text-fg">{LABELS[s] ?? s}</span>
-                  <span className="block text-xs text-fg-subtle">{pending.scope_help[s] ?? s}</span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        {chosen.includes("spend") && (
-          <p className="mt-3 text-xs text-wait">This app could approve plans and resume machines on its own, up to your monthly cap.</p>
-        )}
-        <div className="mt-5 flex gap-2">
-          <Button variant="ghost" className="flex-1" loading={busy === "deny"} disabled={!!busy} onClick={() => void decide(false)}>
-            Deny
-          </Button>
-          <Button
-            variant="primary"
-            className="flex-1"
-            loading={busy === "approve"}
-            disabled={!!busy || chosen.length === 0}
-            onClick={() => void decide(true)}
-          >
-            Allow
-          </Button>
-        </div>
-        <p className="mt-4 text-center text-2xs text-fg-faint">You can disconnect it any time in Settings → Agents.</p>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Bot className="size-4" /> Connect {pending.client_name}?
+          </CardTitle>
+          <CardDescription>
+            It will be able to use Anywhere on your behalf. Afterwards you’ll be sent back to {pending.redirect_host}.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <PermissionSwitches scopes={pending.scopes} chosen={chosen} help={pending.scope_help} onChange={setChosen} />
+        </CardContent>
+        <CardFooter className="flex-col gap-3">
+          <div className="flex w-full gap-2">
+            <Button variant="outline" className="flex-1" disabled={!!busy} onClick={() => void decide(false)}>
+              {busy === "deny" ? "Denying…" : "Deny"}
+            </Button>
+            <Button className="flex-1" disabled={!!busy || chosen.length === 0} onClick={() => void decide(true)}>
+              {busy === "approve" ? "Connecting…" : "Allow"}
+            </Button>
+          </div>
+          <p className="text-center text-xs text-muted-foreground">You can disconnect it any time in Settings → Agents.</p>
+        </CardFooter>
       </Card>
     </Stage>
   );

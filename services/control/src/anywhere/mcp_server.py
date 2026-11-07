@@ -312,7 +312,7 @@ def _workload_view(app: Anywhere, w: dict) -> dict[str, Any]:
         "estimate_high": budget.usd(int(w.get("estHighCents") or 0)),
         "billing": status in BILLABLE,
         "needs_approval": status == Status.PLANNED,
-        "web_url": f"{app.settings.public_web_origin.rstrip('/')}/{'desktops' if w['kind'] == 'desktop' else 'workloads'}/{w['id']}",
+        "web_url": f"{app.settings.public_web_origin.rstrip('/')}/w/{w['id']}",
     }
     created = w.get("createdAt")
     if isinstance(created, datetime):

@@ -180,6 +180,8 @@ def read_ticket(key: bytes, ticket: str) -> dict | None:
 class ChatIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     conversation_id: int | None = None
+    #: Chatting from a desktop or job page: the agent focuses on that workload.
+    workload_id: int | None = None
     upload_ids: list[int] = Field(default_factory=list, max_length=4)
 
 
@@ -258,8 +260,17 @@ def _routes():
     async def chat(body: ChatIn, request: Request, owner: str = Identity, app: Anywhere = Depends(anywhere)):
         rate_limit(f"chat:{owner}", 20)
         await app.account(owner)
-        cid = body.conversation_id or new_id()
-        if body.conversation_id is None:
+        cid = body.conversation_id
+        if body.workload_id is not None:
+            # A workload's sidebar continues the conversation that created it.
+            w = await app.owned(owner, body.workload_id)
+            cid = int(w["conversationId"]) or app.vault.get(0).get(f"workload-chat:{w['id']}")
+            if not cid:
+                cid = new_id()
+                await app.store.upsert_conversation(cid, owner, w["title"], "web")
+                app.vault.update(0, **{f"workload-chat:{w['id']}": cid})
+        elif cid is None:
+            cid = new_id()
             await app.store.upsert_conversation(cid, owner, _title(body.text), "web")
         text = body.text.strip()
         for uid in body.upload_ids:
@@ -272,7 +283,7 @@ def _routes():
                 )
         await app.store.append_message(cid, "user", "text", text, 0, "web")
         agent: Agent = request.app.state.agent
-        asyncio.create_task(_agent_turn(app, agent, TurnContext(owner, cid, "web"), text))
+        asyncio.create_task(_agent_turn(app, agent, TurnContext(owner, cid, "web", body.workload_id), text))
         return {"conversation_id": cid}
 
     # Workloads -------------------------------------------------------------

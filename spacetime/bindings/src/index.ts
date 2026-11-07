@@ -249,6 +249,10 @@ const tablesSchema = __schema({
   workerAccounts: __table({ name: "worker_accounts", indexes: [], constraints: [] }, AccountRow),
   workerHandles: __table({ name: "worker_handles", indexes: [], constraints: [] }, LinkedHandleRow),
   workerOutbox: __table({ name: "worker_outbox", indexes: [], constraints: [] }, NotificationRow),
+  workerEvents: __table({ name: "worker_events", indexes: [], constraints: [] }, WorkloadEventRow),
+  workerLogs: __table({ name: "worker_logs", indexes: [], constraints: [] }, LogChunkRow),
+  workerMetrics: __table({ name: "worker_metrics", indexes: [], constraints: [] }, MetricPointRow),
+  workerArtifacts: __table({ name: "worker_artifacts", indexes: [], constraints: [] }, ArtifactRow),
   workerAgentRuns: __table({ name: "worker_agent_runs", indexes: [], constraints: [] }, AgentRunRow),
   workerAgentSteps: __table({ name: "worker_agent_steps", indexes: [], constraints: [] }, AgentStepRow),
 });

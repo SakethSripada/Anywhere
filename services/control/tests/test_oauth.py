@@ -45,7 +45,7 @@ async def register(c, redirect=REDIRECT) -> str:
     return res.json()["client_id"]
 
 
-async def start(c, client_id, challenge, scope="read plan control spend") -> str:
+async def start(h, c, client_id, challenge, scope="read plan control spend") -> str:
     res = await c.get(
         "/authorize",
         params={
@@ -60,7 +60,8 @@ async def start(c, client_id, challenge, scope="read plan control spend") -> str
     )
     assert res.status_code == 302, res.text
     target = urlparse(res.headers["location"])
-    assert f"{target.scheme}://{target.netloc}{target.path}" == "http://localhost:3000/connect", res.headers["location"]
+    web = h.app.settings.public_web_origin
+    assert f"{target.scheme}://{target.netloc}{target.path}" == f"{web}/connect", res.headers["location"]
     return parse_qs(target.query)["request"][0]
 
 
@@ -85,10 +86,10 @@ async def exchange(c, client_id, code, verifier):
     )
 
 
-async def sign_in(c, scopes=None):
+async def sign_in(h, c, scopes=None):
     client_id = await register(c)
     verifier, challenge = pkce()
-    code = await approve(c, await start(c, client_id, challenge), scopes)
+    code = await approve(c, await start(h, c, client_id, challenge), scopes)
     res = await exchange(c, client_id, code, verifier)
     assert res.status_code == 200, res.text
     return client_id, res.json()
@@ -149,7 +150,7 @@ async def test_full_sign_in_with_narrowed_permissions(h):
     async with http(h) as c:
         client_id = await register(c)
         verifier, challenge = pkce()
-        request_id = await start(c, client_id, challenge)
+        request_id = await start(h, c, client_id, challenge)
         shown = (await c.get(f"/v1/oauth/requests/{request_id}")).json()
         assert shown["client_name"] == "Claude" and shown["redirect_host"] == "localhost:33418"
         assert shown["scopes"] == ["control", "plan", "read", "spend"]
@@ -179,14 +180,14 @@ async def test_wrong_pkce_verifier_is_refused(h):
     async with http(h) as c:
         client_id = await register(c)
         _, challenge = pkce()
-        code = await approve(c, await start(c, client_id, challenge))
+        code = await approve(c, await start(h, c, client_id, challenge))
         assert (await exchange(c, client_id, code, "not-the-verifier-" + "x" * 40)).status_code == 400
 
 
 async def test_denying_sends_the_user_back_with_an_error(h):
     async with http(h) as c:
         client_id = await register(c)
-        request_id = await start(c, client_id, pkce()[1])
+        request_id = await start(h, c, client_id, pkce()[1])
         res = await c.post(f"/v1/oauth/requests/{request_id}/decision", json={"approve": False})
         query = parse_qs(urlparse(res.json()["redirect"]).query)
         assert query["error"] == ["access_denied"] and query["state"] == ["st4te"]
@@ -211,7 +212,7 @@ async def test_unknown_scopes_and_inactive_accounts_are_refused(h):
             },
         )
         assert "invalid_scope" in res.headers.get("location", res.text)
-        request_id = await start(c, client_id, pkce()[1])
+        request_id = await start(h, c, client_id, pkce()[1])
         assert (await c.post(f"/v1/oauth/requests/{request_id}/decision", json={"approve": True})).status_code == 409
 
 
@@ -224,7 +225,7 @@ async def refresh(c, client_id, token):
 
 async def test_refresh_tokens_rotate(h):
     async with http(h) as c:
-        client_id, first = await sign_in(c)
+        client_id, first = await sign_in(h, c)
         second = await refresh(c, client_id, first["refresh_token"])
         assert second.status_code == 200, second.text
         assert second.json()["access_token"] != first["access_token"]
@@ -238,7 +239,7 @@ async def test_refresh_tokens_rotate(h):
 
 async def test_revoking_a_connection_cuts_off_its_tokens(h):
     async with http(h) as c:
-        client_id, tokens = await sign_in(c)
+        client_id, tokens = await sign_in(h, c)
         (grant,) = (await c.get("/v1/oauth/grants")).json()["grants"]
         assert (
             await c.post("/mcp", headers={"Authorization": f"Bearer {tokens['access_token']}"}, json={})
@@ -253,7 +254,7 @@ async def test_revoking_a_connection_cuts_off_its_tokens(h):
 
 async def test_users_cannot_revoke_each_others_connections(h):
     async with http(h, BOB) as c:
-        await sign_in(c)
+        await sign_in(h, c)
         (grant,) = (await c.get("/v1/oauth/grants")).json()["grants"]
     async with http(h, ALICE) as c:
         assert (await c.get("/v1/oauth/grants")).json()["grants"] == []
@@ -262,7 +263,7 @@ async def test_users_cannot_revoke_each_others_connections(h):
 
 async def test_oauth_revocation_endpoint(h):
     async with http(h) as c:
-        client_id, tokens = await sign_in(c)
+        client_id, tokens = await sign_in(h, c)
         # The SDK requires the client_secret field even for public clients, so send it empty.
         res = await c.post(
             "/revoke", data={"token": tokens["refresh_token"], "client_id": client_id, "client_secret": ""}
@@ -276,7 +277,7 @@ async def test_oauth_revocation_endpoint(h):
 
 async def test_oauth_connections_share_one_conversation(h):
     async with http(h) as c:
-        client_id, first = await sign_in(c)
+        client_id, first = await sign_in(h, c)
         second = (await refresh(c, client_id, first["refresh_token"])).json()
     for token in (first["access_token"], second["access_token"]):
         async with h.client(token) as m:

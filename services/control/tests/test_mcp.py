@@ -221,7 +221,7 @@ async def test_foreign_origins_are_refused(h):
     async with h.running():
         evil = await h.raw({"Authorization": f"Bearer {token}", "Origin": "https://evil.example"})
         assert evil.status_code == 403
-        ours = await h.raw({"Authorization": f"Bearer {token}", "Origin": "http://localhost:3000"})
+        ours = await h.raw({"Authorization": f"Bearer {token}", "Origin": h.app.settings.public_web_origin})
         assert ours.status_code == 200
 
 

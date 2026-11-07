@@ -1,99 +1,57 @@
-"use client";
+import { Button as ButtonPrimitive } from "@base-ui/react/button"
+import { cva, type VariantProps } from "class-variance-authority"
+import { cn } from "@/lib/utils"
 
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { cn } from "@/lib/cn";
-import { Spinner } from "./spinner";
+const buttonVariants = cva(
+  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground hover:bg-primary/80",
+        outline:
+          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+        secondary:
+          "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
+        ghost:
+          "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
+        destructive:
+          "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default:
+          "h-8 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
+        xs: "h-6 gap-1 rounded-[min(var(--radius-md),10px)] px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
+        sm: "h-7 gap-1 rounded-[min(var(--radius-md),12px)] px-2.5 text-[0.8rem] in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3.5",
+        lg: "h-9 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
+        icon: "size-8",
+        "icon-xs":
+          "size-6 rounded-[min(var(--radius-md),10px)] in-data-[slot=button-group]:rounded-lg [&_svg:not([class*='size-'])]:size-3",
+        "icon-sm":
+          "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
+        "icon-lg": "size-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
 
-type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline";
-type Size = "xs" | "sm" | "md" | "lg";
-
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: Variant;
-  size?: Size;
-  loading?: boolean;
-  leading?: ReactNode;
-  trailing?: ReactNode;
+function Button({
+  className,
+  variant = "default",
+  size = "default",
+  ...props
+}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+  return (
+    <ButtonPrimitive
+      data-slot="button"
+      className={cn(buttonVariants({ variant, size, className }))}
+      {...props}
+    />
+  )
 }
 
-const base =
-  "group/button relative inline-flex shrink-0 select-none items-center justify-center gap-1.5 whitespace-nowrap font-medium " +
-  "transition-[background-color,box-shadow,color,transform,opacity] duration-150 ease-out " +
-  "focus-ring active:not-disabled:translate-y-px disabled:pointer-events-none disabled:opacity-45";
-
-const variants: Record<Variant, string> = {
-  primary:
-    "bg-accent text-accent-fg shadow-[inset_0_1px_0_0_oklch(1_0_0/0.28),inset_0_-1px_0_0_oklch(0_0_0/0.12),0_1px_2px_oklch(0_0_0/0.35)] " +
-    "hover:bg-accent-hover",
-  secondary:
-    "bg-raised text-fg shadow-[inset_0_1px_0_0_oklch(1_0_0/0.06),0_0_0_1px_var(--color-line-strong),0_1px_2px_oklch(0_0_0/0.3)] " +
-    "hover:bg-overlay",
-  outline: "text-fg-muted shadow-[0_0_0_1px_var(--color-line-strong)] hover:bg-hover hover:text-fg",
-  ghost: "text-fg-muted hover:bg-hover hover:text-fg active:bg-press",
-  danger:
-    "bg-bad-soft text-bad shadow-[0_0_0_1px_color-mix(in_oklch,var(--color-bad)_30%,transparent)] hover:bg-bad/20",
-};
-
-const sizes: Record<Size, string> = {
-  xs: "h-6 rounded-sm px-2 text-xs [&_svg]:size-3.5",
-  sm: "h-7 rounded-md px-2.5 text-sm [&_svg]:size-3.5",
-  md: "h-8 rounded-md px-3 text-sm [&_svg]:size-4",
-  lg: "h-10 rounded-lg px-4 text-base [&_svg]:size-4",
-};
-
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "secondary", size = "md", loading, leading, trailing, className, children, disabled, ...props },
-  ref,
-) {
-  return (
-    <button
-      ref={ref}
-      type="button"
-      className={cn(base, variants[variant], sizes[size], className)}
-      disabled={disabled || loading}
-      aria-busy={loading || undefined}
-      {...props}
-    >
-      <span className={cn("contents", loading && "invisible")}>
-        {leading}
-        {children}
-        {trailing}
-      </span>
-      {loading && (
-        <span className="absolute inset-0 grid place-items-center">
-          <Spinner size={14} />
-        </span>
-      )}
-    </button>
-  );
-});
-
-export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  label: string;
-  size?: "xs" | "sm" | "md";
-  variant?: "ghost" | "secondary";
-}
-
-export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { label, size = "sm", variant = "ghost", className, children, ...props },
-  ref,
-) {
-  return (
-    <button
-      ref={ref}
-      type="button"
-      aria-label={label}
-      className={cn(
-        base,
-        variant === "ghost" ? variants.ghost : variants.secondary,
-        size === "xs" && "size-6 rounded-sm [&_svg]:size-3.5",
-        size === "sm" && "size-7 rounded-md [&_svg]:size-4",
-        size === "md" && "size-8 rounded-md [&_svg]:size-4",
-        "data-[popup-open]:bg-selected data-[popup-open]:text-fg",
-        className,
-      )}
-      {...props}
-    >
-      {children}
-    </button>
-  );
-});
+export { Button, buttonVariants }
