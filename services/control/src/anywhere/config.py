@@ -19,7 +19,8 @@ class ProvisioningMode(StrEnum):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+    # `KEY=` (as in .env.example) means "not set", not an empty secret that counts as configured.
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore", env_ignore_empty=True)
 
     # Service
     environment: str = "development"
