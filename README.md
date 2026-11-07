@@ -100,6 +100,7 @@ What the control plane does:
 | S3 projects, uploads, artifacts | Built | Needs bucket credentials (R2 recommended) |
 | LoRA/QLoRA training job, metrics, artifacts | **Tested** | Config and dataset inspection tested; GPU run pending |
 | Photon iMessage bridge (inbound, outbound, linking) | Built | Typechecks; needs a Photon project |
+| MCP server for external agents, scoped tokens | **Tested** | 22 pytest tests over real HTTP with the SDK client; smoke-tested against a local server |
 | Docker images and Compose | **Verified** | Images build locally |
 
 **Not supported yet:** Windows-only apps (Roblox Studio and others), Unity/Unreal (Linux builds are untested), inference/API deployment, render farms, multi-GPU jobs, and providers other than Brev.
@@ -169,6 +170,37 @@ pnpm -r typecheck && pnpm --filter web lint
 
 ---
 
+## Using Anywhere from Claude and other agents (MCP)
+
+The control plane is also an [MCP](https://modelcontextprotocol.io) server at `/mcp` (`https://$DOMAIN/api/mcp` behind Caddy). Any MCP client that speaks Streamable HTTP can plan, run and operate machines with it.
+
+1. In **Settings → Agents**, create a token and choose its permissions. The token is shown once.
+2. Add the server to your client. For Claude Code:
+   ```bash
+   claude mcp add --transport http anywhere https://$DOMAIN/api/mcp \
+     --header "Authorization: Bearer awmcp_…"
+   ```
+
+| Permission | Tools |
+|---|---|
+| `read` | `get_account`, `get_catalog`, `list_workloads`, `get_workload` |
+| `plan` | `propose_workload`, `cancel_plan` |
+| `control` | `stop_workload`, `save_project`, `delete_workload` (needs `confirm: true`), `operate_desktop`, `stop_desktop_agent` |
+| `spend` | `approve_workload`, `resume_desktop` |
+
+New tokens get `read`, `plan` and `control`. **Without `spend`, an agent can't start anything that bills:** its plans skip your auto-approve threshold and wait for you to approve them in the web app. Every plan and action an agent takes shows up in an "Agent: <token name>" conversation.
+
+How it's secured:
+- Tokens are bound to one account and stored only as SHA-256 hashes in the control plane's vault. They expire (90 days by default, at most `MCP_MAX_TOKEN_DAYS`), and revoking one takes effect on the next request.
+- Tokens can only be created, listed or revoked with a browser identity, so an MCP token can't mint more tokens.
+- The server runs stateless, so every request is authenticated on its own. Requests with a foreign `Origin` are refused (DNS rebinding and CSRF), bodies are capped at 256 KB, and each token is rate-limited per permission.
+- Tool calls go through the same `Anywhere` methods as the web app, so ownership, lifecycle and budget rules apply unchanged. Calls are capped at 45 s, and errors come back as short messages without internals. Details go to the server log.
+- `MCP_ENABLED=false` turns the endpoint off.
+
+Not yet: OAuth (needed to add Anywhere as a claude.ai connector), live desktop streaming over MCP, and agent step history in `get_workload`, which needs a `worker_*` view for agent runs.
+
+---
+
 ## Environment variables
 
 `deploy/.env.example` lists every option. The main ones:
@@ -187,6 +219,7 @@ pnpm -r typecheck && pnpm --filter web lint
 | `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | control | Durable storage for projects, datasets and outputs |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | control, bridge | Photon project |
 | `MESSAGING_BRIDGE_SECRET` | control, bridge | Shared secret for `/v1/bridge/inbound` |
+| `MCP_ENABLED`, `MCP_MAX_TOKENS_PER_ACCOUNT`, `MCP_MAX_TOKEN_DAYS` | control | MCP server switch and token limits |
 
 ---
 
