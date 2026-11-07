@@ -109,7 +109,7 @@ What the control plane does:
 
 ## Running locally
 
-Prerequisites: Node 22 with pnpm 10, Python 3.13 with [uv](https://docs.astral.sh/uv/), and Docker.
+Prerequisites: Node 22.12 or newer with pnpm 10 (older Node can't load Tailwind's dev build), Python 3.13 with [uv](https://docs.astral.sh/uv/), and Docker.
 
 ```bash
 pnpm install
