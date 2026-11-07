@@ -10,6 +10,7 @@ chat survives restarts and continues seamlessly across web and iMessage.
 from __future__ import annotations
 
 import json
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from . import budget, llm
 from .core import ActionError, Anywhere
+from .ids import new_id
 from .lifecycle import BILLABLE
 from .planner import Intent
 
@@ -48,7 +50,8 @@ Rules:
 - When the user asks for something to be done inside a running desktop, use operate_desktop with a
   precise, self-contained goal. Don't narrate each click; the user can watch.
 - Ask a clarifying question only when you truly can't proceed.
-{channel_rules}
+- To answer questions about a machine or job (progress, errors, outputs), call inspect_workload first.
+{channel_rules}{focus}
 Current state:
 {state}"""
 
@@ -74,6 +77,70 @@ class TurnContext:
     owner: str
     conversation_id: int
     channel: str  # "web" | "imessage"
+    #: Set when the user is chatting from a desktop or job page.
+    focus_workload_id: int | None = None
+
+
+FOCUS = """
+The user is chatting from the page of workload #{id} ("{title}", a {kind}, currently {status}).
+"this", "it", "the desktop" or "the job" mean that workload. Use its id for tools without asking."""
+
+
+def _failed(output: str) -> bool:
+    try:
+        data = json.loads(output)
+        return isinstance(data, dict) and data.get("ok") is False
+    except (TypeError, ValueError):
+        return output.startswith(("Could not", "Tool failed"))
+
+
+def _recorded(app: Anywhere, ctx: TurnContext, tool: StructuredTool) -> StructuredTool:
+    """Mirror each tool call into the conversation so every client can render it live.
+
+    A `tool_call` message is posted when the call starts and a `tool_result`
+    with the same call id when it ends. Recording never breaks the turn.
+    """
+    inner = tool.coroutine
+
+    async def post(kind: str, body: dict, workload_id: int) -> None:
+        try:
+            await app.store.append_message(
+                ctx.conversation_id, "assistant", kind, json.dumps(body, default=str), workload_id, ctx.channel
+            )
+        except Exception as exc:
+            log.warning("agent.tool_record_failed", tool=tool.name, error=str(exc))
+
+    async def run(**kwargs) -> str:
+        call_id = new_id()
+        workload_id = int(kwargs.get("workload_id") or ctx.focus_workload_id or 0)
+        await post("tool_call", {"call_id": call_id, "name": tool.name, "args": kwargs}, workload_id)
+        started = time.monotonic()
+        try:
+            output = await inner(**kwargs)
+        except Exception as exc:
+            output = f"Tool failed: {exc.__class__.__name__}: {exc}"
+        try:
+            parsed = json.loads(output)
+            if isinstance(parsed, dict) and parsed.get("workload_id"):
+                workload_id = int(parsed["workload_id"])
+        except (TypeError, ValueError):
+            pass
+        await post(
+            "tool_result",
+            {
+                "call_id": call_id,
+                "name": tool.name,
+                "ok": not _failed(output),
+                "output": output[:6000],
+                "ms": round((time.monotonic() - started) * 1000),
+            },
+            workload_id,
+        )
+        return output
+
+    return StructuredTool.from_function(
+        coroutine=run, name=tool.name, description=tool.description, args_schema=tool.args_schema
+    )
 
 
 def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
@@ -124,11 +191,50 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
     async def operate_desktop(workload_id: int, goal: str) -> str:
         try:
             run_id = await app.operate(ctx.owner, workload_id, goal)
-            return f"The desktop agent started (run {run_id}). It will report back when finished."
+            return json.dumps(
+                {
+                    "ok": True,
+                    "run_id": run_id,
+                    "workload_id": workload_id,
+                    "message": "The desktop agent started. It reports back when finished; the user can watch live.",
+                }
+            )
         except (ActionError, RuntimeError) as exc:
-            return f"Could not start the desktop agent: {exc}"
+            return json.dumps({"ok": False, "message": f"Could not start the desktop agent: {exc}"})
 
-    return [
+    async def inspect_workload(workload_id: int) -> str:
+        try:
+            w = await app.owned(ctx.owner, workload_id)
+        except ActionError as exc:
+            return json.dumps({"ok": False, "message": str(exc)})
+        t = await app.store.telemetry(workload_id)
+        logs = "".join(c["text"] for c in sorted(t["logs"], key=lambda c: c["id"]))[-2500:]
+        latest: dict[str, dict] = {}
+        for p in sorted(t["metrics"], key=lambda p: p["step"]):
+            latest[p["name"]] = {"step": p["step"], "value": round(float(p["value"]), 5)}
+        runs = sorted(t["agent_runs"], key=lambda r: r["startedAt"], reverse=True)[:2]
+        return json.dumps(
+            {
+                "ok": True,
+                "workload_id": w["id"],
+                "title": w["title"],
+                "kind": w["kind"],
+                "status": w["status"],
+                "detail": w["statusDetail"],
+                "gpu": w["gpuName"],
+                "spent": budget.usd(int(w["accruedCents"])),
+                "estimate": f"{budget.usd(int(w['estLowCents']))}-{budget.usd(int(w['estHighCents']))}",
+                "controller": w["controller"],
+                "recent_events": [e["message"] for e in sorted(t["events"], key=lambda e: e["id"])[-8:]],
+                "latest_metrics": latest,
+                "log_tail": logs,
+                "outputs": [a["name"] for a in t["artifacts"]],
+                "agent_runs": [{"goal": r["goal"], "status": r["status"], "result": r["result"]} for r in runs],
+            },
+            default=str,
+        )
+
+    tools = [
         StructuredTool.from_function(
             coroutine=propose_workload,
             name="propose_workload",
@@ -176,7 +282,14 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             description="Have the desktop agent perform a task in a running desktop (GUI and terminal).",
             args_schema=OperateArgs,
         ),
+        StructuredTool.from_function(
+            coroutine=inspect_workload,
+            name="inspect_workload",
+            description="Status, recent events, latest training metrics, log tail, outputs and agent runs for one workload.",
+            args_schema=WorkloadArg,
+        ),
     ]
+    return [_recorded(app, ctx, t) for t in tools]
 
 
 class Agent:
@@ -210,9 +323,15 @@ class Agent:
         model = llm.planner(self.app.settings)
         tools = _tools(self.app, ctx)
         bound = model.bind_tools(tools)
+        focus = ""
+        if ctx.focus_workload_id:
+            w = await self.app.store.workload(ctx.focus_workload_id)
+            if w and w["owner"] == ctx.owner:
+                focus = FOCUS.format(id=w["id"], title=w["title"], kind=w["kind"], status=w["status"])
         system = SystemMessage(
             SYSTEM.format(
                 channel_rules=IMESSAGE_RULES if ctx.channel == "imessage" else "",
+                focus=focus,
                 state=await self._state_summary(ctx.owner),
             )
         )

@@ -70,6 +70,21 @@ class Store:
     async def workload(self, id: int) -> dict | None:
         return next((w for w in await self.workloads() if w["id"] == id), None)
 
+    async def telemetry(self, workload_id: int) -> dict[str, list[dict]]:
+        """Everything recorded for one workload, for the agent's inspect tool."""
+        wid = int(workload_id)  # interpolated into SQL: must be an integer
+        views = {
+            "events": "worker_events",
+            "logs": "worker_logs",
+            "metrics": "worker_metrics",
+            "artifacts": "worker_artifacts",
+            "agent_runs": "worker_agent_runs",
+        }
+        out: dict[str, list[dict]] = {}
+        for key, view in views.items():
+            out[key] = await self.client.sql(f"SELECT * FROM {view} WHERE workloadId = {wid}")
+        return out
+
     # ── Telemetry ─────────────────────────────────────────────────────────
     async def add_event(self, workload_id: int, level: str, message: str) -> None:
         await self.client.call("add_event", workload_id, level, message)
