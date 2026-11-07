@@ -10,6 +10,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@anywhere/stdb':
+        specifier: workspace:*
+        version: link:../../spacetime/bindings
       '@base-ui/react':
         specifier: ^1.9.0
         version: 1.9.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -68,6 +71,9 @@ importers:
 
   services/messaging:
     dependencies:
+      '@anywhere/stdb':
+        specifier: workspace:*
+        version: link:../../spacetime/bindings
       '@spectrum-ts/core':
         specifier: ^12.15.0
         version: 12.15.0(typescript@5.9.3)
@@ -77,13 +83,22 @@ importers:
       spacetimedb:
         specifier: 2.14.1
         version: 2.14.1(react@19.3.0)
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
     devDependencies:
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
-      tsx:
-        specifier: ^4.23.15
-        version: 4.23.15
+      typescript:
+        specifier: ~5.9.3
+        version: 5.9.3
+
+  spacetime/bindings:
+    devDependencies:
+      spacetimedb:
+        specifier: 2.14.1
+        version: 2.14.1(react@19.3.0)
       typescript:
         specifier: ~5.9.3
         version: 5.9.3

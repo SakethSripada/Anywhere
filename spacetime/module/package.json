@@ -6,7 +6,7 @@
     "build": "spacetime build",
     "publish:local": "spacetime publish anywhere --server local",
     "publish:maincloud": "spacetime publish anywhere --server maincloud",
-    "generate": "spacetime generate --lang typescript --out-dir ../../apps/web/src/lib/stdb/bindings --module-path . && spacetime generate --lang typescript --out-dir ../../services/messaging/src/bindings --module-path .",
+    "generate": "spacetime generate --lang typescript --out-dir ../bindings/src --module-path .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
