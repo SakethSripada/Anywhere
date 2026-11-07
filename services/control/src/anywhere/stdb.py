@@ -77,7 +77,8 @@ def decode(value: Any, ty: dict) -> Any:
     if "Sum" in ty:
         variants = ty["Sum"]["variants"]
         names = [_name(v) for v in variants]
-        tag, inner = next(iter(value.items()))
+        # SpacetimeDB 2.x encodes sums as `[tag, value]`; older servers used `{tag: value}`.
+        tag, inner = value if isinstance(value, list) else next(iter(value.items()))
         idx = int(tag) if str(tag).isdigit() else names.index(tag)
         if names == ["some", "none"]:
             return None if idx == 1 else decode(inner, variants[0]["algebraic_type"])
@@ -156,7 +157,7 @@ class SpacetimeClient:
 
     async def verify(self, identity_hex: str, token: str) -> bool:
         res = await self._http.get(
-            f"/v1/identity/0x{identity_hex}/verify", headers={"Authorization": f"Bearer {token}"}
+            f"/v1/identity/{identity_hex}/verify", headers={"Authorization": f"Bearer {token}"}
         )
         return res.status_code < 300
 
