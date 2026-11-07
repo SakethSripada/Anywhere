@@ -94,6 +94,10 @@ class Catalog:
     def get(self, instance_type: str) -> Offer | None:
         return self._offers.get(instance_type)
 
+    def mark_checked(self) -> None:
+        """Record a refresh attempt so a failing CLI isn't retried on every request."""
+        self._refreshed_at = time.monotonic()
+
     @property
     def stale(self) -> bool:
         return time.monotonic() - self._refreshed_at > self._ttl

@@ -23,6 +23,9 @@ dependencies = [
   "aiosqlite>=0.21",
 ]
 
+[project.scripts]
+anywhere = "anywhere.main:cli"
+
 [dependency-groups]
 dev = [
     "pytest>=9",
@@ -53,3 +56,6 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
 # Line length is owned by `ruff format`; explicit timeouts are clearer than asyncio.timeout here.
 ignore = ["E501", "ASYNC109", "UP047"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "anywhere.auth.Identity"]

@@ -1,0 +1,238 @@
+"""The Anywhere agent: one Nemotron-powered LangGraph agent with specialised tools.
+
+Nemotron reasons about what the user wants and fills typed tool arguments.
+It never picks hardware or prices — `propose_workload` hands its intent to the
+deterministic planner and budget policy, and only that path can create work.
+Conversation state is checkpointed per thread (one per conversation), so a
+chat survives restarts and continues seamlessly across web and iMessage.
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
+
+import structlog
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import StructuredTool
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import BaseModel, Field
+
+from . import budget, llm
+from .core import ActionError, Anywhere
+from .lifecycle import BILLABLE
+from .planner import Intent
+
+log = structlog.get_logger()
+
+SYSTEM = """You are Anywhere, an assistant that provisions and operates powerful computers for people.
+Users describe outcomes; you figure out the compute, set it up, and do the work.
+
+What you can do today:
+- Interactive GPU desktops in the browser (Blender, VS Code, JupyterLab, or a plain Linux desktop).
+- Fine-tune language models (LoRA/QLoRA) on an uploaded .jsonl or .csv dataset.
+- Operate a running desktop yourself: clicking, typing, using apps like Blender (operate_desktop).
+- Check on, save, stop, resume and delete the user's machines.
+
+Rules:
+- NEVER state hardware, prices or runtimes you didn't get from a tool. To plan anything, call
+  propose_workload with what you understood; it returns the validated plan and cost.
+- After proposing, summarise the plan in plain language (what, which GPU, estimated cost, confidence)
+  and ask the user to approve it. Only call approve_workload when the user has clearly said yes to
+  that specific plan in their latest message.
+- If a tool says something isn't supported or is blocked, say so honestly and offer the closest option.
+- Avoid infrastructure jargon unless the user asks. Be brief and warm.
+- When the user asks for something to be done inside a running desktop, use operate_desktop with a
+  precise, self-contained goal. Don't narrate each click; the user can watch.
+- Ask a clarifying question only when you truly can't proceed.
+{channel_rules}
+Current state:
+{state}"""
+
+IMESSAGE_RULES = """- This conversation is over iMessage: plain text only, no markdown, at most ~3 short sentences.
+- For approvals over iMessage, the user replying "yes" or "approve" counts as approval of the latest plan."""
+
+
+class ProposeArgs(Intent):
+    dataset_upload_id: int | None = Field(None, description="Upload id of an attached dataset, if any.")
+
+
+class WorkloadArg(BaseModel):
+    workload_id: int
+
+
+class OperateArgs(BaseModel):
+    workload_id: int
+    goal: str = Field(description="A precise, self-contained instruction for what to do on the desktop.")
+
+
+@dataclass
+class TurnContext:
+    owner: str
+    conversation_id: int
+    channel: str  # "web" | "imessage"
+
+
+def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
+    async def propose_workload(**kwargs) -> str:
+        upload = kwargs.pop("dataset_upload_id", None)
+        try:
+            intent = Intent.model_validate(kwargs)
+            return json.dumps(await app.propose(ctx.owner, ctx.conversation_id, intent, upload))
+        except (ActionError, ValueError) as exc:
+            return json.dumps({"ok": False, "message": str(exc)})
+
+    async def approve_workload(workload_id: int) -> str:
+        try:
+            await app.approve(ctx.owner, workload_id)
+            return "Approved. Provisioning has started; progress updates will follow automatically."
+        except ActionError as exc:
+            return f"Could not approve: {exc}"
+
+    async def list_workloads() -> str:
+        rows = [w for w in await app.store.workloads() if w["owner"] == ctx.owner]
+        rows.sort(key=lambda w: w["createdAt"], reverse=True)
+        return json.dumps(
+            [
+                {
+                    "workload_id": w["id"],
+                    "title": w["title"],
+                    "kind": w["kind"],
+                    "status": w["status"],
+                    "detail": w["statusDetail"],
+                    "gpu": w["gpuName"],
+                    "spent": budget.usd(int(w["accruedCents"])),
+                    "estimate_high": budget.usd(int(w["estHighCents"])),
+                }
+                for w in rows[:12]
+            ]
+        )
+
+    def lifecycle(fn, done: str):
+        async def run(workload_id: int) -> str:
+            try:
+                await fn(ctx.owner, workload_id)
+                return done
+            except ActionError as exc:
+                return f"Could not do that: {exc}"
+
+        return run
+
+    async def operate_desktop(workload_id: int, goal: str) -> str:
+        try:
+            run_id = await app.operate(ctx.owner, workload_id, goal)
+            return f"The desktop agent started (run {run_id}). It will report back when finished."
+        except (ActionError, RuntimeError) as exc:
+            return f"Could not start the desktop agent: {exc}"
+
+    return [
+        StructuredTool.from_function(
+            coroutine=propose_workload,
+            name="propose_workload",
+            description="Turn the user's request into a validated compute plan with cost. Required before any work.",
+            args_schema=ProposeArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=approve_workload,
+            name="approve_workload",
+            description="Start a planned workload. Only after the user explicitly approves that plan.",
+            args_schema=WorkloadArg,
+        ),
+        StructuredTool.from_function(
+            coroutine=list_workloads,
+            name="list_workloads",
+            description="List the user's machines and jobs with status and spend.",
+        ),
+        StructuredTool.from_function(
+            coroutine=lifecycle(app.stop, "Stopping. Files are saved first; resume any time."),
+            name="stop_workload",
+            description="Save and stop a running desktop, or stop a job.",
+            args_schema=WorkloadArg,
+        ),
+        StructuredTool.from_function(
+            coroutine=lifecycle(app.resume, "Resuming the desktop. It takes a few minutes to come back."),
+            name="resume_desktop",
+            description="Restart a stopped desktop with its saved files.",
+            args_schema=WorkloadArg,
+        ),
+        StructuredTool.from_function(
+            coroutine=lifecycle(app.save, "Saving project files now."),
+            name="save_project",
+            description="Snapshot a running desktop's project files to durable storage.",
+            args_schema=WorkloadArg,
+        ),
+        StructuredTool.from_function(
+            coroutine=lifecycle(app.terminate, "Deleting the machine (saving files first if it's running)."),
+            name="delete_workload",
+            description="Permanently delete a machine. Confirm with the user first.",
+            args_schema=WorkloadArg,
+        ),
+        StructuredTool.from_function(
+            coroutine=operate_desktop,
+            name="operate_desktop",
+            description="Have the desktop agent perform a task in a running desktop (GUI and terminal).",
+            args_schema=OperateArgs,
+        ),
+    ]
+
+
+class Agent:
+    """Owns the checkpointer and runs one turn at a time per conversation."""
+
+    def __init__(self, app: Anywhere):
+        self.app = app
+        self._stack = AsyncExitStack()
+        self.checkpointer: AsyncSqliteSaver | None = None
+
+    async def start(self) -> None:
+        path = self.app.settings.data_dir / "agent.sqlite"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.checkpointer = await self._stack.enter_async_context(AsyncSqliteSaver.from_conn_string(str(path)))
+
+    async def close(self) -> None:
+        await self._stack.aclose()
+
+    async def _state_summary(self, owner: str) -> str:
+        active = [w for w in await self.app.store.workloads() if w["owner"] == owner]
+        live = [
+            f"- #{w['id']} {w['title']} ({w['kind']}): {w['status']}"
+            for w in active
+            if w["status"] in BILLABLE | {"stopped", "planned"}
+        ]
+        return "\n".join(live) or "- No active machines."
+
+    async def respond(self, ctx: TurnContext, text: str) -> str:
+        if self.checkpointer is None:
+            raise RuntimeError("Agent not started")
+        model = llm.planner(self.app.settings)
+        tools = _tools(self.app, ctx)
+        bound = model.bind_tools(tools)
+        system = SystemMessage(
+            SYSTEM.format(
+                channel_rules=IMESSAGE_RULES if ctx.channel == "imessage" else "",
+                state=await self._state_summary(ctx.owner),
+            )
+        )
+
+        async def call_model(state: MessagesState) -> dict:
+            history = state["messages"][-30:]
+            return {"messages": [await bound.ainvoke([system, *history])]}
+
+        g = StateGraph(MessagesState)
+        g.add_node("agent", call_model)
+        g.add_node("tools", ToolNode(tools))
+        g.add_edge(START, "agent")
+        g.add_conditional_edges("agent", tools_condition)
+        g.add_edge("tools", "agent")
+        graph = g.compile(checkpointer=self.checkpointer)
+
+        config = {"configurable": {"thread_id": f"conversation-{ctx.conversation_id}"}, "recursion_limit": 24}
+        result = await graph.ainvoke({"messages": [HumanMessage(text)]}, config)
+        reply = next((m for m in reversed(result["messages"]) if isinstance(m, AIMessage) and m.content), None)
+        content = reply.content if reply else ""
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        return str(content).strip() or "Done."
