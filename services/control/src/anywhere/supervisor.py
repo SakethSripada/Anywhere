@@ -80,6 +80,10 @@ class Supervisor:
     def __post_init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
         self._agents: dict[int, asyncio.Task] = {}
+        #: Batch-job monitors. Kept apart from `_tasks` (which means "a lifecycle
+        #: operation is in progress") so the guard and Stop can still act on a
+        #: running training job.
+        self._monitors: dict[int, asyncio.Task] = {}
         self._locks: dict[int, asyncio.Lock] = {}
         self.vnc = VncTunnels()
         self._guard_task: asyncio.Task | None = None
@@ -104,6 +108,20 @@ class Supervisor:
     def busy(self, wid: int) -> bool:
         t = self._tasks.get(wid)
         return bool(t and not t.done())
+
+    def _start_monitor(self, w: dict) -> None:
+        if (t := self._monitors.get(w["id"])) and not t.done():
+            return
+        task = asyncio.create_task(self._monitor_batch(w), name=f"monitor:{w['id']}")
+        self._monitors[w["id"]] = task
+        task.add_done_callback(lambda t: self._on_done(w["id"], t))
+
+    async def _stop_monitor(self, wid: int) -> None:
+        t = self._monitors.pop(wid, None)
+        if t and not t.done() and t is not asyncio.current_task():
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
 
     async def _transition(self, w: dict, to: Status, detail: str) -> None:
         await self.store.transition(w["id"], to.value, detail)
@@ -180,7 +198,7 @@ class Supervisor:
         if w["kind"] == "desktop":
             await self.notify(w, "status", f"Your {w['title']} is ready.")
         else:
-            await self._monitor_batch(w)
+            self._start_monitor(w)
 
     def _prepull(self, w: dict) -> str:
         return self.settings.desktop_image if w["kind"] == "desktop" else "hello-world"
@@ -285,6 +303,7 @@ class Supervisor:
     # ── Stop / resume / terminate ─────────────────────────────────────────
 
     async def _stop(self, w: dict, reason: str) -> None:
+        await self._stop_monitor(w["id"])
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
@@ -332,6 +351,7 @@ class Supervisor:
         await self.notify(w, "status", f"{w['title']} is back online.")
 
     async def _terminate(self, w: dict, reason: str) -> None:
+        await self._stop_monitor(w["id"])
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
@@ -518,6 +538,8 @@ class Supervisor:
     async def shutdown(self) -> None:
         if self._guard_task:
             self._guard_task.cancel()
+        for t in self._monitors.values():
+            t.cancel()
         await self.vnc.close_all()
 
     async def _guard_loop(self) -> None:
@@ -619,7 +641,7 @@ class Supervisor:
             if status in (Status.PROVISIONING, Status.CONFIGURING, Status.SAVING, Status.STOPPING, Status.APPROVED):
                 await self._fail(w, RuntimeError("Interrupted by a control-plane restart"))
             elif status == Status.RUNNING and w["kind"] == "batch":
-                self._spawn(w["id"], self._monitor_batch(w), name="monitor")
+                self._start_monitor(w)
 
 
 @contextlib.contextmanager
