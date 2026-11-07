@@ -4,18 +4,18 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "node --enable-source-maps dist/index.js",
-    "build": "tsc -p .",
+    "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@anywhere/stdb": "workspace:*",
     "@spectrum-ts/core": "^12.15.0",
     "@spectrum-ts/imessage": "^12.15.0",
-    "spacetimedb": "2.14.1"
+    "spacetimedb": "2.14.1",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
-    "tsx": "^4.23.15",
     "typescript": "~5.9.3"
   }
 }
