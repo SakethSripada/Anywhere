@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, fetchHealth, useApi } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useAccount, useMonthSpend, useNow } from "@/lib/data";
-import { cents, ms } from "@/lib/format";
+import { config } from "@/lib/config";
+import { ago, cents, ms } from "@/lib/format";
 import { reducers, tables, useReducer, useSession, useTable } from "@/lib/stdb";
-import { IconArrowUpRight, IconCheck, IconCopy, IconMessage, IconPhone, IconTrash } from "../icons";
+import { IconAgent, IconArrowUpRight, IconCheck, IconCopy, IconMessage, IconPhone, IconTrash } from "../icons";
 import { Button, IconButton } from "../ui/button";
 import { Field, Input } from "../ui/field";
 import { Meter } from "../ui/meter";
@@ -23,6 +24,7 @@ export function SettingsView() {
         <Profile />
         <Spending />
         <Messaging />
+        <Agents />
         <Integrations />
       </div>
     </div>
@@ -289,6 +291,225 @@ function Messaging() {
                 </Button>
               </div>
             </Field>
+          </form>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+type McpToken = {
+  id: number;
+  name: string;
+  scopes: string[];
+  hint: string;
+  created_at: string;
+  expires_at: string;
+  last_used_at: string | null;
+};
+
+const SCOPE_LABELS: Record<string, string> = { read: "View", plan: "Plan", control: "Control", spend: "Spend" };
+const DEFAULT_SCOPES = ["read", "plan", "control"];
+
+function copy(text: string, what: string) {
+  navigator.clipboard.writeText(text).then(
+    () => toast.success(`${what} copied`),
+    () => toast.error("Couldn't copy", "Select the text and copy it manually."),
+  );
+}
+
+function Agents() {
+  const api = useApi();
+  const [tokens, setTokens] = useState<McpToken[] | null>(null);
+  const [scopeHelp, setScopeHelp] = useState<Record<string, string>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState<string[]>(DEFAULT_SCOPES);
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState<string | null>(null);
+  const endpoint = typeof window === "undefined" ? `${config.apiUrl}/mcp` : new URL(`${config.apiUrl}/mcp`, window.location.href).href;
+
+  const now = useNow(60_000);
+
+  const fetchTokens = useCallback(
+    () =>
+      api.get<{ tokens: McpToken[]; scopes: Record<string, string> }>("/v1/mcp/tokens").then(
+        (res) => ({ ...res, error: null }),
+        (err) => ({
+          tokens: null,
+          scopes: {},
+          error: err instanceof ApiError && err.status === 404 ? "Agent access is turned off on this server." : "Couldn't load agent tokens.",
+        }),
+      ),
+    [api],
+  );
+  const apply = useCallback((res: Awaited<ReturnType<typeof fetchTokens>>) => {
+    setLoadError(res.error);
+    if (res.tokens) {
+      setTokens(res.tokens);
+      setScopeHelp(res.scopes);
+    }
+  }, []);
+  const load = useCallback(() => fetchTokens().then(apply), [fetchTokens, apply]);
+
+  useEffect(() => {
+    if (!api.ready) return;
+    let live = true;
+    void fetchTokens().then((res) => live && apply(res));
+    return () => {
+      live = false;
+    };
+  }, [api.ready, fetchTokens, apply]);
+
+  async function create(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const res = await api.post<McpToken & { token: string }>("/v1/mcp/tokens", { name: name.trim(), scopes });
+      setCreated(res.token);
+      setName("");
+      setScopes(DEFAULT_SCOPES);
+      await load();
+    } catch (err) {
+      toast.error("Couldn't create token", err instanceof ApiError ? err.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revoke(t: McpToken) {
+    try {
+      await api.del(`/v1/mcp/tokens/${t.id}`);
+      toast.success(`Revoked “${t.name}”`);
+      await load();
+    } catch (err) {
+      toast.error("Couldn't revoke", err instanceof ApiError ? err.message : undefined);
+    }
+  }
+
+  const command = created ? `claude mcp add --transport http anywhere ${endpoint} --header "Authorization: Bearer ${created}"` : "";
+
+  return (
+    <Section
+      title="Agents (MCP)"
+      description="Let Claude, Cursor and other MCP clients use Anywhere as a tool. Tokens can't approve spending unless you allow it."
+    >
+      <div className="flex flex-col gap-4">
+        <Field label="Server URL">
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-md bg-canvas/60 px-2.5 py-1.5 font-mono text-2xs text-fg-subtle shadow-[inset_0_0_0_1px_var(--color-line)]">
+              {endpoint}
+            </code>
+            <Tooltip content="Copy">
+              <IconButton label="Copy server URL" onClick={() => copy(endpoint, "URL")}>
+                <IconCopy />
+              </IconButton>
+            </Tooltip>
+          </div>
+        </Field>
+
+        {created && (
+          <div className="animate-rise rounded-lg bg-accent-soft p-4 shadow-[inset_0_0_0_1px_var(--color-accent-line)]">
+            <div className="text-xs text-fg-subtle">Copy this token now. It won’t be shown again.</div>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{created}</code>
+              <IconButton label="Copy token" onClick={() => copy(created, "Token")}>
+                <IconCopy />
+              </IconButton>
+            </div>
+            <div className="mt-3 text-xs text-fg-subtle">Add it to Claude Code:</div>
+            <div className="mt-1 flex items-start gap-2">
+              <code className="min-w-0 flex-1 break-all font-mono text-2xs text-fg-muted">{command}</code>
+              <IconButton label="Copy command" onClick={() => copy(command, "Command")}>
+                <IconCopy />
+              </IconButton>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
+                Done
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {loadError ? (
+          <p className="text-sm text-bad">{loadError}</p>
+        ) : tokens === null ? (
+          <div className="skeleton h-5 w-2/3" />
+        ) : (
+          tokens.length > 0 && (
+            <ul className="divide-y divide-line overflow-hidden rounded-lg shadow-[inset_0_0_0_1px_var(--color-line)]">
+              {tokens.map((t) => {
+                const expired = now > 0 && new Date(t.expires_at).getTime() <= now;
+                return (
+                  <li key={t.id} className="flex items-center gap-3 px-3 py-2.5">
+                    <span className="grid size-7 place-items-center rounded-md bg-accent-soft text-accent">
+                      <IconAgent size={14} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm text-fg">{t.name}</div>
+                      <div className="truncate text-2xs text-fg-faint">
+                        <span className="font-mono">{t.hint}…</span> · {t.last_used_at ? `used ${ago(new Date(t.last_used_at), now || undefined)}` : "never used"} ·{" "}
+                        {expired ? "expired" : `expires ${ago(new Date(t.expires_at), now || undefined)}`}
+                      </div>
+                    </div>
+                    <div className="hidden gap-1 sm:flex">
+                      {t.scopes.map((s) => (
+                        <Badge key={s} tone={s === "spend" ? "wait" : "idle"}>
+                          {SCOPE_LABELS[s] ?? s}
+                        </Badge>
+                      ))}
+                    </div>
+                    <Tooltip content="Revoke">
+                      <IconButton label={`Revoke ${t.name}`} onClick={() => void revoke(t)}>
+                        <IconTrash />
+                      </IconButton>
+                    </Tooltip>
+                  </li>
+                );
+              })}
+            </ul>
+          )
+        )}
+
+        {!loadError && (
+          <form onSubmit={create} className="flex flex-col gap-3">
+            <Field label="New token" htmlFor="mcp-name" hint="Name it after the agent or machine that will use it.">
+              <Input id="mcp-name" placeholder="Claude Code on my laptop" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} />
+            </Field>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Permissions">
+              {Object.keys(SCOPE_LABELS).map((s) => {
+                const on = scopes.includes(s);
+                return (
+                  <Tooltip key={s} content={scopeHelp[s] ?? s}>
+                    <button
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => setScopes(on ? scopes.filter((x) => x !== s) : [...scopes, s])}
+                      className={cn(
+                        "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs outline-none transition-[box-shadow,background-color] duration-150 focus-ring",
+                        on
+                          ? "bg-accent-soft text-fg shadow-[inset_0_0_0_1px_var(--color-accent-line)]"
+                          : "text-fg-subtle shadow-[inset_0_0_0_1px_var(--color-line-strong)] hover:bg-hover",
+                      )}
+                    >
+                      {on && <IconCheck size={12} className="text-accent" />}
+                      {SCOPE_LABELS[s]}
+                    </button>
+                  </Tooltip>
+                );
+              })}
+            </div>
+            {scopes.includes("spend") && (
+              <p className="text-xs text-wait">
+                With Spend, an agent can approve plans and resume machines on its own, up to your monthly cap.
+              </p>
+            )}
+            <div className="flex justify-end">
+              <Button type="submit" variant="secondary" loading={busy} disabled={!name.trim() || scopes.length === 0}>
+                Create token
+              </Button>
+            </div>
           </form>
         )}
       </div>

@@ -8,6 +8,7 @@ import { useAccount, useConversations, useMonthSpend, usePlatform, useWorkloads 
 import { cents } from "@/lib/format";
 import { BILLABLE } from "@/lib/workloads";
 import {
+  IconAgent,
   IconDesktop,
   IconMessage,
   IconPlus,
@@ -118,6 +119,13 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
                     <Tooltip content="From iMessage">
                       <span className="text-fg-faint">
                         <IconMessage size={13} />
+                      </span>
+                    </Tooltip>
+                  )}
+                  {c.channel === "mcp" && (
+                    <Tooltip content="From a connected agent">
+                      <span className="text-fg-faint">
+                        <IconAgent size={13} />
                       </span>
                     </Tooltip>
                   )}

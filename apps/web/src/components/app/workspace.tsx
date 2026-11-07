@@ -5,7 +5,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { useApi } from "@/lib/api";
 import { useConversations, useMessages } from "@/lib/data";
 import { reducers, useReducer } from "@/lib/stdb";
-import { IconArrowUpRight, IconCube, IconDesktop, IconMessage, IconMore, IconTerminal, IconWorkload } from "../icons";
+import { IconAgent, IconArrowUpRight, IconCube, IconDesktop, IconMessage, IconMore, IconTerminal, IconWorkload } from "../icons";
 import { IconButton } from "../ui/button";
 import { MenuContent, MenuItem, MenuRoot, MenuTrigger } from "../ui/menu";
 import { toast } from "../ui/toast";
@@ -110,6 +110,11 @@ export function Workspace({ conversationId }: { conversationId?: string }) {
               {conversation?.channel === "imessage" && (
                 <span className="flex items-center gap-1 rounded-[5px] bg-white/[0.05] px-1.5 py-0.5 text-2xs text-fg-subtle">
                   <IconMessage size={11} /> iMessage
+                </span>
+              )}
+              {conversation?.channel === "mcp" && (
+                <span className="flex items-center gap-1 rounded-[5px] bg-white/[0.05] px-1.5 py-0.5 text-2xs text-fg-subtle">
+                  <IconAgent size={11} /> Agent
                 </span>
               )}
               {conversation && (

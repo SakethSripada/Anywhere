@@ -56,7 +56,9 @@ export function useApi() {
     [token, identity],
   );
 
-  return useMemo(() => ({ get, post, ready: !!token }), [get, post, token]);
+  const del = useCallback(<T,>(path: string) => request<T>(path, { method: "DELETE", token, identity }), [token, identity]);
+
+  return useMemo(() => ({ get, post, del, ready: !!token }), [get, post, del, token]);
 }
 
 /** Unauthenticated probe used for the integrations panel and the offline banner. */
