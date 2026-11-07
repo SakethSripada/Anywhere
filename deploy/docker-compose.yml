@@ -1,0 +1,80 @@
+# Anywhere on a single VM (e.g. 639Cloud): Caddy terminates TLS and routes
+#   https://$DOMAIN/api/*  → control plane (HTTP + VNC WebSockets)
+#   https://$DOMAIN/*      → web app
+# GPU work never runs here; it runs on NVIDIA Brev instances the control plane manages.
+#
+#   cp deploy/.env.example deploy/.env   # fill it in
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#
+# Optional profiles:
+#   --profile messaging   Photon iMessage bridge (needs SPECTRUM_* and a worker token)
+#   --profile spacetime   self-hosted SpacetimeDB instead of Maincloud
+
+name: anywhere
+
+services:
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web, control]
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_SPACETIME_HOST: ${SPACETIME_PUBLIC_URL:?set SPACETIME_PUBLIC_URL}
+        NEXT_PUBLIC_SPACETIME_DATABASE: ${SPACETIME_DATABASE:-anywhere}
+        NEXT_PUBLIC_API_URL: /api
+    restart: unless-stopped
+
+  control:
+    build: ../services/control
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PUBLIC_WEB_ORIGIN: https://${DOMAIN}
+      CORS_ORIGINS: '["https://${DOMAIN}"]'
+      DATA_DIR: /data
+    volumes:
+      - control_data:/data
+      # Brev CLI login state and the SSH config it generates for instances.
+      - brev_home:/home/anywhere/.brev
+
+  messaging:
+    profiles: [messaging]
+    build:
+      context: ..
+      dockerfile: services/messaging/Dockerfile
+    restart: unless-stopped
+    environment:
+      SPECTRUM_PROJECT_ID: ${SPECTRUM_PROJECT_ID}
+      SPECTRUM_PROJECT_SECRET: ${SPECTRUM_PROJECT_SECRET}
+      MESSAGING_BRIDGE_SECRET: ${MESSAGING_BRIDGE_SECRET}
+      CONTROL_URL: http://control:8000
+      SPACETIME_HOST: ${SPACETIME_HOST}
+      SPACETIME_DATABASE: ${SPACETIME_DATABASE:-anywhere}
+      SPACETIME_WORKER_TOKEN: ${MESSAGING_SPACETIME_TOKEN:-${SPACETIME_WORKER_TOKEN}}
+    depends_on: [control]
+
+  spacetime:
+    profiles: [spacetime]
+    image: clockworklabs/spacetime:v2.14.1
+    command: start
+    restart: unless-stopped
+    volumes:
+      - spacetime_data:/home/spacetime/.local/share/spacetime
+
+volumes:
+  caddy_data:
+  caddy_config:
+  control_data:
+  brev_home:
+  spacetime_data:

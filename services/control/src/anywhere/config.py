@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # SpacetimeDB
     spacetime_host: str = "http://127.0.0.1:3000"
     spacetime_database: str = "anywhere"
-    #: Token for this service's worker identity (see scripts/register-worker.sh).
+    #: Token for this service's worker identity (mint with `anywhere identity`; see README).
     spacetime_worker_token: SecretStr | None = None
 
     # NVIDIA Nemotron (build.nvidia.com)

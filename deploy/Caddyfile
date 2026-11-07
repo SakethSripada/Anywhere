@@ -1,0 +1,29 @@
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Control plane API and the authenticated VNC WebSocket proxy.
+	handle_path /api/* {
+		reverse_proxy control:8000 {
+			# Desktop streams are long-lived.
+			stream_timeout 12h
+			stream_close_delay 5s
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+# Self-hosted SpacetimeDB (only with --profile spacetime). Point a DNS record at
+# this VM, uncomment, and set SPACETIME_PUBLIC_URL=wss://stdb.example.com.
+# stdb.example.com {
+# 	reverse_proxy spacetime:3000
+# }
