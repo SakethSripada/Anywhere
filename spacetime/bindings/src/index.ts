@@ -249,6 +249,8 @@ const tablesSchema = __schema({
   workerAccounts: __table({ name: "worker_accounts", indexes: [], constraints: [] }, AccountRow),
   workerHandles: __table({ name: "worker_handles", indexes: [], constraints: [] }, LinkedHandleRow),
   workerOutbox: __table({ name: "worker_outbox", indexes: [], constraints: [] }, NotificationRow),
+  workerAgentRuns: __table({ name: "worker_agent_runs", indexes: [], constraints: [] }, AgentRunRow),
+  workerAgentSteps: __table({ name: "worker_agent_steps", indexes: [], constraints: [] }, AgentStepRow),
 });
 
 /* ── Reducers ──────────────────────────────────────────────────────────── */

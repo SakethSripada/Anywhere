@@ -856,3 +856,15 @@ export const workerOutbox = spacetimedb.view(
   t.array(notification.rowType),
   (ctx) => (isWorker(ctx) ? [...ctx.db.notification.status.filter("pending")] : []),
 );
+
+export const workerAgentRuns = spacetimedb.view(
+  { name: "worker_agent_runs", public: true },
+  t.array(agentRun.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.agentRun.iter()] : []),
+);
+
+export const workerAgentSteps = spacetimedb.view(
+  { name: "worker_agent_steps", public: true },
+  t.array(agentStep.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.agentStep.iter()] : []),
+);
