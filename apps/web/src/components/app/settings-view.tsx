@@ -308,6 +308,8 @@ type McpToken = {
   last_used_at: string | null;
 };
 
+type Grant = { id: number; client_name: string; scopes: string[]; created_at: string; last_used_at: string | null };
+
 const SCOPE_LABELS: Record<string, string> = { read: "View", plan: "Plan", control: "Control", spend: "Spend" };
 const DEFAULT_SCOPES = ["read", "plan", "control"];
 
@@ -321,6 +323,7 @@ function copy(text: string, what: string) {
 function Agents() {
   const api = useApi();
   const [tokens, setTokens] = useState<McpToken[] | null>(null);
+  const [grants, setGrants] = useState<Grant[]>([]);
   const [scopeHelp, setScopeHelp] = useState<Record<string, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -333,10 +336,15 @@ function Agents() {
 
   const fetchTokens = useCallback(
     () =>
-      api.get<{ tokens: McpToken[]; scopes: Record<string, string> }>("/v1/mcp/tokens").then(
-        (res) => ({ ...res, error: null }),
+      Promise.all([
+        api.get<{ tokens: McpToken[]; scopes: Record<string, string> }>("/v1/mcp/tokens"),
+        // OAuth may be off on this server; connected apps are then simply empty.
+        api.get<{ grants: Grant[] }>("/v1/oauth/grants").catch(() => ({ grants: [] as Grant[] })),
+      ]).then(
+        ([res, g]) => ({ ...res, grants: g.grants, error: null }),
         (err) => ({
           tokens: null,
+          grants: [] as Grant[],
           scopes: {},
           error: err instanceof ApiError && err.status === 404 ? "Agent access is turned off on this server." : "Couldn't load agent tokens.",
         }),
@@ -347,6 +355,7 @@ function Agents() {
     setLoadError(res.error);
     if (res.tokens) {
       setTokens(res.tokens);
+      setGrants(res.grants);
       setScopeHelp(res.scopes);
     }
   }, []);
@@ -377,6 +386,16 @@ function Agents() {
     }
   }
 
+  async function disconnect(g: Grant) {
+    try {
+      await api.del(`/v1/oauth/grants/${g.id}`);
+      toast.success(`Disconnected ${g.client_name}`);
+      await load();
+    } catch (err) {
+      toast.error("Couldn't disconnect", err instanceof ApiError ? err.message : undefined);
+    }
+  }
+
   async function revoke(t: McpToken) {
     try {
       await api.del(`/v1/mcp/tokens/${t.id}`);
@@ -392,7 +411,7 @@ function Agents() {
   return (
     <Section
       title="Agents (MCP)"
-      description="Let Claude, Cursor and other MCP clients use Anywhere as a tool. Tokens can't approve spending unless you allow it."
+      description="Let Claude, Cursor and other MCP clients use Anywhere as a tool. Apps that support OAuth just need the server URL; others use a token. Neither can approve spending unless you allow it."
     >
       <div className="flex flex-col gap-4">
         <Field label="Server URL">
@@ -429,6 +448,39 @@ function Agents() {
                 Done
               </Button>
             </div>
+          </div>
+        )}
+
+        {grants.length > 0 && (
+          <div>
+            <div className="mb-2 text-xs font-medium text-fg-muted">Connected apps</div>
+            <ul className="divide-y divide-line overflow-hidden rounded-lg shadow-[inset_0_0_0_1px_var(--color-line)]">
+              {grants.map((g) => (
+                <li key={g.id} className="flex items-center gap-3 px-3 py-2.5">
+                  <span className="grid size-7 place-items-center rounded-md bg-ok-soft text-ok">
+                    <IconAgent size={14} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-fg">{g.client_name}</div>
+                    <div className="truncate text-2xs text-fg-faint">
+                      Signed in with OAuth · {g.last_used_at ? `used ${ago(new Date(g.last_used_at), now || undefined)}` : "never used"}
+                    </div>
+                  </div>
+                  <div className="hidden gap-1 sm:flex">
+                    {g.scopes.map((s) => (
+                      <Badge key={s} tone={s === "spend" ? "wait" : "idle"}>
+                        {SCOPE_LABELS[s] ?? s}
+                      </Badge>
+                    ))}
+                  </div>
+                  <Tooltip content="Disconnect">
+                    <IconButton label={`Disconnect ${g.client_name}`} onClick={() => void disconnect(g)}>
+                      <IconTrash />
+                    </IconButton>
+                  </Tooltip>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

@@ -46,7 +46,7 @@ export function Onboarding({
   return <Stage>{account ? <Activate /> : <Register />}</Stage>;
 }
 
-function Stage({ children }: { children: ReactNode }) {
+export function Stage({ children }: { children: ReactNode }) {
   return (
     <div className="relative grid h-full place-items-center overflow-hidden px-4">
       <div
@@ -64,7 +64,7 @@ function Stage({ children }: { children: ReactNode }) {
   );
 }
 
-function Card({ icon, title, body, children }: { icon?: ReactNode; title: string; body: string; children: ReactNode }) {
+export function Card({ icon, title, body, children }: { icon?: ReactNode; title: string; body: string; children: ReactNode }) {
   return (
     <div className="w-full animate-rise rounded-2xl bg-surface p-6 shadow-overlay">
       {icon && <div className="mb-4 grid size-8 place-items-center rounded-lg bg-white/[0.05]">{icon}</div>}
