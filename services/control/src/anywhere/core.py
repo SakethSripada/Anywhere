@@ -22,7 +22,7 @@ from .desktop import connect_screen
 from .doctor import Readiness
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
-from .operator import build_operator
+from .operator import PAUSED, build_operator
 from .planner import Intent, Plan, Unsupported, plan
 from .stdb import SpacetimeClient
 from .storage import Storage
@@ -54,6 +54,9 @@ class Anywhere:
     storage: Storage
     vault: Vault
     catalog: Catalog = field(default_factory=Catalog)
+    #: Why a desktop-agent run is being halted from outside ("paused" or "stopped"),
+    #: read by the run as it unwinds so it records the right status.
+    _halts: dict[int, str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.readiness = Readiness(self.settings, brev=self.brev, storage=self.storage)
@@ -537,6 +540,21 @@ class Anywhere:
         self.vault.update(workload_id, last_goal=goal)
         return self.supervisor.start_agent(w, goal, self._run_operator)
 
+    async def halt_agent(self, owner: str, workload_id: int, *, pause: bool = False) -> None:
+        """Stop the desktop agent and give the user the controls.
+
+        A pause (the user taking over) keeps the run resumable: handing back
+        continues its goal. A stop ends it."""
+        await self.owned(owner, workload_id)
+        # Controls first, so a step that checks after this point sees the user holds them;
+        # a step already past its check is cancelled below.
+        await self.store.set_controller(workload_id, "user")
+        self._halts[workload_id] = "paused" if pause else "stopped"
+        try:
+            await self.supervisor.stop_agent(workload_id)
+        finally:
+            self._halts.pop(workload_id, None)
+
     async def _run_operator(self, w: dict, goal: str, run_id: int) -> None:
         await self.store.start_agent_run(run_id, w["id"], goal)
         status, result = "failed", ""
@@ -574,6 +592,12 @@ class Anywhere:
                 )
                 final = await graph.ainvoke({"goal": goal, "step": 0, "history": []}, {"recursion_limit": 200})
             status, result = final.get("status", "failed"), final.get("result", "")
+        except asyncio.CancelledError:
+            # Halted from outside: the user took over or stopped it, or the machine is stopping.
+            halt = self._halts.get(int(w["id"]))
+            status = halt or "stopped"
+            result = {"paused": PAUSED, "stopped": "Stopped. You have the controls."}.get(halt or "", "")
+            raise
         except Exception as exc:
             log.exception("operator.crashed", workload=w["id"])
             result = f"I hit a problem operating the desktop: {exc}"

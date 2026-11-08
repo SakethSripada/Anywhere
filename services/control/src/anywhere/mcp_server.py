@@ -707,8 +707,7 @@ def build_server() -> MCPServer:
 
         async def run(app: Anywhere, p: Principal):
             await _owned(app, p, workload_id)
-            await app.supervisor.stop_agent(workload_id)
-            await app.store.set_controller(workload_id, "user")
+            await app.halt_agent(p.owner, workload_id)
             return {"ok": True}
 
         return await _call(ctx, "control", "stop_desktop_agent", run)

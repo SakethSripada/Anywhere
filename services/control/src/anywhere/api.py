@@ -412,10 +412,11 @@ def _routes():
         return {"run_id": run_id}
 
     @r.post("/v1/workloads/{workload_id}/agent/stop")
-    async def agent_stop(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
-        await app.owned(owner, workload_id)
-        await app.supervisor.stop_agent(workload_id)
-        await app.store.set_controller(workload_id, "user")
+    async def agent_stop(
+        workload_id: int, pause: bool = False, owner: str = Identity, app: Anywhere = Depends(anywhere)
+    ):
+        # pause=true is the user taking over: the run can be handed back and resumed.
+        await app.halt_agent(owner, workload_id, pause=pause)
         return {"ok": True}
 
     @r.post("/v1/workloads/{workload_id}/agent/resume")
