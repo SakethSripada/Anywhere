@@ -33,6 +33,11 @@ why() {
   $DOCKER exec "$NAME" sh -c 'tail -n 15 /var/log/supervisor/desktop*.log 2>/dev/null; tail -n 5 /var/log/supervisor/supervisord.log 2>/dev/null' >&2 || true
 }
 XUSER=$($DOCKER exec "$NAME" stat -c %U /tmp/.X11-unix/X1 2>/dev/null) || { why; fail "The desktop's display did not start"; }
+
+# Cua's server picks its desktop provider once, at its own start. After a resume it can
+# start before Xvfb is serving and then answer every call with "no desktop provider"
+# (seen live). The display is up now, so restart it to bind to the display.
+$DOCKER exec "$NAME" supervisorctl restart cua-spacesd >/dev/null 2>&1 || true
 launch() {
   $DOCKER exec -u "$XUSER" -d "$NAME" sh -c \
     'pgrep -a -x x11vnc | grep -q -- "-rfbport 5900" || x11vnc -display :1 -forever -shared -nopw -localhost -rfbport 5900 -noxdamage -quiet'
