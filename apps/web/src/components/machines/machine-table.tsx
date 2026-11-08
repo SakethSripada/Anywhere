@@ -8,6 +8,7 @@ import { ago, cents } from "@/lib/format";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
 import { AppLogo, appKey } from "../app/app-logo";
 import { Uptime } from "./shared";
+import { MachineMenu } from "./machine-menu";
 import { StatusChip } from "./status";
 
 /** Dense machine listing, console-style: one row per machine, click to open. */
@@ -25,6 +26,9 @@ export function MachineTable({ rows, showUpdated = false }: { rows: Workload[]; 
             <TableHead className="hidden @2xl:table-cell">Uptime</TableHead>
             <TableHead className="text-right">Cost</TableHead>
             {showUpdated && <TableHead className="hidden pr-3 text-right @3xl:table-cell">Updated</TableHead>}
+            <TableHead className="w-10 pr-2">
+              <span className="sr-only">Manage</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -51,6 +55,9 @@ export function MachineTable({ rows, showUpdated = false }: { rows: Workload[]; 
                 )}
               </TableCell>
               {showUpdated && <TableCell className="hidden pr-3 text-right text-[13px] text-muted-foreground @3xl:table-cell">{ago(w.updatedAt, now || undefined)}</TableCell>}
+              <TableCell className="w-10 pr-2 text-right" onClick={(e) => e.stopPropagation()}>
+                <MachineMenu w={w} />
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
