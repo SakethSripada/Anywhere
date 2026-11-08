@@ -58,6 +58,7 @@ class Anywhere:
     def __post_init__(self) -> None:
         self.readiness = Readiness(self.settings, brev=self.brev, storage=self.storage)
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
+        self.supervisor.catalog = self.catalog
         self.supervisor.integrations = self.readiness.integrations
         #: Serialises "check the budget and concurrency cap, then start a machine" so
         #: two approvals (or an auto-approve racing a manual one) can't both pass.

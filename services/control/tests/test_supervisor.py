@@ -634,3 +634,38 @@ def test_housekeeping_drops_vault_records_nothing_will_read(tmp_path):
     assert [k for k, _ in v.section_items("notification_attachments")] == ["1"]
     assert [k for k, _ in v.section_items(savings.SECTION)] == ["recent"]
     assert sup.housekeeping(now) == 0
+
+
+async def test_a_torn_down_deploy_retries_the_same_gpu_on_another_provider(tmp_path):
+    from anywhere.catalog import Catalog
+
+    brev = FakeBrev(fail_types={"g4dn.xlarge"})
+    sup, store, _ = make(tmp_path, brev)
+    sup.catalog = Catalog()
+    configured: list[str] = []
+
+    async def configure(w, remote):  # setup itself is covered elsewhere; stop once the machine is up
+        configured.append(remote.host)
+
+    sup._configure_desktop = configure
+    w = store.add(instanceType="g4dn.xlarge", gpuName="T4", provider="aws", hourlyCents=63)
+    sup.launch(w)
+    await drain(sup)
+    row = store.rows[1]
+    assert row["instanceType"] == "n1-standard-4:nvidia-tesla-t4:1"
+    assert row["provider"] == "gcp"
+    assert row["status"] == "configuring"
+    assert configured == [f"{instance_name(1)}-1"]
+    assert ("delete", instance_name(1)) in brev.calls
+    assert any("Trying the same GPU on GCP" in m for _, _, m in store.events)
+
+
+async def test_no_fallback_without_a_same_gpu_offer_elsewhere(tmp_path):
+    from anywhere.catalog import Catalog
+
+    brev = FakeBrev(fail_types={"g6e.2xlarge"})
+    sup, store, _ = make(tmp_path, brev)
+    sup.catalog = Catalog()
+    sup.launch(store.add(instanceType="g6e.2xlarge", gpuName="L40S", provider="aws", kind="batch"))
+    await drain(sup)
+    assert store.rows[1]["status"] == "failed"

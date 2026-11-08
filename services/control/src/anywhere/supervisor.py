@@ -31,7 +31,8 @@ from typing import Any
 import structlog
 
 from . import budget, savings, sharing
-from .brev import BrevCLI, BrevError, Instance, ProvisioningDisabled, instance_name
+from .brev import BrevCLI, BrevDeployFailed, BrevError, Instance, ProvisioningDisabled, instance_name
+from .catalog import Catalog, Offer
 from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
@@ -88,6 +89,9 @@ class Supervisor:
     poll_seconds: float = 10
     #: Integration readiness mirrored to the platform row (Anywhere wires in live checks).
     integrations: Callable[[], dict[str, bool]] | None = None
+    #: Where a launch looks for a same-GPU machine from another provider when Brev
+    #: can't deliver the planned one. None disables the fallback.
+    catalog: Catalog | None = None
 
     def __post_init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
@@ -172,6 +176,23 @@ class Supervisor:
 
         return report
 
+    def _fallback(self, w: dict, tried: list[str]) -> Offer | None:
+        """The cheapest same-GPU machine from a provider we haven't tried, or None.
+        One retry at most: a second failure is more likely the setup than capacity."""
+        if self.catalog is None or len(tried) > 1:
+            return None
+        failed = {o.provider for t in tried if (o := self.catalog.get(t))} | {w.get("provider")}
+        options = [
+            o
+            for o in self.catalog.offers()
+            if o.type not in tried
+            and o.gpu_name == w["gpuName"]
+            and o.provider not in failed
+            and o.stoppable >= bool(w.get("stoppable"))
+            and (o.desktop_ready or w["kind"] != "desktop")
+        ]
+        return min(options, key=lambda o: o.price_per_hour, default=None)
+
     def remote(self, w: dict) -> Remote:
         name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
         return self.remote_factory(name)
@@ -202,17 +223,47 @@ class Supervisor:
             plan = json.loads(w["planJson"])
             try:
                 await self._transition(w, Status.PROVISIONING, f"Requesting a {w['gpuName']} from Brev")
-                with _script(render(_env("boot.sh"), PREPULL_IMAGE=self._prepull(w))) as boot:
-                    created = await self.brev.create(name, w["instanceType"], boot)
-                if created.dry_run:
-                    await self._event(w, "Dry run: Brev accepted this request. No machine was created.", "success")
-                    await self._transition(w, Status.CANCELLED, "Dry run complete, nothing was billed")
-                    await self.notify(
-                        w, "status", "Dry run complete: Brev validated the plan. Switch to live mode to run it."
-                    )
-                    return
-                await self._event(w, f"Machine requested ({w['instanceType']}). Waiting for it to boot…")
-                await self.brev.wait_for(name, want="RUNNING", timeout=25 * 60, on_change=self._boot_progress(w))
+                tried: list[str] = []
+                while True:
+                    with _script(render(_env("boot.sh"), PREPULL_IMAGE=self._prepull(w))) as boot:
+                        created = await self.brev.create(name, w["instanceType"], boot)
+                    if created.dry_run:
+                        await self._event(w, "Dry run: Brev accepted this request. No machine was created.", "success")
+                        await self._transition(w, Status.CANCELLED, "Dry run complete, nothing was billed")
+                        await self.notify(
+                            w, "status", "Dry run complete: Brev validated the plan. Switch to live mode to run it."
+                        )
+                        return
+                    await self._event(w, f"Machine requested ({w['instanceType']}). Waiting for it to boot…")
+                    try:
+                        await self.brev.wait_for(
+                            name, want="RUNNING", timeout=25 * 60, on_change=self._boot_progress(w)
+                        )
+                        break
+                    except BrevDeployFailed:
+                        tried.append(w["instanceType"])
+                        alt = self._fallback(w, tried)
+                        if alt is None:
+                            raise
+                        with contextlib.suppress(Exception):
+                            await self.brev.delete(name)
+                        name = f"{instance_name(w['id'])}-{len(tried)}"
+                        self.vault.update(w["id"], instance=name)
+                        await self._event(
+                            w,
+                            f"{w['provider'].upper()} couldn't deliver the {w['gpuName']}. "
+                            f"Trying the same GPU on {alt.provider.upper()} at ${alt.price_per_hour:.2f}/hr.",
+                            "warn",
+                        )
+                        await self.store.switch_workload_machine(
+                            w["id"], alt.type, alt.gpu_name, alt.provider, alt.hourly_cents
+                        )
+                        w.update(
+                            instanceType=alt.type,
+                            gpuName=alt.gpu_name,
+                            provider=alt.provider,
+                            hourlyCents=alt.hourly_cents,
+                        )
                 await self.brev.refresh_ssh()
                 remote = self.remote(w)
                 await _until(remote.reachable, timeout=6 * 60, what="SSH access")

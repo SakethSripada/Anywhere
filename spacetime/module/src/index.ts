@@ -542,6 +542,19 @@ export const updateWorkloadPlan = spacetimedb.reducer(
   },
 );
 
+/** Move a workload that hasn't booted yet to another machine, when its provider couldn't deliver the first one. */
+export const switchWorkloadMachine = spacetimedb.reducer(
+  { name: "switch_workload_machine" },
+  { id: t.u64(), instanceType: t.string(), gpuName: t.string(), provider: t.string(), hourlyCents: t.u32() },
+  (ctx, { id, instanceType, gpuName, provider, hourlyCents }) => {
+    requireWorker(ctx);
+    const row = ctx.db.workload.id.find(id);
+    if (!row) throw new SenderError("Workload not found");
+    if (row.status !== "provisioning") throw new SenderError("Only a machine that is still provisioning can switch");
+    ctx.db.workload.id.update({ ...row, instanceType, gpuName, provider, hourlyCents, updatedAt: ctx.timestamp });
+  },
+);
+
 export const transitionWorkload = spacetimedb.reducer(
   { name: "transition_workload" },
   { id: t.u64(), to: t.string(), detail: t.string() },
