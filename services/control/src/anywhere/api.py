@@ -383,6 +383,16 @@ def _routes():
         rate_limit(f"render-estimate:{owner}", 6)
         return await app.estimate_render(owner, workload_id, body.blend_path, body.samples, body.frames)
 
+    @r.get("/v1/workloads/{workload_id}/agent-runs/{run_id}/replay")
+    async def agent_replay(workload_id: int, run_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"replay:{owner}", 60)
+        return await app.replay(owner, workload_id, run_id)
+
+    @r.post("/v1/workloads/{workload_id}/agent-runs/{run_id}/timelapse")
+    async def agent_timelapse(workload_id: int, run_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"timelapse:{owner}", 6)
+        return await app.replay_gif(owner, workload_id, run_id)
+
     @r.post("/v1/workloads/{workload_id}/agent/run")
     async def agent_run(workload_id: int, body: GoalIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
         rate_limit(f"agent:{owner}", 10)
