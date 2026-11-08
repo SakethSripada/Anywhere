@@ -86,7 +86,18 @@ function Item({ item, compact }: { item: ChatItem; compact?: boolean }) {
     case "tools":
       return <ToolRun calls={item.calls} />;
     case "plan":
-      return compact ? <PlanRow workloadId={item.m.workloadId} /> : <PlanCard workloadId={item.m.workloadId} />;
+      return compact ? (
+        <PlanRow workloadId={item.m.workloadId} />
+      ) : (
+        <>
+          <div className="xl:hidden">
+            <PlanCard workloadId={item.m.workloadId} />
+          </div>
+          <div className="hidden max-w-md xl:block">
+            <PlanRow workloadId={item.m.workloadId} />
+          </div>
+        </>
+      );
     case "status":
       return <StatusLine m={item.m} />;
     case "error":
@@ -111,7 +122,7 @@ function UserBubble({ text, channel, time, compact }: { text: string; channel?: 
     <div className="group flex flex-col items-end gap-1">
       <div
         className={cn(
-          "max-w-[85%] rounded-3xl bg-muted px-4 py-2.5 whitespace-pre-wrap sm:max-w-[70%]",
+          "max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap sm:max-w-[70%]",
           compact ? "text-sm leading-6" : "text-[15px] leading-7",
         )}
       >

@@ -77,6 +77,10 @@ class Supervisor:
     notify: Notify
     remote_factory: Callable[[str], Remote] = Remote
 
+    poll_seconds: float = 10
+    #: Integration readiness mirrored to the platform row (Anywhere wires in live checks).
+    integrations: Callable[[], dict[str, bool]] | None = None
+
     def __post_init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
         self._agents: dict[int, asyncio.Task] = {}
@@ -189,8 +193,10 @@ class Supervisor:
         """Run a pushed script detached and mirror its `::step::` markers into events."""
         await remote.write_file(path, script.encode(), mode="0755")
         log_path = f"{STATE_DIR}/{Path(path).stem}.out"
+        # nohup + full redirection: the job must outlive this SSH session.
         await remote.run(
-            f"rm -f {log_path}.exit; (bash {path} > {log_path} 2>&1; echo $? > {log_path}.exit) </dev/null >/dev/null 2>&1 &",
+            f"rm -f {log_path}.exit; nohup sh -c 'bash {path} > {log_path} 2>&1; echo $? > {log_path}.exit'"
+            " </dev/null >/dev/null 2>&1 &",
             timeout=30,
         )
         seen = 0
@@ -374,6 +380,9 @@ class Supervisor:
         message = str(exc).strip().splitlines()[0][:300] if str(exc).strip() else exc.__class__.__name__
         log.error("supervisor.failed", workload=w["id"], error=repr(exc))
         await self._event(w, message, "error")
+        if asyncio.current_task() is not self._agents.get(w["id"]):
+            await self.stop_agent(w["id"])
+        await self.vnc.close(w["id"])
         name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
         await self._settle_usage(w)
         with contextlib.suppress(ReducerRejected):
@@ -397,23 +406,27 @@ class Supervisor:
         await remote.write_file(f"{JOB_DIR}/config.json", cfg.model_dump_json(indent=2).encode())
         await remote.write_file(f"{JOB_DIR}/train.py", _env("train.py").encode())
         await remote.write_file(f"{JOB_DIR}/run.sh", _env("batch-run.sh").encode(), mode="0755")
-        await remote.run(f"cd {JOB_DIR} && rm -f status metrics.jsonl run.log && (nohup bash run.sh >/dev/null 2>&1 &)")
+        await remote.run(
+            f"cd {JOB_DIR} && rm -f status metrics.jsonl run.log pid && (nohup bash run.sh </dev/null >/dev/null 2>&1 &)"
+        )
+        self.vault.update(w["id"], log_offset=0, metric_lines=0)
         await self._transition(w, Status.RUNNING, f"Fine-tuning {cfg.base_model.split('/')[-1]}")
         await self.notify(w, "status", f"Training started on a {w['gpuName']}. I'll message you when it's done.")
 
     async def _monitor_batch(self, w: dict) -> None:
+        """Mirror the job's log, metrics and status into SpacetimeDB until it ends.
+
+        Offsets are persisted in the vault so a control-plane restart resumes
+        where it left off instead of re-appending the whole log."""
         remote = self.remote(w)
-        log_offset = 0
-        metric_lines = 0
+        v = self.vault.get(w["id"])
+        log_offset, metric_lines = int(v.get("log_offset", 0)), int(v.get("metric_lines", 0))
         failures = 0
+        dead_polls = 0
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(self.poll_seconds)
             try:
-                res = await remote.run(
-                    f"cd {JOB_DIR}; tail -c +{log_offset + 1} run.log 2>/dev/null | head -c 12000; echo '\n::metrics::';"
-                    f" tail -n +{metric_lines + 1} metrics.jsonl 2>/dev/null; echo '::status::'; cat status 2>/dev/null",
-                    timeout=60,
-                )
+                res = await remote.run(poll_command(log_offset, metric_lines), timeout=60)
                 failures = 0
             except RemoteError as exc:
                 failures += 1
@@ -421,33 +434,28 @@ class Supervisor:
                     await self._fail(w, RemoteError(f"Lost contact with the training machine: {exc}"))
                     return
                 continue
-            body, _, rest = res.stdout.partition("\n::metrics::")
-            metrics_txt, _, status = rest.partition("::status::")
-            if body.strip():
-                log_offset += len(body.encode())
-                await _safe(self.store.append_logs(w["id"], body[-15000:]))
-                for marker in re.findall(r"::step:: (.+)", body):
+            poll = parse_poll(res.stdout)
+            if poll.log:
+                await _safe(self.store.append_logs(w["id"], poll.log[-15000:]))
+                for marker in re.findall(r"::step:: (.+)", poll.log):
                     await self._event(w, marker.strip())
-            points = []
-            for line in metrics_txt.strip().splitlines():
-                metric_lines += 1
-                with contextlib.suppress(json.JSONDecodeError):
-                    row = json.loads(line)
-                    step = int(row.get("step", 0))
-                    for name in ("loss", "eval_loss", "learning_rate", "grad_norm"):
-                        if isinstance(row.get(name), int | float):
-                            points.append({"name": name, "step": step, "value": float(row[name])})
-                    if row.get("max_steps"):
-                        points.append({"name": "progress", "step": step, "value": step / max(int(row["max_steps"]), 1)})
+            log_offset = max(log_offset, poll.offset)
+            metric_lines += len(poll.metric_rows)
+            points = metric_points(poll.metric_rows)
             if points:
                 await _safe(self.store.add_metrics(w["id"], points))
                 await _safe(self.store.record_usage(w["id"], self._accrued(w), touch=True))
-            status = status.strip()
-            if status == "succeeded":
+            self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
+            if poll.status == "succeeded":
                 await self._finish_batch(w, remote)
                 return
-            if status.startswith("failed"):
-                await self._fail(w, RemoteError(status.removeprefix("failed:").strip() or "Training failed"))
+            if poll.status.startswith("failed"):
+                await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "Training failed"))
+                return
+            # The runner died without writing a status (OOM kill, reboot): don't bill forever.
+            dead_polls = dead_polls + 1 if not poll.alive else 0
+            if dead_polls >= 3:
+                await self._fail(w, RemoteError("The training process stopped unexpectedly. See the log for details."))
                 return
 
     async def _finish_batch(self, w: dict, remote: Remote) -> None:
@@ -586,7 +594,7 @@ class Supervisor:
                 platform_cents,
                 len(live),
                 self.settings.max_concurrent_instances,
-                json.dumps(self.settings.integrations()),
+                json.dumps((self.integrations or self.settings.integrations)()),
             )
         )
         await self.reconcile(workloads)
@@ -614,12 +622,88 @@ class Supervisor:
         except Exception as exc:
             log.warning("recover.unavailable", error=str(exc))
             return
+        # ~/.ssh/config (which includes Brev's generated host aliases) does not
+        # survive a container restart; regenerate it before touching machines.
+        if self.brev.api_key and any(w["status"] in (Status.RUNNING, Status.SAVING) for w in workloads):
+            try:
+                await self.brev.refresh_ssh()
+            except BrevError as exc:
+                log.warning("recover.refresh_failed", error=str(exc))
         for w in workloads:
             status = w["status"]
             if status in (Status.PROVISIONING, Status.CONFIGURING, Status.SAVING, Status.STOPPING, Status.APPROVED):
                 await self._fail(w, RuntimeError("Interrupted by a control-plane restart"))
             elif status == Status.RUNNING and w["kind"] == "batch":
                 self._spawn(w["id"], self._monitor_batch(w), name="monitor")
+
+
+# ── Batch polling protocol ──────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Poll:
+    offset: int
+    log: str
+    metric_rows: list[str]
+    status: str
+    alive: bool
+
+
+def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
+    """One SSH round trip that returns new log bytes, complete new metric lines,
+    the status file and whether the runner is alive, between unambiguous markers.
+
+    Uses printf (not `echo '\\n'`, which bash prints literally) and reports the
+    byte offset it read up to, so multibyte characters can't skew the offset."""
+    o, m = int(log_offset), int(metric_lines)
+    return (
+        f"cd {JOB_DIR} 2>/dev/null || exit 0; "
+        f"size=$(wc -c < run.log 2>/dev/null || echo 0); end=$((size < {o + chunk} ? size : {o + chunk})); "
+        f"[ $end -lt {o} ] && end={o}; "
+        "printf '::offset::%s\\n' \"$end\"; "
+        f"tail -c +{o + 1} run.log 2>/dev/null | head -c $((end - {o})); "
+        "printf '\\n::metrics::\\n'; "
+        "total=$(cat metrics.jsonl 2>/dev/null | wc -l); "
+        f"[ $total -gt {m} ] && tail -n +{m + 1} metrics.jsonl | head -n $((total - {m})); "
+        "printf '::status::\\n'; cat status 2>/dev/null; "
+        "printf '\\n::alive::\\n'; if [ -f pid ] && kill -0 \"$(cat pid)\" 2>/dev/null; then echo yes; "
+        "elif [ -f pid ]; then echo no; else echo starting; fi"
+    )
+
+
+def parse_poll(out: str) -> Poll:
+    head, _, rest = out.partition("::offset::")
+    offset_line, _, rest = rest.partition("\n")
+    log_part, _, rest = rest.partition("\n::metrics::\n")
+    metrics_part, _, rest = rest.partition("::status::\n")
+    status_part, _, alive_part = rest.partition("\n::alive::\n")
+    return Poll(
+        offset=int(offset_line.strip()) if offset_line.strip().isdigit() else 0,
+        log=log_part,
+        metric_rows=[ln for ln in metrics_part.split("\n") if ln.strip()],
+        status=status_part.strip(),
+        alive=alive_part.strip() != "no",
+    )
+
+
+def metric_points(rows: list[str]) -> list[dict]:
+    """Translate train.py's JSONL rows into `add_metrics` points."""
+    points = []
+    for line in rows:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        step = int(row.get("step", 0) or 0)
+        for name in ("loss", "eval_loss", "learning_rate", "grad_norm"):
+            value = row.get(name)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                points.append({"name": name, "step": step, "value": float(value)})
+        if row.get("max_steps"):
+            points.append({"name": "progress", "step": step, "value": step / max(int(row["max_steps"]), 1)})
+    return points
 
 
 @contextlib.contextmanager

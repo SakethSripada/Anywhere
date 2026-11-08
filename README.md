@@ -92,11 +92,11 @@ What the control plane does:
 | Deterministic planner, catalog, cost estimate, plan card | **Verified** | Driven with a structured intent; planner and budget have unit tests |
 | Approve → supervisor launch → cleanup on failure | **Verified** | With no Brev key: refused, cleaned up, user told why |
 | Boot progress, live cost ticker, workload/desktop pages | **Verified** | Lifecycle stepped through real reducers |
-| Budget policy, lifecycle mirror, supervisor guard and cleanup | **Tested** | 63 pytest tests |
+| Budget policy, lifecycle mirror, supervisor guard and cleanup | **Tested** | 88 pytest tests |
 | Nemotron intent extraction and agent tools | Built | Needs `NVIDIA_API_KEY` |
 | Brev provisioning, stop/resume, reconcile | Built | Needs `BREV_API_KEY` and approval before spending credits |
 | Desktop on Brev (Cua Linux image, Blender, x11vnc/websockify) | Built | Not yet run on a Brev GPU. Xvfb has no hardware GL, so viewport rendering is software and Cycles renders use the GPU via CUDA/OptiX |
-| Cua computer-use operator | **Tested** | Fakes for screen and model; not yet run on a live desktop |
+| Cua computer-use operator | **Tested** | Fakes for screen and model. The screen adapter and `desktop-start.sh` were run against the real `ghcr.io/trycua/linux:24.04` container locally (screenshots, input, shell, noVNC), without a GPU |
 | noVNC stream through the ticketed proxy | Built | Needs a running desktop |
 | S3 projects, uploads, artifacts | Built | Needs bucket credentials (R2 recommended) |
 | LoRA/QLoRA training job, metrics, artifacts | **Tested** | Config and dataset inspection tested; GPU run pending |
@@ -149,7 +149,37 @@ cp apps/web/.env.example apps/web/.env.local && pnpm dev:web
 
 Open http://localhost:3001. In development with no `INVITE_CODE` set, any invite code works.
 
-**4. (Optional) iMessage bridge.** Fill in `services/messaging/.env`, then run:
+**4. Check the integrations.** `anywhere doctor` tests every integration with the configured environment and prints a checklist. Anything without credentials shows `--` ("not configured") instead of failing, and the command exits 1 if any check fails:
+
+```bash
+cd services/control && uv run anywhere doctor          # add --quick to skip the 1-token model calls and the storage round trip
+```
+
+```
+Anywhere doctor
+
+  [  ok] SpacetimeDB worker      http://127.0.0.1:3100/anywhere: identity 0xc200c25d29fa… is a worker; 4 workloads visible
+  [  ok] Nemotron planner model  nvidia/nemotron-3-super-120b-a12b answered a 1-token request
+  [  ok] Nemotron vision model   nvidia/nemotron-3.5-super-vl-120b-a12b answered a 1-token request
+  [FAIL] NVIDIA Brev CLI         authentication failed: brev ls failed: Your API key is invalid or has expired…
+  [  --] Object storage (S3)     set S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+  [  --] Photon Spectrum         set SPECTRUM_PROJECT_ID and SPECTRUM_PROJECT_SECRET
+  [info] Provisioning mode       disabled: plans are made but nothing is sent to Brev
+  [info] Budget limits           global $50.00, 1 concurrent instance(s), 4 h max session, desktops stop after 20 idle min
+
+3 ok, 0 warning(s), 1 failed, 2 not configured
+```
+
+What each line checks:
+- **SpacetimeDB:** the worker views are readable and the token's identity is in the `worker` table. It uses a worker-only reducer that writes nothing.
+- **Nemotron:** both model ids are in the `integrate.api.nvidia.com` catalog, and each one answers a 1-token request with your key.
+- **Brev:** the CLI is on `PATH` and `brev ls --json` succeeds with `BREV_API_KEY`.
+- **Storage:** the bucket answers a head request, and a presigned PUT/GET round trip succeeds. The test object is deleted afterwards.
+- **Photon:** `GET /projects/{id}/` succeeds with your project credentials.
+
+`GET /health` reports the same readiness, using the read-only subset of these checks refreshed every 5 minutes. `integrations[x]` is true only when `x` is configured and its latest check passed, and `checks[x]` gives the status and reason.
+
+**5. (Optional) iMessage bridge.** Fill in `services/messaging/.env`, then run:
 
 ```bash
 pnpm --filter @anywhere/messaging dev
@@ -220,9 +250,9 @@ MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a cur
 | `PROVISIONING_MODE` | control | `disabled` (default), `dry_run`, or `live` |
 | `GLOBAL_BUDGET_CENTS`, `MAX_CONCURRENT_INSTANCES`, `MAX_SESSION_HOURS`, `DESKTOP_IDLE_MINUTES` | control | Platform guardrails |
 | `INVITE_CODE` | control | Required to activate accounts outside development |
-| `NVIDIA_API_KEY`, `PLANNER_MODEL`, `VISION_MODEL` | control | Nemotron on build.nvidia.com |
-| `BREV_API_KEY` | control | Brev CLI authentication |
-| `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | control | Durable storage for projects, datasets and outputs |
+| `NVIDIA_API_KEY`, `PLANNER_MODEL`, `VISION_MODEL` | control | Nemotron on build.nvidia.com. Defaults: `nvidia/nemotron-3-super-120b-a12b` (agent, tool calling) and `nvidia/nemotron-3.5-super-vl-120b-a12b` (desktop operator, image input) |
+| `BREV_API_KEY` | control | Brev org API key (`bak-…`). The CLI reads it from the environment, so no `brev login` is needed |
+| `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | control | Durable storage for projects, datasets and outputs. For R2, use `https://<account>.r2.cloudflarestorage.com` with region `auto`. For AWS, leave the endpoint empty and set the real region. Browser uploads need a bucket CORS rule that allows `PUT` from the web origin |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | control, bridge | Photon project |
 | `MESSAGING_BRIDGE_SECRET` | control, bridge | Shared secret for `/v1/bridge/inbound` |
 | `MCP_ENABLED`, `MCP_OAUTH_ENABLED`, `MCP_MAX_TOKENS_PER_ACCOUNT`, `MCP_MAX_TOKEN_DAYS` | control | MCP server and OAuth switches, token limits |
@@ -249,9 +279,9 @@ MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a cur
    docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
    # add --profile messaging once Photon is configured
    ```
-5. Authenticate Brev inside the control container once. Its state persists in the `brev_home` volume:
+5. Check the deployment from inside the control container. Brev needs no login step, because the CLI reads `BREV_API_KEY` from the environment:
    ```bash
-   docker compose -f deploy/docker-compose.yml exec control brev login --token "$BREV_API_KEY"
+   docker compose -f deploy/docker-compose.yml exec control anywhere doctor
    ```
 
 Caddy provisions TLS automatically. It routes `/api/*` (including the long-lived VNC WebSockets) to the control plane and everything else to the web app.

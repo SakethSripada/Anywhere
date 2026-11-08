@@ -61,7 +61,7 @@ function Machine({ w }: { w: Workload }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <Header w={w} chatOpen={chatOpen} onToggleChat={() => setChatOpen((o) => !o)} />
-      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 border-t">
+      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
         <ResizablePanel defaultSize="68%" minSize="40%">
           <div className="h-full min-h-0">{w.kind === "desktop" ? <DesktopMain w={w} /> : <JobMain w={w} />}</div>
         </ResizablePanel>
@@ -86,7 +86,7 @@ function Header({ w, chatOpen, onToggleChat }: { w: Workload; chatOpen: boolean;
   const canDelete = !["terminated", "cancelled", "planned"].includes(w.status);
 
   return (
-    <header className="flex h-13 shrink-0 items-center gap-2 px-3 sm:px-4">
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
       <MobileNavTrigger />
       <Button variant="ghost" size="icon-sm" aria-label="All machines" nativeButton={false} render={<Link href="/machines" />}>
         <ChevronLeft />
@@ -214,8 +214,17 @@ function DesktopMain({ w }: { w: Workload }) {
 
 function LiveDesktop({ w }: { w: Workload }) {
   const api = useApi();
-  const agent = w.controller === "agent";
+  const [runs] = useTable(tables.myAgentRuns);
+  const [steps] = useTable(tables.myAgentSteps);
   const [switching, setSwitching] = useState(false);
+  const latest = useMemo(
+    () => runs.filter((r) => r.workloadId === w.id).sort((a, b) => Number(b.startedAt.toMillis() - a.startedAt.toMillis()))[0],
+    [runs, w.id],
+  );
+  const lastStep = useMemo(() => (latest ? steps.filter((s) => s.runId === latest.id).sort((a, b) => b.seq - a.seq)[0] : undefined), [steps, latest]);
+  // The agent only holds the mouse while it is actually working; otherwise the desktop is yours.
+  const working = w.controller === "agent" && latest?.status === "running";
+  const paused = !working && latest?.status === "paused";
 
   async function handOff(to: "user" | "agent") {
     setSwitching(true);
@@ -231,20 +240,32 @@ function LiveDesktop({ w }: { w: Workload }) {
   return (
     <VncScreen
       workloadId={w.id}
-      viewOnly={agent}
-      className={cn(agent && "ring-1 ring-inset ring-foreground/30")}
+      viewOnly={working}
+      className={cn(working && "ring-2 ring-inset ring-primary/60")}
       overlay={
-        <div className="absolute inset-x-0 bottom-4 flex justify-center">
-          <div className="flex items-center gap-1 rounded-full border bg-background py-1 pr-1 pl-4 shadow-lg">
-            <span className="pr-2 text-[13px] text-muted-foreground">
-              {agent ? "The agent is in control" : "You’re in control"}
-              {w.status === "saving" && " · saving"}
-            </span>
-            <Button size="sm" className="rounded-full" variant={agent ? "default" : "secondary"} disabled={switching} onClick={() => void handOff(agent ? "user" : "agent")}>
-              {agent ? "Take over" : "Let the agent continue"}
-            </Button>
+        (working || paused || w.status === "saving") && (
+          <div className="absolute inset-x-0 bottom-4 flex justify-center px-4">
+            <div className="flex max-w-xl min-w-0 items-center gap-3 rounded-full border bg-background py-1 pr-1 pl-4 shadow-lg">
+              <span className="min-w-0 truncate text-[13px]">
+                {working ? (
+                  <>
+                    <span className="font-medium text-primary">Agent is working</span>
+                    {lastStep && <span className="text-muted-foreground"> · {lastStep.summary}</span>}
+                  </>
+                ) : paused ? (
+                  <span className="text-muted-foreground">You took over. The agent can pick up where it left off.</span>
+                ) : (
+                  <span className="text-muted-foreground">Saving your project…</span>
+                )}
+              </span>
+              {(working || paused) && (
+                <Button size="sm" className="shrink-0 rounded-full" variant={working ? "default" : "secondary"} disabled={switching} onClick={() => void handOff(working ? "user" : "agent")}>
+                  {working ? "Take over" : "Let the agent continue"}
+                </Button>
+              )}
+            </div>
           </div>
-        </div>
+        )
       }
     />
   );

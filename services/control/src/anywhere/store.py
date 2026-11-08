@@ -29,6 +29,11 @@ class Store:
     async def upsert_conversation(self, id: int, owner: str, title: str, channel: str) -> None:
         await self.client.call("upsert_conversation", id, identity_arg(owner), title, channel)
 
+    async def conversation_owned(self, conversation_id: int, owner: str) -> bool:
+        cid = int(conversation_id)  # interpolated into SQL: must be an integer
+        rows = await self.client.sql(f"SELECT * FROM worker_conversations WHERE id = {cid}")
+        return any(r["owner"] == owner for r in rows)
+
     async def append_message(
         self, conversation_id: int, role: str, kind: str, body: str, workload_id: int = 0, channel: str = "web"
     ) -> None:

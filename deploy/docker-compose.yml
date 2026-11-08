@@ -46,7 +46,8 @@ services:
       DATA_DIR: /data
     volumes:
       - control_data:/data
-      # Brev CLI login state and the SSH config it generates for instances.
+      # Brev CLI state (cloudflared, SSH key, generated ssh_config). The control
+      # plane regenerates ~/.ssh/config with `brev refresh` on startup.
       - brev_home:/home/anywhere/.brev
 
   messaging:
@@ -63,6 +64,7 @@ services:
       SPACETIME_HOST: ${SPACETIME_HOST}
       SPACETIME_DATABASE: ${SPACETIME_DATABASE:-anywhere}
       SPACETIME_WORKER_TOKEN: ${MESSAGING_SPACETIME_TOKEN:-${SPACETIME_WORKER_TOKEN}}
+      TURN_TIMEOUT_MS: ${TURN_TIMEOUT_MS:-120000}
     depends_on: [control]
 
   spacetime:
