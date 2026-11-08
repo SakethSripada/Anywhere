@@ -30,6 +30,7 @@ def test_commands_require_authentication(tmp_path):
     with client(tmp_path) as c:
         assert c.post("/v1/chat", json={"text": "hi"}).status_code == 401
         assert c.post("/v1/workloads/1/approve").status_code == 401
+        assert c.get("/v1/costs").status_code == 401
         assert (
             c.post("/v1/bridge/inbound", json={"handle": "+15550100", "text": "hi", "message_id": "m"}).status_code
             == 401
