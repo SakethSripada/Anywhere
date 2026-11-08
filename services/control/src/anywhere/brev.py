@@ -278,13 +278,13 @@ class BrevCLI:
             if last and last.status == want and (want != "RUNNING" or last.ready):
                 return last
             if last and last.status == "FAILURE":
-                raise BrevDeployFailed(f"Instance {name} failed to deploy")
+                raise BrevDeployFailed("Brev couldn't start the machine")
             # Brev tears a failed deploy down by itself. Waiting out the full timeout
             # would leave the user staring at "Provisioning" for nothing.
             if want != "DELETING" and last and last.status == "DELETING":
-                raise BrevDeployFailed(f"Brev is deleting {name}; the deploy didn't succeed")
+                raise BrevDeployFailed("Brev shut the machine down before it finished booting")
             if existed and last is None:
-                raise BrevDeployFailed(f"Instance {name} disappeared from Brev")
+                raise BrevDeployFailed("The machine disappeared from Brev before it finished booting")
             existed = existed or last is not None
             await asyncio.sleep(interval)
         raise BrevError(f"Instance {name} did not reach {want} within {timeout / 60:.0f} min (last: {last})")
