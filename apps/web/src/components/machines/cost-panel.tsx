@@ -29,7 +29,9 @@ type Costs = { now: string; running: Running[]; saved_cents: number; idle_minute
 function useCosts() {
   const api = useApi();
   const { workloads } = useWorkloads();
-  // Refetch whenever something starts or stops billing, and every 30 s besides.
+  // Refetch whenever something starts or stops billing, and when the tab comes back
+  // into view. In between, the meter counts locally from each segment's exact start,
+  // so polling the server would only return the numbers it already shows.
   const billing = workloads
     .filter((w) => BILLABLE.has(w.status))
     .map((w) => `${w.id}:${w.status}`)
@@ -48,10 +50,13 @@ function useCosts() {
         .then((costs) => !stop && setData({ costs, skew: Date.parse(costs.now) - Date.now() }))
         .catch(() => {});
     void load();
-    const id = setInterval(load, 30_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       stop = true;
-      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [api.ready, billing]);
   return data;
@@ -69,6 +74,12 @@ function savedCents(s: IdleStop, now: number) {
 
 const dollars = (c: number, digits = 4) => `$${(c / 100).toFixed(digits)}`;
 
+/** A ticking number. Only this leaf re-renders on each tick, not the whole panel. */
+function Live({ live, skew, children }: { live: boolean; skew: number; children: (now: number) => string }) {
+  const now = useNow(250, live) + skew;
+  return <>{children(now)}</>;
+}
+
 export function CostPanel() {
   const data = useCosts();
   const { account } = useAccount();
@@ -76,11 +87,10 @@ export function CostPanel() {
   const running = data?.costs.running ?? [];
   const stops = data?.costs.idle_stops ?? [];
   const ticking = running.some((r) => r.segment_start) || stops.some((s) => s.counting);
-  const now = useNow(100, ticking) + (data?.skew ?? 0);
+  const skew = data?.skew ?? 0;
   const rate = running.reduce((s, r) => s + r.hourly_cents, 0);
-
-  const spend = running.reduce((s, r) => s + runningCents(r, now), 0);
-  const saved = stops.reduce((s, x) => s + savedCents(x, now), 0);
+  const spend = (now: number) => running.reduce((s, r) => s + runningCents(r, now), 0);
+  const saved = (now: number) => stops.reduce((s, x) => s + savedCents(x, now), 0);
 
   return (
     <section className="rounded-lg border">
@@ -91,7 +101,7 @@ export function CostPanel() {
             Running now
           </dt>
           <dd className="mt-1 text-2xl font-semibold tracking-tight tabular" aria-live="off">
-            {data ? dollars(spend) : "…"}
+            {data ? <Live live={ticking} skew={skew}>{(now) => dollars(spend(now))}</Live> : "…"}
           </dd>
           <dd className="truncate text-xs text-muted-foreground tabular">
             {rate > 0 ? `${cents(rate)}/hr · ${dollars(rate / 3600, 5)}/s · ${running.length} machine${running.length === 1 ? "" : "s"}` : "Nothing billing"}
@@ -104,7 +114,16 @@ export function CostPanel() {
         </div>
         <div className="px-4 py-3">
           <dt className="text-xs text-muted-foreground">Saved by auto-stop</dt>
-          <dd className="mt-1 text-2xl font-semibold tracking-tight tabular">{data ? dollars(saved, saved >= 100 ? 2 : 4) : "…"}</dd>
+          <dd className="mt-1 text-2xl font-semibold tracking-tight tabular">{data ? (
+              <Live live={ticking} skew={skew}>
+                {(now) => {
+                  const c = saved(now);
+                  return dollars(c, c >= 100 ? 2 : 4);
+                }}
+              </Live>
+            ) : (
+              "…"
+            )}</dd>
           <dd className="truncate text-xs text-muted-foreground">
             {stops.length
               ? `${stops.length} idle desktop${stops.length === 1 ? "" : "s"} stopped after ${data?.costs.idle_minutes} min`
@@ -119,7 +138,7 @@ export function CostPanel() {
             <li key={`r${r.id}`} className="flex items-center gap-3 px-4 py-2">
               <span className="min-w-0 flex-1 truncate">{r.title}</span>
               <span className="hidden text-xs text-muted-foreground sm:inline">{r.gpu} · {cents(r.hourly_cents)}/hr</span>
-              <span className="w-20 text-right font-medium tabular">{dollars(runningCents(r, now))}</span>
+              <span className="w-20 text-right font-medium tabular"><Live live={!!r.segment_start} skew={skew}>{(now) => dollars(runningCents(r, now))}</Live></span>
             </li>
           ))}
           {stops.slice(0, 5).map((s) => (
@@ -128,7 +147,7 @@ export function CostPanel() {
                 {s.title} <span className="text-muted-foreground">stopped idle at {new Date(s.stopped_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
               </span>
               <span className="hidden text-xs text-muted-foreground sm:inline">{s.counting ? "still saving" : s.resumed_at ? "until you resumed it" : "until the session limit"}</span>
-              <span className="w-20 text-right tabular text-muted-foreground">−{dollars(savedCents(s, now))}</span>
+              <span className="w-20 text-right tabular text-muted-foreground"><Live live={s.counting} skew={skew}>{(now) => `−${dollars(savedCents(s, now))}`}</Live></span>
             </li>
           ))}
         </ul>
