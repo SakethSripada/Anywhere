@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, useApi } from "@/lib/api";
 import { PermissionSwitches } from "./agent-access";
-import { Logo } from "./logo";
+import { LogoMark } from "./logo";
 
 type Pending = { client_name: string; redirect_host: string; scopes: string[]; scope_help: Record<string, string> };
 
@@ -15,7 +15,7 @@ function Stage({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-4 py-10">
       <div className="mb-8 flex items-center gap-2">
-        <Logo className="size-6" />
+        <LogoMark className="size-7" />
         <span className="text-lg font-semibold tracking-tight">Anywhere</span>
       </div>
       <div className="w-full max-w-[400px]">{children}</div>
