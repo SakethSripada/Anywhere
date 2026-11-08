@@ -82,6 +82,21 @@ class Anywhere:
             log.warning("notify.message_failed", error=str(exc))
         await self.text_phones(w["owner"], body, attachment)
 
+    async def send_text(self, owner: str, handle: str, body: str, attachment: str | None = None) -> None:
+        """Queue one iMessage to one number (the sender of the request), with an optional picture."""
+        try:
+            nid = new_id()
+            if attachment:
+                name = attachment.rsplit("/", 1)[-1]
+                self.vault.section_put(
+                    "notification_attachments",
+                    str(nid),
+                    {"key": attachment, "name": name, "at": datetime.now(UTC).isoformat()},
+                )
+            await self.store.enqueue_notification(nid, owner, "imessage", handle, body)
+        except Exception as exc:
+            log.warning("notify.imessage_failed", error=str(exc))
+
     async def text_phones(self, owner: str, body: str, attachment: str | None = None) -> int:
         """Queue an iMessage to each of the owner's linked phones; returns how many were queued."""
         sent = 0

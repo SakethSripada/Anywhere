@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
+import secrets
 import time
 from typing import TYPE_CHECKING
 
@@ -59,8 +61,9 @@ names like "cyan", "magenta", "gold". Every builder returns the object(s) it mad
 - kit.windows(name, glow=color, strength=8, lit=0.4)  material: facade with lit windows (use on kit.box).
 - kit.sun(name, rotation, color, energy)  daylight ~3-5, moonlight ~0.5-1.
 - kit.light(name, location, color, energy=1000, kind="POINT"|"AREA"|"SPOT")  lamps, glowing accents.
-- kit.orbit_camera(subject=hero_objects)  camera that frames the hero object(s) and circles them. Always
-  pass subject= the main thing that was asked for (a list of its parts is fine), never the whole scene.
+- kit.orbit_camera(subject=hero_objects)  camera that frames the hero object(s) and circles them. Pass
+  subject= the main thing that was asked for (a list of its parts is fine); with no subject it frames
+  everything except ground, water and terrain. Don't pass target/radius.
 - kit.glow()  bloom (use whenever anything emits light).
 - kit.show()  live GPU ray-traced view through the camera. kit.save()  save.
 
@@ -79,6 +82,10 @@ Rules:
   green hills, red car on dark asphalt). Use 3-5 colours, not one.
 - Add the details that make it recognisable: roofs and spires on towers (kit.cone), windows that glow
   (emissive boxes), wheels on vehicles (kit.cylinder rotated 90 degrees), flags, lamps, trees around.
+- Stacking: box, cylinder and cone stand ON their location (base at z), spheres and tori are centred.
+  Put each part's base exactly on the previous part's top, e.g. a tower: kit.cylinder(z=0, height=20),
+  then kit.cylinder("Top", (0, 0, 20), radius=3, height=4), then kit.cone("Roof", (0, 0, 24), ...).
+  Never leave gaps or float parts, and cones point up (don't rotate them unless asked).
 - Keep it under ~800 objects. No bpy.ops except what kit does. No file or network access.
 - Keep the objects that make up the subject in a list (hero = [...]) and pass it to kit.orbit_camera.
 - End with exactly: kit.orbit_camera(...), kit.glow() if anything glows, kit.show(), kit.save()
@@ -153,13 +160,81 @@ async def write_script(settings: Settings, request: str, previous: str = "", err
     return extract_code(content)
 
 
-async def build(app: Anywhere, w: dict, request: str) -> None:
-    """Build `request` in the desktop's Blender, render a still, and send it back."""
-    wid = int(w["id"])
-    started = time.monotonic()
+MODEL_PATH = "/tmp/anywhere-model.glb"
+#: Rendered pictures and their links stay valid this long (R2 allows up to 7 days).
+LINK_SECONDS = 6 * 24 * 3600
+
+# Export the subject, not the 400 m ground plane: a phone viewer frames the whole model,
+# and a huge backdrop turned the subject into a speck.
+_EXPORT = f"""
+keep = set(kit.subject_objects())
+for o in bpy.context.scene.objects:
+    o.select_set(o in keep)
+bpy.ops.export_scene.gltf(filepath={MODEL_PATH!r}, export_format="GLB", use_selection=True,
+    export_apply=True, export_cameras=False, export_lights=False, export_animations=False)
+print("exported", len(keep))
+"""
+
+
+async def _render(screen, samples: int = 32) -> bytes:
+    """A GPU still of the scene camera, as JPEG bytes."""
+    out = await run_in_blender(
+        screen, f"kit.render_still(path={RENDER_PATH!r}, samples={samples}, width=1280, height=720)\nkit.show()"
+    )
+    if not out.startswith("ok"):
+        raise RuntimeError(out.splitlines()[-1][:200] if out else "render failed")
+    _, b64 = await screen.shell(f"base64 -w0 {RENDER_PATH}", timeout=30)
+    return base64.b64decode(b64.strip())
+
+
+async def quick_render(app: Anywhere, w: dict) -> bytes | None:
+    """A camera render of whatever Blender shows, for "show me" (a desktop screenshot crops
+    the scene into a corner of Blender's UI). None when there's no scene camera."""
     try:
-        remote = app.supervisor.remote(w)
-        async with connect_screen(remote, app.vault.agent_token(wid)) as screen:
+        async with connect_screen(app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))) as screen:
+            probe = await run_in_blender(screen, "print(bool(bpy.context.scene.camera))")
+            if "True" not in probe:
+                return None
+            return await _render(screen, samples=16)
+    except Exception as exc:
+        log.warning("scene.quick_render_failed", error=str(exc)[:200])
+        return None
+
+
+async def build(
+    app: Anywhere,
+    w: dict,
+    request: str,
+    *,
+    conversation_id: int = 0,
+    channel: str = "web",
+    handle: str = "",
+) -> None:
+    """Build `request` in the desktop's Blender, render a still and a 3D model, and send them back.
+
+    Progress and the picture go to the conversation the request came from and to the
+    desktop's own chat, so the web shows what the phone asked for. A request that came by
+    text gets exactly one text back: the picture with its 3D link."""
+    wid = int(w["id"])
+    owner = w["owner"]
+    started = time.monotonic()
+    targets = [c for c in dict.fromkeys([int(conversation_id or 0), int(w.get("conversationId") or 0)]) if c]
+    title = request.strip().rstrip(".")
+
+    async def post(kind: str, body: str) -> None:
+        for cid in targets:
+            try:
+                await app.store.append_message(cid, "assistant", kind, body, wid, "system")
+            except Exception as exc:
+                log.warning("scene.post_failed", error=str(exc)[:200])
+
+    async def fail(reason: str) -> None:
+        await post("error", f"I couldn't build that one: {reason}")
+        if channel == "imessage" and handle:
+            await app.send_text(owner, handle, f"I couldn't build that one: {reason}")
+
+    try:
+        async with connect_screen(app.supervisor.remote(w), app.vault.agent_token(wid)) as screen:
             code = await write_script(app.settings, request)
             outcome = await run_in_blender(screen, code)
             if not outcome.startswith("ok"):
@@ -167,25 +242,40 @@ async def build(app: Anywhere, w: dict, request: str) -> None:
                 code = await write_script(app.settings, request, previous=code, error=outcome)
                 outcome = await run_in_blender(screen, code)
             if not outcome.startswith("ok"):
-                await app.notify(w, "error", f"I couldn't build that one: {outcome.splitlines()[-1][:200]}")
+                await fail(outcome.splitlines()[-1][:200])
                 return
             built = time.monotonic() - started
-            await app.notify(w, "status", f"Built it live in {built:.0f}s. Rendering a picture on the GPU…")
-            rendered = await run_in_blender(screen, f"kit.render_still(path={RENDER_PATH!r}, samples=24)\nkit.show()")
-            if not rendered.startswith("ok"):
-                await app.notify(w, "status", "It's built and on screen. The picture render didn't finish.")
-                return
-            _, b64 = await screen.shell(f"base64 -w0 {RENDER_PATH}", timeout=30)
-        jpeg = base64.b64decode(b64.strip())
-        key = f"renders/{w['owner']}/{wid}/{int(time.time())}.jpg"
+            await post("status", f"Built {title} live in {built:.0f}s. Rendering on the GPU…")
+            jpeg = await _render(screen)
+            glb = b""
+            exported = await run_in_blender(screen, _EXPORT)
+            if exported.startswith("ok"):
+                _, b64 = await screen.shell(f"base64 -w0 {MODEL_PATH}", timeout=60)
+                glb = base64.b64decode(b64.strip())
+        stamp = int(time.time())
+        key = f"renders/{owner}/{wid}/{stamp}.jpg"
         await app.storage.put_bytes(key, jpeg, "image/jpeg")
+        picture = app.storage.presign_get(key, LINK_SECONDS)
+        viewer = ""
+        if glb:
+            token = secrets.token_urlsafe(18)
+            mkey = f"models/{owner}/{wid}/{stamp}.glb"
+            await app.storage.put_bytes(mkey, glb, "model/gltf-binary")
+            app.vault.section_put("models", token, {"key": mkey, "title": title, "poster_url": picture})
+            viewer = f"{app.settings.public_web_origin}/m/{token}"
         total = time.monotonic() - started
-        await app.notify(
-            w, "status", f"Here's {request.strip().rstrip('.')}, rendered on the T4 ({total:.0f}s total).", key
+        await post(
+            "image",
+            json.dumps({"url": picture, "caption": f"{title}, rendered on the T4 in {total:.0f}s", "viewer": viewer}),
         )
-        log.info("scene.done", workload=wid, seconds=round(total, 1))
+        if channel == "imessage" and handle:
+            text = f"Here's {title}, rendered on the GPU in {total:.0f}s."
+            if viewer:
+                text += f" Spin it in 3D: {viewer}"
+            await app.send_text(owner, handle, text, key)
+        log.info("scene.done", workload=wid, seconds=round(total, 1), model=bool(glb))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         log.exception("scene.failed", workload=wid)
-        await app.notify(w, "error", f"I couldn't build that one: {str(exc)[:200]}")
+        await fail(str(exc)[:200])

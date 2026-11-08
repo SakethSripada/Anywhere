@@ -19,7 +19,7 @@ import structlog
 import websockets
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from starlette.routing import Route
 
@@ -482,6 +482,23 @@ def _routes():
         await _drop_watchers(await app.revoke_share(owner, workload_id))
         return {"ok": True}
 
+    @r.get("/v1/models/{token}")
+    async def model_info(token: str, app: Anywhere = Depends(anywhere)):
+        """A shared 3D model (from a scene build): title, for the public viewer page."""
+        rec = app.vault.section_get("models", token) if len(token) >= 16 else None
+        if not rec:
+            raise HTTPException(404, "This 3D link doesn't exist")
+        return {"title": rec.get("title", "Scene"), "poster": rec.get("poster_url")}
+
+    @r.get("/v1/models/{token}/model.glb")
+    async def model_file(token: str, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"model:{token}", 120)
+        rec = app.vault.section_get("models", token) if len(token) >= 16 else None
+        if not rec:
+            raise HTTPException(404, "This 3D link doesn't exist")
+        data = await app.storage.get_bytes(rec["key"])
+        return Response(data, media_type="model/gltf-binary", headers={"Cache-Control": "public, max-age=3600"})
+
     @r.get("/v1/watch/{token}")
     async def watch(token: str, app: Anywhere = Depends(anywhere)):
         rate_limit(f"watch:{sharing.digest(token)}", 240)
@@ -688,20 +705,37 @@ def _routes():
                 return {"reply": f"I couldn't link this number: {_clean_reducer_error(str(exc))}."}
 
         owner = await app.store.handle_owner(handle)
+        guest = False
+        if not owner and app.settings.imessage_guest_owner:
+            # Demo mode: anyone can text; each sender gets their own thread in the demo account.
+            owner, guest = app.settings.imessage_guest_owner, True
         if not owner:
             return {
                 "reply": "Hi! I'm Anywhere. Link this number from Settings in the web app, then text me the 6-digit code."
             }
 
-        rate_limit(f"imsg:{owner}", 15)
-        cid = app.vault.get(0).get(f"imessage:{owner}")
+        rate_limit(f"imsg:{owner}:{handle}" if guest else f"imsg:{owner}", 15)
+        slot = f"imessage:{owner}:{handle}" if guest else f"imessage:{owner}"
+        cid = app.vault.get(0).get(slot)
         if not cid:
             cid = new_id()
-            await app.store.upsert_conversation(cid, owner, "Messages", "imessage")
-            app.vault.update(0, **{f"imessage:{owner}": cid})
+            title = f"Texts from …{handle[-4:]}" if guest else "Messages"
+            await app.store.upsert_conversation(cid, owner, title, "imessage")
+            app.vault.update(0, **{slot: cid})
         await app.store.append_message(cid, "user", "text", body.text, 0, "imessage")
-        ctx = TurnContext(owner, cid, "imessage")
+        ctx = TurnContext(owner, cid, "imessage", handle=handle)
         reply = await _agent_turn(app, request.app.state.agent, ctx, body.text, post=True)
+        # The same pictures show in the web thread, so the browser matches the phone.
+        for jpeg in ctx.attachments:
+            try:
+                key = f"renders/{owner}/shots/{new_id()}.jpg"
+                await app.storage.put_bytes(key, jpeg, "image/jpeg")
+                url = app.storage.presign_get(key, 6 * 24 * 3600)
+                await app.store.append_message(
+                    cid, "assistant", "image", json.dumps({"url": url, "caption": "", "viewer": ""}), 0, "imessage"
+                )
+            except Exception as exc:
+                log.warning("imessage.picture_post_failed", error=str(exc)[:200])
         # Pictures the agent took this turn (send_screenshot) go out right after the reply.
         attachments = [
             {

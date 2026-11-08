@@ -145,6 +145,8 @@ class TurnContext:
     focus_workload_id: int | None = None
     #: Pictures (JPEG bytes) to send after the reply, e.g. a screenshot the user asked for over iMessage.
     attachments: list[bytes] = field(default_factory=list)
+    #: The phone number this turn came from (iMessage), so results go back to that sender.
+    handle: str = ""
 
 
 FOCUS = """
@@ -347,6 +349,16 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             return json.dumps(
                 {"ok": False, "message": f"{w['title']} isn't a running desktop, so there's nothing to show."}
             )
+        from .scene import quick_render
+
+        # A camera render frames the scene; a desktop screenshot shrinks it into Blender's UI.
+        render = await quick_render(app, w)
+        if render is not None:
+            if len(ctx.attachments) < 3:
+                ctx.attachments.append(render)
+            return json.dumps(
+                {"ok": True, "workload_id": workload_id, "message": "Picture taken; it is sent right after your reply."}
+            )
         try:
             frame = await app.supervisor.shots.frame(
                 int(w["id"]), app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))
@@ -442,7 +454,9 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
         busy = tasks.get(int(w["id"]))
         if busy is not None and not busy.done():
             return json.dumps({"ok": False, "message": "It's still building the last request. Give it a moment."})
-        tasks[int(w["id"])] = asyncio.create_task(build(app, w, request))
+        tasks[int(w["id"])] = asyncio.create_task(
+            build(app, w, request, conversation_id=ctx.conversation_id, channel=ctx.channel, handle=ctx.handle)
+        )
         return json.dumps(
             {
                 "ok": True,

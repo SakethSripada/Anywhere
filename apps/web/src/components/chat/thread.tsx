@@ -6,7 +6,7 @@ import Link from "next/link";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LoadingStatus } from "@/components/bui/loader";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import { toItems, useAgentBusy, type ChatItem } from "@/lib/chat";
+import { parseImage, toItems, useAgentBusy, type ChatItem } from "@/lib/chat";
 import { useWorkload } from "@/lib/data";
 import { clock, ms } from "@/lib/format";
 import { NONE, useShared } from "@/lib/tables";
@@ -189,6 +189,8 @@ const Item = memo(function Item({ item, compact, focused }: { item: ChatItem; co
       return <Markdown text={item.m.body} className={cn("text-red", prose(compact))} />;
     case "agent":
       return <Markdown text={item.m.body} className={prose(compact)} />;
+    case "image":
+      return <Picture m={item.m} />;
     default:
       return <Markdown text={item.m.body} className={prose(compact)} />;
   }
@@ -205,6 +207,30 @@ function WidePlan({ workloadId }: { workloadId: bigint }) {
     <div>
       <PlanCard workloadId={workloadId} />
     </div>
+  );
+}
+
+/** A rendered picture (from a scene build or a texted "show me"), with its 3D link. */
+function Picture({ m }: { m: Message }) {
+  const img = parseImage(m.body);
+  if (!img) return null;
+  return (
+    <figure className="max-w-md" style={{ animation: "fade-up 300ms cubic-bezier(0.23,1,0.32,1) both" }}>
+      <a href={img.url} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-card shadow-hairline">
+        {/* eslint-disable-next-line @next/next/no-img-element -- presigned storage URL, not an optimizable asset */}
+        <img src={img.url} alt={img.caption || "Render"} className="block aspect-video w-full bg-inset object-cover" loading="lazy" />
+      </a>
+      {(img.caption || img.viewer) && (
+        <figcaption className="mt-2 flex items-baseline gap-3 text-[12.5px] text-ink-2">
+          <span className="min-w-0 flex-1">{img.caption}</span>
+          {img.viewer && (
+            <a href={img.viewer} target="_blank" rel="noreferrer" className="shrink-0 font-medium text-ink underline decoration-line-strong underline-offset-2 hover:decoration-current">
+              Open in 3D
+            </a>
+          )}
+        </figcaption>
+      )}
+    </figure>
   );
 }
 

@@ -415,8 +415,27 @@ kit.sun = _lenient(
 )
 
 
+_BACKDROP = ("ground", "water", "terrain", "sea", "ocean", "floor", "plane", "sky")
+
+
+def _subject_objects():
+    """What the scene is about: visible meshes and text that aren't backdrop (ground, water,
+    terrain, or anything far bigger than the rest)."""
+    objs = [o for o in bpy.context.scene.objects if o.type in ("MESH", "CURVE", "FONT") and o.visible_get()]
+    sized = [(o, max(o.dimensions) if o.dimensions else 0.0) for o in objs]
+    keep = [o for o, d in sized if not any(k in o.name.lower() for k in _BACKDROP)]
+    if keep:
+        dims = sorted(max(o.dimensions) for o in keep)
+        median = dims[len(dims) // 2] or 1.0
+        keep = [o for o in keep if max(o.dimensions) <= max(median * 12, 30.0)]
+    return keep or [o for o, d in sized]
+
+
 def _orbit(target=(0, 0, 0), radius=30.0, height=15.0, frames=240, lens=35.0, subject=None):
-    """subject = the hero object(s): the camera then frames them, whatever target/radius say."""
+    """Frames everything that isn't backdrop, plus `subject` if given. (Models pass a single part
+    as the subject, and the camera then sat inside the rest of the scene.)"""
+    named = subject if isinstance(subject, (list, tuple)) else ([subject] if subject is not None else [])
+    subject = list(dict.fromkeys([*_subject_objects(), *[o for o in named if hasattr(o, "matrix_world")]]))
     if subject is not None:
         objs = subject if isinstance(subject, (list, tuple)) else [subject]
         pts = []
@@ -889,6 +908,7 @@ for _name, _fn in {
 }.items():
     setattr(kit, _name, _fn)
 kit.NEON = NEON
+kit.subject_objects = staticmethod(_subject_objects)
 
 # Scripts get kit as a global, and "import kit" (which models write anyway) finds it too.
 sys.modules["kit"] = kit

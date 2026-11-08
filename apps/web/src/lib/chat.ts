@@ -18,6 +18,7 @@ export type ChatItem =
   | { type: "plan"; key: string; m: Message }
   | { type: "status"; key: string; m: Message }
   | { type: "agent"; key: string; m: Message }
+  | { type: "image"; key: string; m: Message }
   | { type: "tools"; key: string; calls: ToolCall[] };
 
 function parse(body: string): Record<string, unknown> | null {
@@ -66,6 +67,7 @@ export function toItems(messages: readonly Message[]): ChatItem[] {
     else if (m.kind === "status") items.push({ type: "status", key, m });
     else if (m.kind === "error") items.push({ type: "error", key, m });
     else if (m.kind === "agent") items.push({ type: "agent", key, m });
+    else if (m.kind === "image") items.push({ type: "image", key, m });
     else items.push({ type: "text", key, m });
   }
   return items;
@@ -102,4 +104,14 @@ export function useAgentBusy(items: readonly ChatItem[]): boolean {
 
 export function parseOutput(output: string): Record<string, unknown> | null {
   return parse(output);
+}
+
+/** A picture message (a render or a texted screenshot): body is {url, caption, viewer}. */
+export function parseImage(body: string): { url: string; caption: string; viewer: string } | null {
+  try {
+    const v = JSON.parse(body) as Record<string, unknown>;
+    return typeof v.url === "string" ? { url: v.url, caption: String(v.caption ?? ""), viewer: String(v.viewer ?? "") } : null;
+  } catch {
+    return null;
+  }
 }

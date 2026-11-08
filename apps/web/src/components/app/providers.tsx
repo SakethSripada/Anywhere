@@ -18,7 +18,7 @@ function Booting() {
 
 /** Pages anyone with a link can open: no account, no SpacetimeDB session. */
 export function isPublicPath(path: string | null) {
-  return !!path?.startsWith("/watch/");
+  return !!path && (path.startsWith("/watch/") || path.startsWith("/m/"));
 }
 
 export function Providers({ children }: { children: ReactNode }) {

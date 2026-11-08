@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     spectrum_project_id: str | None = None
     spectrum_project_secret: SecretStr | None = None
     spectrum_api_base: str = "https://spectrum.photon.codes"
+    #: Demo mode: texts from numbers nobody has linked act as this account (an identity
+    #: hex), each sender in their own thread, instead of being told to link the number.
+    imessage_guest_owner: str | None = None
     #: Shared secret the messaging bridge uses to call this service.
     messaging_bridge_secret: SecretStr | None = None
 
@@ -100,6 +103,11 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("imessage_guest_owner")
+    @classmethod
+    def _identity_hex(cls, v: str | None) -> str | None:
+        return v.strip().removeprefix("0x").lower() or None if v else None
 
     @field_validator("cors_origins")
     @classmethod
