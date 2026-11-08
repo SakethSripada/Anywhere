@@ -49,7 +49,7 @@ async function request<T>(path: string, init: RequestInit & { token: string | nu
 export function useApi() {
   const { token, identity } = useSession();
 
-  const get = useCallback(<T,>(path: string) => request<T>(path, { method: "GET", token, identity }), [token, identity]);
+  const get = useCallback(<T,>(path: string, opts?: { signal?: AbortSignal }) => request<T>(path, { method: "GET", token, identity, signal: opts?.signal }), [token, identity]);
   const post = useCallback(
     <T,>(path: string, body?: Json) =>
       request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body), token, identity }),

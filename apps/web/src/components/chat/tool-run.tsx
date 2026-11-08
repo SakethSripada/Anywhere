@@ -2,7 +2,7 @@
 
 import type { AgentStep, Workload } from "@anywhere/stdb";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DetailLines, ToolGroup, ToolRow, type ToolIconName } from "@/components/bui/tool-chips";
 import { Trace, type TraceRow } from "@/components/bui/trace";
 import { useElapsed } from "@/components/bui/loader";
@@ -106,7 +106,6 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
   const elapsed = useElapsed(working && run ? ms(run.startedAt) : 0);
   const rows = useMemo(() => toRows(steps, working), [steps, working]);
   const acts = steps.filter((s) => s.kind === "act").length;
-  const shot = useLatestShot(steps);
   if (!run) return null;
 
   const took = run.endedAt ? duration(ms(run.endedAt) - ms(run.startedAt)) : null;
@@ -125,14 +124,10 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
         done={done}
         meta={working ? elapsed : undefined}
         rows={rows}
-        footer={
+        footer={(expanded) => (
           <div className="flex flex-col gap-2 pt-1 pb-1">
-            {shot && (
-              <a href={shot} target="_blank" rel="noreferrer" className="block w-full max-w-72 overflow-hidden rounded-card shadow-hairline">
-                {/* eslint-disable-next-line @next/next/no-img-element -- presigned, short-lived URL */}
-                <img src={shot} alt="What the agent saw last" className="aspect-video w-full object-cover" />
-              </a>
-            )}
+            {/* The thumbnail sits inside the collapsed area, so only fetch it once the trace is open. */}
+            <LatestShot steps={steps} enabled={expanded} />
             {run.result && run.status !== "running" && <p className={run.status === "done" ? "text-[12.5px] text-ink-2" : "text-[12.5px] text-red"}>{run.result}</p>}
             {linkMachines && (
               <Link href={`/w/${workload.id}`} className="w-fit text-[12px] text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink-2 hover:decoration-current">
@@ -140,7 +135,7 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
               </Link>
             )}
           </div>
-        }
+        )}
       />
     </div>
   );
@@ -174,22 +169,50 @@ function toRows(steps: AgentStep[], working: boolean): TraceRow[] {
   return rows;
 }
 
-function useLatestShot(steps: AgentStep[]) {
+function LatestShot({ steps, enabled }: { steps: AgentStep[]; enabled: boolean }) {
+  const shot = useLatestShot(steps, enabled);
+  if (!shot) return null;
+  return (
+    <a href={shot} target="_blank" rel="noreferrer" className="block w-full max-w-72 overflow-hidden rounded-card shadow-hairline">
+      {/* eslint-disable-next-line @next/next/no-img-element -- presigned, short-lived URL */}
+      <img src={shot} alt="What the agent saw last" className="aspect-video w-full object-cover" />
+    </a>
+  );
+}
+
+/** Presigned screenshot URLs by storage key; they live 15 minutes server-side, reuse them for 10. */
+const SHOT_TTL = 10 * 60_000;
+const shotCache = new Map<string, { url: string; at: number }>();
+
+function cachedShot(key: string | null) {
+  const hit = key ? shotCache.get(key) : undefined;
+  return hit && Date.now() - hit.at < SHOT_TTL ? hit.url : null;
+}
+
+function useLatestShot(steps: AgentStep[], enabled: boolean) {
   const api = useApi();
-  const key = [...steps].reverse().find((s) => s.screenshotKey)?.screenshotKey ?? null;
+  const apiRef = useRef(api);
+  useEffect(() => {
+    apiRef.current = api;
+  });
+  const key = useMemo(() => {
+    for (let i = steps.length - 1; i >= 0; i--) if (steps[i].screenshotKey) return steps[i].screenshotKey;
+    return null;
+  }, [steps]);
   const [shot, setShot] = useState<{ key: string; url: string } | null>(null);
   useEffect(() => {
-    if (!key) return;
-    let cancelled = false;
-    api
-      .get<{ url: string }>(`/v1/files?key=${encodeURIComponent(key)}`)
-      .then(({ url }) => !cancelled && setShot({ key, url }))
+    if (!key || !enabled || cachedShot(key)) return;
+    const ctl = new AbortController();
+    apiRef.current
+      .get<{ url: string }>(`/v1/files?key=${encodeURIComponent(key)}`, { signal: ctl.signal })
+      .then(({ url }) => {
+        shotCache.set(key, { url, at: Date.now() });
+        if (!ctl.signal.aborted) setShot({ key, url });
+      })
       .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [api, key]);
-  return shot && shot.key === key ? shot.url : null;
+    return () => ctl.abort();
+  }, [key, enabled]);
+  return cachedShot(key) ?? (shot && shot.key === key ? shot.url : null);
 }
 
 function objectFor(call: ToolCall, title?: string): string | undefined {
