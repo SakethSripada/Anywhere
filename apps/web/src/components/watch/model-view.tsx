@@ -39,7 +39,6 @@ export function ModelView({ token }: { token: string }) {
       {!missing &&
         createElement("model-viewer", {
           src,
-          poster: info?.poster,
           alt: info?.title ?? "3D scene",
           "camera-controls": true,
           "auto-rotate": true,
@@ -52,7 +51,9 @@ export function ModelView({ token }: { token: string }) {
           "camera-orbit": "35deg 72deg auto",
           "interaction-prompt": "auto",
           ar: true,
-          style: { flex: 1, width: "100%", minHeight: 0, background: "transparent", ["--poster-color" as string]: "transparent" },
+          loading: "eager",
+          // No poster: on phones the poster image sometimes stayed over the loaded model.
+          style: { flex: 1, width: "100%", minHeight: 0, background: "transparent" },
         })}
       <footer className="shrink-0 px-5 py-4 text-center text-[12px] text-white/50">Drag to spin · pinch to zoom · built live on an NVIDIA GPU</footer>
     </main>

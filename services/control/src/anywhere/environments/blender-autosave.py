@@ -447,7 +447,11 @@ def _orbit(target=(0, 0, 0), radius=30.0, height=15.0, frames=240, lens=35.0, su
             hi = [max(p[i] for p in pts) for i in range(3)]
             target = tuple((lo[i] + hi[i]) / 2 for i in range(3))
             span = max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1.0)
-            radius, height = span * 2.4, target[2] + span * 0.45  # whole subject in frame, with room
+            w = max(hi[0] - lo[0], hi[1] - lo[1], 1.0)
+            h = max(hi[2] - lo[2], 1.0)
+            # Fit both ways for a 16:9 frame at 35 mm (about 54 deg wide, 32 deg tall), with margin.
+            radius = max(w * 1.45, h * 2.6, span * 1.6)
+            height = target[2] + radius * 0.22
     return _base_orbit(_vec(target), float(radius), float(height), int(frames), float(lens))
 
 
@@ -936,7 +940,16 @@ def _hero(path="/projects/hero.glb", height=8.0, location=(0, 0, 0), rotation=0.
     if names:
         col = m.node_tree.nodes.new("ShaderNodeVertexColor")
         col.layer_name = names[0]
-        m.node_tree.links.new(col.outputs["Color"], b.inputs["Base Color"])
+        # Generated colours come out pale; lift saturation and contrast so they read under
+        # strong coloured light (sunsets washed them to beige).
+        hsv = m.node_tree.nodes.new("ShaderNodeHueSaturation")
+        hsv.inputs["Saturation"].default_value = 1.45
+        hsv.inputs["Value"].default_value = 0.92
+        bc = m.node_tree.nodes.new("ShaderNodeBrightContrast")
+        bc.inputs["Contrast"].default_value = 0.18
+        m.node_tree.links.new(col.outputs["Color"], hsv.inputs["Color"])
+        m.node_tree.links.new(hsv.outputs["Color"], bc.inputs["Color"])
+        m.node_tree.links.new(bc.outputs["Color"], b.inputs["Base Color"])
     mesh.materials.clear()
     mesh.materials.append(m)
     return obj
