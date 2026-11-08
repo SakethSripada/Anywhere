@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
 import { AppLogo, appKey, appName } from "../app/app-logo";
 import { Uptime } from "./shared";
+import { MachineMenu } from "./machine-menu";
 import { StatusChip } from "./status";
 
 
@@ -107,9 +108,11 @@ export function JobPreview({ w }: { w: Workload }) {
 export function MachineCard({ w }: { w: Workload }) {
   const now = useNow(2000, BILLABLE.has(w.status));
   return (
+    // The manage menu sits beside the link, not inside it (a button can't live in an <a>).
+    <div className="group relative transition-transform duration-200 hover:-translate-y-px">
     <Link
       href={href(w)}
-      className="group flex flex-col gap-3 rounded-card bg-card p-2.5 shadow-hairline transition-[box-shadow,transform] duration-200 hover:-translate-y-px hover:shadow-overlay"
+      className="flex flex-col gap-3 rounded-card bg-card p-2.5 shadow-hairline transition-shadow duration-200 group-hover:shadow-overlay"
     >
       <div className="h-28">{w.kind === "desktop" ? <DesktopPreview w={w} /> : <JobPreview w={w} />}</div>
       <div className="flex items-start justify-between gap-2 px-1 pb-0.5">
@@ -134,5 +137,10 @@ export function MachineCard({ w }: { w: Workload }) {
         <StatusChip status={w.status} className="text-[12px]" />
       </div>
     </Link>
+    <MachineMenu
+      w={w}
+      className="absolute top-4 right-4 size-7 bg-card/80 opacity-0 backdrop-blur transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 data-[popup-open]:opacity-100"
+    />
+    </div>
   );
 }
