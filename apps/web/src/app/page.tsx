@@ -1,5 +1,5 @@
-import { Conversation } from "@/components/chat/conversation";
+import { Home } from "@/components/home/home";
 
-export default function Home() {
-  return <Conversation />;
+export default function HomePage() {
+  return <Home />;
 }

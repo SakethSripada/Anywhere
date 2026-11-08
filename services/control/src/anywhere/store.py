@@ -64,6 +64,11 @@ class Store:
     async def upsert_conversation(self, id: int, owner: str, title: str, channel: str) -> None:
         await self.client.call("upsert_conversation", id, identity_arg(owner), title, channel)
 
+    async def conversation_owned(self, conversation_id: int, owner: str) -> bool:
+        cid = int(conversation_id)  # interpolated into SQL: must be an integer
+        rows = await self.client.sql(f"SELECT * FROM worker_conversations WHERE id = {cid}")
+        return any(r["owner"] == owner for r in rows)
+
     async def append_message(
         self, conversation_id: int, role: str, kind: str, body: str, workload_id: int = 0, channel: str = "web"
     ) -> None:
@@ -143,6 +148,16 @@ class Store:
 
     async def finish_agent_run(self, id: int, status: str, result: str) -> None:
         await self.client.call("finish_agent_run", id, status, result)
+
+    async def agent_runs(self, workload_id: int) -> list[dict]:
+        wid = int(workload_id)  # interpolated into SQL: must be an integer
+        rows = await self.client.sql(f"SELECT * FROM worker_agent_runs WHERE workloadId = {wid}")
+        return sorted(rows, key=lambda r: r["startedAt"], reverse=True)
+
+    async def agent_steps(self, run_id: int) -> list[dict]:
+        rid = int(run_id)  # interpolated into SQL: must be an integer
+        rows = await self.client.sql(f"SELECT * FROM worker_agent_steps WHERE runId = {rid}")
+        return sorted(rows, key=lambda r: r["seq"])
 
     # ── Files ─────────────────────────────────────────────────────────────
     async def upsert_project(

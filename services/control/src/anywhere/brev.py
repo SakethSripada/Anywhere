@@ -1,12 +1,23 @@
 """NVIDIA Brev provider.
 
 Brev documents no public REST API; the supported automation surface is the
-`brev` CLI authenticated with an org-scoped API key (BREV_API_KEY). We invoke
-it with argument vectors (never a shell), parse its `--json` output, and keep
-every call bounded by a timeout.
+`brev` CLI authenticated with an org-scoped API key. We invoke it with argument
+vectors (never a shell), parse its `--json` output, and keep every call bounded
+by a timeout.
 
-JSON shapes come from brev-cli v0.6.337: `brev ls --json` emits WorkspaceInfo
-rows; `brev search gpu --json` emits GPUInstanceInfo rows.
+Verified against brev-cli v0.6.337 (source and `--help`):
+  * Auth: the CLI reads `BREV_API_KEY` (keys start with `bak-`) from the
+    environment on every command, so no `brev login` is needed. Without any
+    credential, commands print an interactive "log in? [Y/n]" prompt and may
+    exit 0, so stdin is closed and non-JSON output is treated as an error.
+  * `brev ls --json` prints `{"workspaces": [WorkspaceInfo] | null}`.
+  * `brev search gpu --json` prints `[GPUInstanceInfo]` and needs no auth.
+  * `brev create NAME --type T --dry-run` only echoes the type locally; it
+    neither authenticates nor checks the type, so dry-run mode validates both
+    explicitly (see `validate`).
+  * `brev start` blocks while polling unless `--detached` is passed.
+  * `brev refresh` writes ~/.brev/ssh_config with one `Host <name>` alias per
+    running instance (and `<name>-host`); in VM mode both reach the VM.
 """
 
 from __future__ import annotations
@@ -91,11 +102,15 @@ class BrevCLI:
         self._list_inflight = None
 
     async def _run(self, *args: str, timeout: float = 120) -> str:
-        env = {**os.environ, "BREV_API_KEY": self.api_key or ""}
+        env = dict(os.environ)
+        if self.api_key:
+            env["BREV_API_KEY"] = self.api_key
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.binary,
                 *args,
+                # Never let the CLI block on an interactive login prompt.
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -134,10 +149,7 @@ class BrevCLI:
     async def _list_uncached(self) -> list[Instance]:
         generation = self._generation
         out = await self._run("ls", "--json", timeout=45)
-        data = json.loads(out or "[]")
-        if isinstance(data, dict):
-            data = data.get("workspaces") or data.get("instances") or []
-        rows = [Instance.from_json(r) for r in data]
+        rows = [Instance.from_json(r) for r in parse_ls(out)]
         if generation == self._generation:  # a mutation since the call started makes it stale
             self._list_cache = (time.monotonic(), rows)
         return rows
@@ -146,7 +158,21 @@ class BrevCLI:
         return next((i for i in await self.list() if i.name == name), None)
 
     async def refresh_ssh(self) -> None:
-        await self._run("refresh", timeout=60)
+        await self._run("refresh", timeout=90)
+
+    async def check_auth(self) -> int:
+        """Confirm the CLI is authenticated. Returns how many instances the org has."""
+        return len(await self.list())
+
+    async def validate(self, instance_type: str) -> None:
+        """What a dry run proves: credentials work and Brev offers this type right now."""
+        await self.check_auth()
+        try:
+            rows = json.loads(await self.search_gpu_json())
+        except json.JSONDecodeError as exc:
+            raise BrevError("brev search returned unexpected output") from exc
+        if isinstance(rows, list) and not any(r.get("type") == instance_type for r in rows if isinstance(r, dict)):
+            raise BrevError(f"Brev does not currently offer instance type {instance_type}")
 
     # ── Mutations ─────────────────────────────────────────────────────────
 
@@ -165,12 +191,17 @@ class BrevCLI:
             name,
             "--type",
             instance_type,
+            "--mode",
+            "vm",
+            "--jupyter=false",
             "--startup-script",
             f"@{startup_script}",
             "--detached",
         ]
         dry_run = self.mode == ProvisioningMode.DRY_RUN
         if dry_run:
+            # `create --dry-run` is local-only; check auth and the type first.
+            await self.validate(instance_type)
             args.append("--dry-run")
         log.info("brev.create", name=name, type=instance_type, dry_run=dry_run)
         try:
@@ -189,7 +220,7 @@ class BrevCLI:
     async def start(self, name: str) -> None:
         self._guard()
         try:
-            await self._run("start", name, timeout=300)
+            await self._run("start", name, "--detached", timeout=300)
         finally:
             self._invalidate()
 
@@ -217,6 +248,20 @@ class BrevCLI:
                 raise BrevError(f"Instance {name} failed to deploy")
             await asyncio.sleep(interval)
         raise BrevError(f"Instance {name} did not reach {want} within {timeout / 60:.0f} min (last: {last})")
+
+
+def parse_ls(out: str) -> list[dict]:
+    """Rows from `brev ls --json`; anything that isn't JSON means the CLI isn't authenticated."""
+    try:
+        data = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        hint = out.strip().splitlines()[0][:200] if out.strip() else "no output"
+        raise BrevError(f"brev ls did not return JSON (is BREV_API_KEY set and valid?): {hint}") from exc
+    if isinstance(data, dict):
+        data = data.get("workspaces") or []
+    if not isinstance(data, list):
+        raise BrevError("brev ls returned an unexpected shape")
+    return [r for r in data if isinstance(r, dict)]
 
 
 def instance_name(workload_id: int) -> str:

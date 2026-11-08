@@ -88,8 +88,8 @@ class Remote:
         return result
 
     async def write_file(self, path: str, content: bytes, mode: str = "0644") -> None:
-        q = shlex.quote(path)
-        await self.run(f"mkdir -p $(dirname {q}) && cat > {q} && chmod {mode} {q}", input=content)
+        q = quote_path(path)
+        await self.run(f'mkdir -p "$(dirname {q})" && cat > {q} && chmod {mode} {q}', input=content)
 
     async def reachable(self) -> bool:
         try:
@@ -155,6 +155,19 @@ def end_process(proc: subprocess.Popen) -> None:
         if f is not None:
             with contextlib.suppress(Exception):
                 f.close()
+
+
+def quote_path(path: str) -> str:
+    """Shell-quote a remote path while still expanding a leading `~/`.
+
+    Plain `shlex.quote("~/x")` produces `'~/x'`, which the remote shell does not
+    expand, so files would land in a directory literally named `~`.
+    """
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(path[2:])
+    return shlex.quote(path)
 
 
 def _free_port() -> int:

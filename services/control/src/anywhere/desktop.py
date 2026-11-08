@@ -7,6 +7,7 @@ import asyncio
 import base64
 import contextlib
 import io
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
@@ -34,7 +35,11 @@ class Screen(Protocol):
 
 
 class CuaScreen:
-    """Adapter over `cua_sandbox.Sandbox` (cua-spacesd gRPC)."""
+    """Adapter over `cua_sandbox.Sandbox` (cua-spacesd gRPC).
+
+    Verified against ghcr.io/trycua/linux:24.04 (cua-spacesd 0.12.7) with
+    cua-sandbox 0.9.1 + cua 0.5.0: 1280x800 PNG screenshots, mouse/keyboard
+    input, and shell commands, which run as the image's `cua` user."""
 
     def __init__(self, sandbox):
         self.sb = sandbox
@@ -106,6 +111,8 @@ def prepare_frame(png: bytes, max_width: int = 1280, quality: int = 72) -> Frame
 
 @contextlib.asynccontextmanager
 async def connect_screen(remote: Remote, token: str) -> AsyncIterator[Screen]:
+    # The native Cua runtime has its own telemetry, separate from `telemetry_enabled`.
+    os.environ.setdefault("CUA_TELEMETRY", "0")
     try:
         from cua_sandbox import Sandbox
     except ImportError as exc:  # pragma: no cover - dependency is declared
@@ -117,14 +124,12 @@ async def connect_screen(remote: Remote, token: str) -> AsyncIterator[Screen]:
         yield CuaScreen(sb)
 
 
-async def _port_open(port: int, timeout: float = 1.0) -> bool:
+async def _accepts(port: int) -> bool:
     try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout)
+        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 3)
     except (OSError, TimeoutError):
         return False
     writer.close()
-    with contextlib.suppress(Exception):
-        await writer.wait_closed()
     return True
 
 
@@ -139,10 +144,9 @@ class VncTunnels:
         async with self._lock:
             if workload_id in self._tunnels:
                 cm, port = self._tunnels[workload_id]
-                if await _port_open(port):
+                if await _accepts(port):
                     return port
-                # The ssh -N process died (network blip, instance restart). Drop
-                # it and open a fresh tunnel instead of handing out a dead port.
+                # The SSH process died (machine stopped, network blip): rebuild it.
                 del self._tunnels[workload_id]
                 with contextlib.suppress(Exception):
                     await cm.__aexit__(None, None, None)

@@ -7,8 +7,11 @@ import { Button } from "@/components/ui/button";
 import { ApiError, useApi } from "@/lib/api";
 import { tables, useTable } from "@/lib/stdb";
 import { useChat } from "@/lib/use-chat";
+import { cn } from "@/lib/utils";
 import { Composer, type ComposerHandle } from "../chat/composer";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Thread } from "../chat/thread";
+import { EventFeed } from "./shared";
 
 const PROMPTS: Record<string, string[]> = {
   desktop: ["Open Blender and model a simple low-poly tree", "What’s on the screen right now?", "Save my project"],
@@ -21,6 +24,7 @@ export function AgentSidebar({ w }: { w: Workload }) {
   const { messages, pending, send } = useChat(cid, { workloadId: w.id });
   const composer = useRef<ComposerHandle>(null);
   const live = w.status === "running" || w.status === "saving";
+  const [tab, setTab] = useState<"agent" | "activity">("agent");
 
   async function submit(text: string) {
     const id = await send(text);
@@ -29,13 +33,23 @@ export function AgentSidebar({ w }: { w: Workload }) {
 
   return (
     <aside className="flex h-full min-h-0 flex-col bg-background">
-      <div className="flex h-11 shrink-0 items-center border-b px-4">
-        <span className="text-sm font-medium">Agent</span>
+      <div className="flex h-12 shrink-0 items-end border-b px-3">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as "agent" | "activity")} className="gap-0">
+          <TabsList variant="line" className="h-12 border-0">
+            <TabsTrigger value="agent">Agent</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
+      {tab === "activity" && (
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <EventFeed workloadId={w.id} />
+        </div>
+      )}
 
-      {w.kind === "desktop" && <LiveRunBanner w={w} />}
+      {tab === "agent" && w.kind === "desktop" && <LiveRunBanner w={w} />}
 
-      {messages.length === 0 && pending.length === 0 ? (
+      {tab !== "agent" ? null : messages.length === 0 && pending.length === 0 ? (
         <div className="flex min-h-0 flex-1 flex-col justify-end gap-2 p-4">
           <p className="mb-3 text-sm leading-6 text-muted-foreground">
             {w.kind === "desktop"
@@ -58,7 +72,7 @@ export function AgentSidebar({ w }: { w: Workload }) {
         <Thread messages={messages} pending={pending} compact />
       )}
 
-      <div className="shrink-0 p-3 pt-0">
+      <div className={cn("shrink-0 p-3 pt-0", tab !== "agent" && "hidden")}>
         <Composer
           ref={composer}
           compact

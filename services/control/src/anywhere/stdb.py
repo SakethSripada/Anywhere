@@ -156,9 +156,7 @@ class SpacetimeClient:
         return _identity_hex(data["identity"]), data["token"]
 
     async def verify(self, identity_hex: str, token: str) -> bool:
-        res = await self._http.get(
-            f"/v1/identity/{identity_hex}/verify", headers={"Authorization": f"Bearer {token}"}
-        )
+        res = await self._http.get(f"/v1/identity/{identity_hex}/verify", headers={"Authorization": f"Bearer {token}"})
         return res.status_code < 300
 
 
