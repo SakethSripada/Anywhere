@@ -244,14 +244,6 @@ function Header({
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
-        {desktop && running && (
-          <Tooltip>
-            <TooltipTrigger render={<Button size="sm" variant="outline" disabled={busy === "save"} onClick={() => void run("save")} />}>
-              <Save /> <span className="hidden md:inline">Save</span>
-            </TooltipTrigger>
-            <TooltipContent>Copy ~/Projects to durable storage</TooltipContent>
-          </Tooltip>
-        )}
         {running && (
           <Button size="sm" variant="outline" onClick={() => setConfirm(desktop && w.stoppable ? "stop" : "delete")}>
             {desktop && w.stoppable ? <Pause /> : <Square className="size-3" />}
@@ -271,6 +263,11 @@ function Header({
             {w.conversationId > 0n && (
               <DropdownMenuItem onClick={() => router.push(`/c/${w.conversationId}`)}>
                 <MessageSquare /> Open full conversation
+              </DropdownMenuItem>
+            )}
+            {desktop && running && (
+              <DropdownMenuItem disabled={busy === "save"} onClick={() => void run("save")}>
+                <Save /> Save project files now
               </DropdownMenuItem>
             )}
             <DropdownMenuItem

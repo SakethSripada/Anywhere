@@ -17,10 +17,38 @@ import { RunTrace, ToolRun } from "./tool-run";
 
 export type Pending = { id: string; text: string };
 
+type EventItem = { kind: "event"; at: number; key: string; level: string; text: string; time: string };
 type StreamItem =
   | { kind: "chat"; at: number; item: ChatItem }
   | { kind: "run"; at: number; key: string; runId: bigint }
-  | { kind: "event"; at: number; key: string; level: string; text: string; time: string };
+  | EventItem
+  | { kind: "events"; at: number; key: string; events: EventItem[] };
+
+const routine = (e: StreamItem): e is EventItem => e.kind === "event" && (e.level === "info" || e.level === "success");
+
+/**
+ * Fold runs of routine machine events ("Fetching the desktop image", ...) into
+ * one collapsible line, so the conversation isn't buried under setup steps.
+ * Warnings and errors always stay on their own line.
+ */
+function foldEvents(items: StreamItem[]): StreamItem[] {
+  const out: StreamItem[] = [];
+  let run: EventItem[] = [];
+  const flush = () => {
+    if (run.length >= 3) out.push({ kind: "events", at: run[0].at, key: `g${run[0].key}`, events: run });
+    else out.push(...run);
+    run = [];
+  };
+  for (const it of items) {
+    if (routine(it)) run.push(it);
+    else {
+      flush();
+      out.push(it);
+    }
+  }
+  flush();
+  return out;
+}
 
 /**
  * One continuous stream, the way Codex and Claude show an agent: what you
@@ -57,7 +85,7 @@ export function Thread({
         // Runs already narrate themselves; skip their start/finish events.
         if (e.workloadId === focus.id && !/^agent (started|finished|stopped|paused|resumed)/i.test(e.message)) out.push({ kind: "event", at: ms(e.createdAt), key: `e${e.id}`, level: e.level, text: e.message, time: clock(e.createdAt) });
     }
-    return out.sort((a, b) => a.at - b.at);
+    return foldEvents(out.sort((a, b) => a.at - b.at));
   }, [items, runs, events, focus]);
 
   const busy = pending.length > 0 || agentBusy(items, now);
@@ -91,6 +119,8 @@ export function Thread({
               <RunTrace key={s.key} workload={focus} runId={s.runId} linkMachines={false} />
             ) : s.kind === "event" ? (
               <EventLine key={s.key} level={s.level} text={s.text} time={s.time} />
+            ) : s.kind === "events" ? (
+              <EventGroup key={s.key} events={s.events} />
             ) : null,
           )}
           {pending.map((p) => (
@@ -194,6 +224,36 @@ function StatusLine({ m, focused }: { m: Message; focused: boolean }) {
         <Link href={href(w)} className="shrink-0 text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink hover:decoration-current">
           Open
         </Link>
+      )}
+    </div>
+  );
+}
+
+function EventGroup({ events }: { events: EventItem[] }) {
+  const [open, setOpen] = useState(false);
+  const last = events.at(-1)!;
+  const took = last.at - events[0].at;
+  const span = took >= 60_000 ? `${Math.round(took / 60_000)} min` : `${Math.max(1, Math.round(took / 1000))}s`;
+  return (
+    <div className="text-[12px] text-ink-3" style={{ animation: "fade-in 300ms ease-out both" }}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-baseline gap-2 text-left transition-colors hover:text-ink-2"
+      >
+        <span className="size-1.5 shrink-0 -translate-y-px rounded-full bg-line-strong" />
+        <span className="min-w-0 flex-1 truncate">
+          Machine setup · {events.length} steps over {span} · <span className="text-ink-2">{last.text}</span>
+        </span>
+        <span className="shrink-0 text-[11px]">{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-col gap-1.5 border-l pl-3">
+          {events.map((e) => (
+            <EventLine key={e.key} level={e.level} text={e.text} time={e.time} />
+          ))}
+        </div>
       )}
     </div>
   );
