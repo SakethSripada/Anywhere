@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,10 +73,22 @@ class CreateResult:
 
 
 class BrevCLI:
+    #: How long one `brev ls` result is shared. Boot/stop waits, deletes and the
+    #: reconciler all read the list; within this window they reuse a single call.
+    LIST_TTL_SECONDS = 8.0
+
     def __init__(self, binary: str, api_key: str | None, mode: ProvisioningMode):
         self.binary = binary
         self.api_key = api_key
         self.mode = mode
+        self._list_cache: tuple[float, list[Instance]] | None = None
+        self._list_inflight: asyncio.Task | None = None
+        self._generation = 0
+
+    def _invalidate(self) -> None:
+        self._generation += 1
+        self._list_cache = None
+        self._list_inflight = None
 
     async def _run(self, *args: str, timeout: float = 120) -> str:
         env = {**os.environ, "BREV_API_KEY": self.api_key or ""}
@@ -106,11 +119,24 @@ class BrevCLI:
         return await self._run("search", "gpu", "--json", timeout=45)
 
     async def list(self) -> list[Instance]:
+        """`brev ls`, shared: concurrent callers join one subprocess and reuse its
+        result for LIST_TTL_SECONDS. Any mutation invalidates the cache."""
+        if self._list_cache and time.monotonic() - self._list_cache[0] < self.LIST_TTL_SECONDS:
+            return list(self._list_cache[1])
+        if self._list_inflight is None or self._list_inflight.done():
+            self._list_inflight = asyncio.create_task(self._list_uncached())
+        return list(await asyncio.shield(self._list_inflight))
+
+    async def _list_uncached(self) -> list[Instance]:
+        generation = self._generation
         out = await self._run("ls", "--json", timeout=45)
         data = json.loads(out or "[]")
         if isinstance(data, dict):
             data = data.get("workspaces") or data.get("instances") or []
-        return [Instance.from_json(r) for r in data]
+        rows = [Instance.from_json(r) for r in data]
+        if generation == self._generation:  # a mutation since the call started makes it stale
+            self._list_cache = (time.monotonic(), rows)
+        return rows
 
     async def get(self, name: str) -> Instance | None:
         return next((i for i in await self.list() if i.name == name), None)
@@ -143,22 +169,34 @@ class BrevCLI:
         if dry_run:
             args.append("--dry-run")
         log.info("brev.create", name=name, type=instance_type, dry_run=dry_run)
-        out = await self._run(*args, timeout=300)
+        try:
+            out = await self._run(*args, timeout=300)
+        finally:
+            self._invalidate()
         return CreateResult(name=name, dry_run=dry_run, output=out.strip()[-2000:])
 
     async def stop(self, name: str) -> None:
         self._guard()
-        await self._run("stop", name, timeout=180)
+        try:
+            await self._run("stop", name, timeout=180)
+        finally:
+            self._invalidate()
 
     async def start(self, name: str) -> None:
         self._guard()
-        await self._run("start", name, timeout=300)
+        try:
+            await self._run("start", name, timeout=300)
+        finally:
+            self._invalidate()
 
     async def delete(self, name: str) -> None:
         # Deleting is always allowed when a key exists: cleanup must never be blocked.
         if not self.api_key:
             raise ProvisioningDisabled("BREV_API_KEY is not configured")
-        await self._run("delete", name, timeout=180)
+        try:
+            await self._run("delete", name, timeout=180)
+        finally:
+            self._invalidate()
 
     async def wait_for(
         self, name: str, *, want: str = "RUNNING", timeout: float = 1200, interval: float = 10

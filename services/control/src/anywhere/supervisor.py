@@ -44,6 +44,8 @@ from .vault import Vault
 log = structlog.get_logger()
 
 JOB_DIR = "~/workspace/anywhere/job"
+#: How often the guard looks for orphaned Brev instances.
+RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
 PROJECTS_DIR = "~/workspace/anywhere/projects"
 
@@ -90,6 +92,7 @@ class Supervisor:
         #: Unowned instances seen on the previous reconcile pass. An instance is only
         #: deleted after it is unowned on two passes in a row.
         self._orphan_candidates: set[str] = set()
+        self._last_reconcile = 0.0
 
     # ── Task plumbing ─────────────────────────────────────────────────────
 
@@ -631,7 +634,12 @@ class Supervisor:
                 json.dumps(self.settings.integrations()),
             )
         )
-        await self.reconcile(workloads)
+        # Orphans are rare and the reconcile pass shells out to `brev ls`, so run it
+        # every RECONCILE_SECONDS rather than on every 30 s budget tick.
+        loop_now = asyncio.get_running_loop().time()
+        if loop_now - self._last_reconcile >= RECONCILE_SECONDS:
+            self._last_reconcile = loop_now
+            await self.reconcile(workloads)
 
     async def reconcile(self, workloads: list[dict]) -> None:
         """Delete Anywhere instances that no billable workload owns."""

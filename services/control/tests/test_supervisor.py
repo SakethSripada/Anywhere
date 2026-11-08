@@ -167,3 +167,23 @@ async def test_billing_survives_a_lost_vault(tmp_path):
     await drain(sup)
     assert store.rows[1]["accruedCents"] >= 500  # 5 h at $1/h kept accruing
     assert store.rows[1]["status"] in ("stopped", "stopping", "saving")  # session limit enforced
+
+
+async def test_brev_list_is_shared_and_invalidated_by_mutations(monkeypatch):
+    from anywhere.brev import BrevCLI
+
+    cli = BrevCLI("brev", "bak-test", ProvisioningMode.LIVE)
+    calls: list[tuple] = []
+
+    async def fake_run(*args, timeout=0):
+        calls.append(args)
+        await asyncio.sleep(0)
+        return '{"workspaces": [{"name": "anywhere-1", "status": "RUNNING"}]}' if args[0] == "ls" else ""
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+    a, b = await asyncio.gather(cli.list(), cli.list())
+    await cli.get("anywhere-1")
+    assert a == b and [c[0] for c in calls] == ["ls"]
+    await cli.delete("anywhere-1")
+    await cli.list()
+    assert [c[0] for c in calls] == ["ls", "delete", "ls"]
