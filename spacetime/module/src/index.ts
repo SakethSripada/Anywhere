@@ -1,6 +1,6 @@
 import { ScheduleAt, Timestamp } from "spacetimedb";
 import { CaseConversionPolicy, schema, SenderError, t, table } from "spacetimedb/server";
-import { canTransition, CONTROLLERS, validatePreferences } from "./lifecycle";
+import { canTransition, CONTROLLERS, shouldBumpConversation, usageUpdate, validatePreferences } from "./lifecycle";
 
 /*
  * Anywhere's system of record.
@@ -427,7 +427,7 @@ export const upsertConversation = spacetimedb.reducer(
     const existing = ctx.db.conversation.id.find(id);
     if (existing) {
       if (!existing.owner.isEqual(owner)) throw new SenderError("Conversation owner mismatch");
-      ctx.db.conversation.id.update({ ...existing, title, updatedAt: ctx.timestamp });
+      if (existing.title !== title) ctx.db.conversation.id.update({ ...existing, title, updatedAt: ctx.timestamp });
       return;
     }
     ctx.db.conversation.insert({
@@ -457,7 +457,9 @@ export const appendMessage = spacetimedb.reducer(
     const convo = ctx.db.conversation.id.find(args.conversationId);
     if (!convo) throw new SenderError("Conversation not found");
     ctx.db.message.insert({ id: 0n, owner: convo.owner, createdAt: ctx.timestamp, ...args });
-    ctx.db.conversation.id.update({ ...convo, updatedAt: ctx.timestamp });
+    if (shouldBumpConversation(convo.updatedAt.microsSinceUnixEpoch, ctx.timestamp.microsSinceUnixEpoch)) {
+      ctx.db.conversation.id.update({ ...convo, updatedAt: ctx.timestamp });
+    }
   },
 );
 
@@ -506,7 +508,9 @@ export const transitionWorkload = spacetimedb.reducer(
     const row = ctx.db.workload.id.find(id);
     if (!row) throw new SenderError("Workload not found");
     if (row.status === to) {
-      ctx.db.workload.id.update({ ...row, statusDetail: detail, updatedAt: ctx.timestamp });
+      if (row.statusDetail !== detail) {
+        ctx.db.workload.id.update({ ...row, statusDetail: detail, updatedAt: ctx.timestamp });
+      }
       return;
     }
     if (!canTransition(row.status, to)) {
@@ -531,12 +535,19 @@ export const recordUsage = spacetimedb.reducer(
     requireWorker(ctx);
     const row = ctx.db.workload.id.find(id);
     if (!row) throw new SenderError("Workload not found");
-    // Spend is monotonic; a stale writer can never reduce what was billed.
-    const next = accruedCents > row.accruedCents ? accruedCents : row.accruedCents;
+    // Spend is monotonic; a stale writer can never reduce what was billed. Calls
+    // that change nothing are skipped so subscribers don't get no-op updates.
+    const change = usageUpdate(
+      { accruedCents: row.accruedCents, lastActiveAtMicros: row.lastActiveAt?.microsSinceUnixEpoch },
+      accruedCents,
+      touch,
+      ctx.timestamp.microsSinceUnixEpoch,
+    );
+    if (!change) return;
     ctx.db.workload.id.update({
       ...row,
-      accruedCents: next,
-      lastActiveAt: touch ? ctx.timestamp : row.lastActiveAt,
+      accruedCents: change.accruedCents,
+      lastActiveAt: change.touch ? ctx.timestamp : row.lastActiveAt,
     });
   },
 );
@@ -746,8 +757,14 @@ export const updatePlatform = spacetimedb.reducer(
   (ctx, args) => {
     requireWorker(ctx);
     const row = { id: 0, ...args, updatedAt: ctx.timestamp };
-    if (ctx.db.platform.id.find(0)) ctx.db.platform.id.update(row);
-    else ctx.db.platform.insert(row);
+    const existing = ctx.db.platform.id.find(0);
+    if (!existing) {
+      ctx.db.platform.insert(row);
+      return;
+    }
+    // The platform row is public: skip writes that change nothing.
+    const same = (Object.keys(args) as (keyof typeof args)[]).every((k) => existing[k] === args[k]);
+    if (!same) ctx.db.platform.id.update(row);
   },
 );
 

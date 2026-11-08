@@ -3,7 +3,9 @@ import {
   BILLABLE,
   canTransition,
   PLATFORM_MAX_MONTHLY_CAP_CENTS,
+  shouldBumpConversation,
   TRANSITIONS,
+  usageUpdate,
   validatePreferences,
   WORKLOAD_STATUSES,
 } from "./lifecycle";
@@ -57,4 +59,26 @@ describe("account preferences", () => {
   it("rejects a threshold above the cap", () =>
     expect(validatePreferences({ ...ok, approvalThresholdCents: 2500 })).toMatch(/threshold/));
   it("rejects unknown preferences", () => expect(validatePreferences({ ...ok, preference: "yolo" })).toMatch(/preference/));
+});
+
+describe("write coalescing", () => {
+  const S = 1_000_000n;
+
+  it("skips record_usage calls that change nothing", () => {
+    expect(usageUpdate({ accruedCents: 50, lastActiveAtMicros: 100n * S }, 50, false, 200n * S)).toBeNull();
+    expect(usageUpdate({ accruedCents: 50 }, 40, false, 200n * S)).toBeNull(); // monotonic
+  });
+
+  it("coalesces touches inside the interval but keeps spend increases", () => {
+    const row = { accruedCents: 50, lastActiveAtMicros: 100n * S };
+    expect(usageUpdate(row, 50, true, 110n * S)).toBeNull();
+    expect(usageUpdate(row, 60, true, 110n * S)).toEqual({ accruedCents: 60, touch: false });
+    expect(usageUpdate(row, 50, true, 130n * S)).toEqual({ accruedCents: 50, touch: true });
+    expect(usageUpdate({ accruedCents: 0 }, 0, true, 1n)).toEqual({ accruedCents: 0, touch: true });
+  });
+
+  it("bumps a conversation at most every ten seconds", () => {
+    expect(shouldBumpConversation(100n * S, 105n * S)).toBe(false);
+    expect(shouldBumpConversation(100n * S, 110n * S)).toBe(true);
+  });
 });
