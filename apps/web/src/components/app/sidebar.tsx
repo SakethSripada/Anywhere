@@ -90,7 +90,7 @@ function Groups() {
   const close = () => setOpenMobile(false);
   const nav = [
     { href: "/", label: "Home", icon: House, active: pathname === "/" },
-    { href: "/machines", label: "Machines", icon: LayoutGrid, active: pathname.startsWith("/machines"), count: workloads.length },
+    { href: "/machines", label: "Machines", icon: LayoutGrid, active: pathname.startsWith("/machines"), count: workloads.filter((w) => ACTIVE.has(w.status)).length },
     { href: "/settings", label: "Settings", icon: Settings, active: pathname.startsWith("/settings") },
   ];
 
