@@ -29,6 +29,22 @@ SSH_OPTS = [
     "ServerAliveCountMax=3",
 ]
 
+#: Commands share one SSH connection per host, so the frequent short polls (log
+#: tails, reachability, job status) skip a full handshake each time. `%C` keeps
+#: the socket path short and unique per host/user.
+MUX_OPTS = [
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    "ControlPath=/tmp/anywhere-ssh-%C",
+    "-o",
+    "ControlPersist=5m",
+]
+
+#: Port forwards must not ride a shared master: a forward requested through a mux
+#: client lives in the master and outlives the client, so closing it would leak.
+NO_MUX_OPTS = ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
+
 
 class RemoteError(Exception):
     pass
@@ -46,7 +62,7 @@ class Remote:
         self.host = host
 
     def _argv(self, command: str) -> list[str]:
-        return ["ssh", *SSH_OPTS, self.host, "--", command]
+        return ["ssh", *SSH_OPTS, *MUX_OPTS, self.host, "--", command]
 
     async def run(
         self, command: str, *, timeout: float = 120, input: bytes | None = None, check: bool = True
@@ -59,8 +75,11 @@ class Remote:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(input), timeout)
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.CancelledError) as exc:
             proc.kill()
+            await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RemoteError(f"Remote command timed out after {timeout:.0f}s") from exc
         result = Result(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
         if check and result.code != 0:
@@ -88,6 +107,7 @@ class Remote:
         proc = await asyncio.create_subprocess_exec(
             "ssh",
             *SSH_OPTS,
+            *NO_MUX_OPTS,
             "-o",
             "ExitOnForwardFailure=yes",
             "-N",
