@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from . import budget, llm, render_bench, replay, savings
+from . import budget, llm, render_bench, replay
 from .brev import BrevCLI
 from .catalog import Catalog
 from .config import Settings
@@ -107,31 +107,14 @@ class Anywhere:
                     "segment_base_cents": base,
                 }
             )
-        stops = sorted(
-            (rec for _, rec in self.vault.section_items(savings.SECTION) if rec["owner"] == owner),
-            key=lambda r: r["stopped_at"],
-            reverse=True,
-        )
+        saved, stops = self.supervisor.idle_savings(owner, now)
         return {
             "now": now.isoformat(),
             "running": running,
-            "saved_cents": round(sum(savings.saved_cents(r, now) for r in stops), 4),
+            "saved_cents": saved,
             "idle_minutes": self.settings.desktop_idle_minutes,
             "session_hours": self.settings.max_session_hours,
-            "idle_stops": [
-                {
-                    "id": str(r["workload_id"]),
-                    "title": r["title"],
-                    "gpu": r["gpu"],
-                    "hourly_cents": r["hourly_cents"],
-                    "stopped_at": r["stopped_at"],
-                    "limit_at": r["limit_at"],
-                    "resumed_at": r.get("resumed_at"),
-                    "saved_cents": round(savings.saved_cents(r, now), 4),
-                    "counting": savings.still_counting(r, now),
-                }
-                for r in stops[:20]
-            ],
+            "idle_stops": stops[:20],
         }
 
     async def spend_snapshot(self, owner: str) -> budget.SpendSnapshot:

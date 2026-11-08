@@ -383,6 +383,29 @@ class Supervisor:
         rec = savings.record(now, segment_start, self.settings.max_session_hours, w)
         self.vault.section_put(savings.SECTION, f"{w['id']}:{int(now.timestamp())}", rec)
 
+    def idle_savings(self, owner: str, now: datetime) -> tuple[float, list[dict]]:
+        """What idle auto-stops saved this owner: the total, and each stop (newest first)."""
+        stops = sorted(
+            (rec for _, rec in self.vault.section_items(savings.SECTION) if rec["owner"] == owner),
+            key=lambda r: r["stopped_at"],
+            reverse=True,
+        )
+        rows = [
+            {
+                "id": str(r["workload_id"]),
+                "title": r["title"],
+                "gpu": r["gpu"],
+                "hourly_cents": r["hourly_cents"],
+                "stopped_at": r["stopped_at"],
+                "limit_at": r["limit_at"],
+                "resumed_at": r.get("resumed_at"),
+                "saved_cents": round(savings.saved_cents(r, now), 4),
+                "counting": savings.still_counting(r, now),
+            }
+            for r in stops
+        ]
+        return round(sum(savings.saved_cents(r, now) for r in stops), 4), rows
+
     def _close_idle_stops(self, wid: int) -> None:
         for key, rec in self.vault.section_items(savings.SECTION):
             if rec["workload_id"] == wid and not rec.get("resumed_at"):
