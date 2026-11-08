@@ -3,7 +3,7 @@
 import type { Workload } from "@anywhere/stdb";
 import { MoreHorizontal, PanelRightClose } from "lucide-react";
 import Link from "next/link";
-import { forwardRef, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentOrb, type OrbState } from "@/components/bui/orb";
 import { SuggestionChip } from "@/components/bui/tool-chips";
@@ -11,8 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAgentState } from "@/lib/agent";
 import { ApiError, useApi } from "@/lib/api";
-import { agentBusy, toItems } from "@/lib/chat";
-import { useNow } from "@/lib/data";
+import { toItems, useAgentBusy } from "@/lib/chat";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 import { Composer, type ComposerHandle } from "../chat/composer";
@@ -57,8 +56,8 @@ export const AgentPanel = forwardRef<AgentPanelHandle, { w: Workload; onCollapse
   const { messages, pending, send } = useChat(cid, { workloadId: w.id });
   const composer = useRef<ComposerHandle>(null);
   const agent = useAgentState(w);
-  const now = useNow(1000);
-  const thinking = pending.length > 0 || agentBusy(toItems(messages), now);
+  const items = useMemo(() => toItems(messages), [messages]);
+  const thinking = useAgentBusy(items) || pending.length > 0;
 
   useImperativeHandle(ref, () => ({
     focus: (text) => requestAnimationFrame(() => (text ? composer.current?.fill(text) : composer.current?.focus())),
@@ -124,7 +123,7 @@ export const AgentPanel = forwardRef<AgentPanelHandle, { w: Workload; onCollapse
           <p className="mt-4 text-[13px] leading-[1.6] text-ink-2">{w.kind === "desktop" ? "No messages yet. Tell the agent what to do on this desktop." : "No messages yet. Ask about this job’s progress, logs or outputs."}</p>
         </div>
       ) : (
-        <Thread messages={messages} pending={pending} compact focus={w} className="min-h-0" />
+        <Thread messages={messages} pending={pending} busy={thinking} compact focus={w} className="min-h-0" />
       )}
 
       <div className="shrink-0 px-4 pt-2 pb-4">
