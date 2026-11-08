@@ -159,8 +159,16 @@ class AnywhereOAuth:
 
     def decide(self, request_id: str, owner: str, approve: bool, scopes: list[str] | None) -> str:
         """Approve or deny a pending request for `owner`. Returns where to send the browser."""
-        record = self.vault.section_pop("oauth_requests", request_id[:64])
+        # Validate before consuming the request: a rejected submission (say, every
+        # permission unticked) must leave it in place so the user can fix and retry.
+        record = self.vault.section_get("oauth_requests", request_id[:64])
         if not record or record["expires_ts"] <= time.time():
+            raise HTTPException(404, "This sign-in request has expired. Start again from your app.")
+        if approve:
+            requested = set(record["scopes"])
+            if not set(scopes if scopes is not None else record["scopes"]) & requested:
+                raise HTTPException(422, "Allow at least one permission, or choose Deny")
+        if not self.vault.section_pop("oauth_requests", request_id[:64]):
             raise HTTPException(404, "This sign-in request has expired. Start again from your app.")
         if not approve:
             log.info("oauth.denied", client=record["client_id"], owner=owner[:12])

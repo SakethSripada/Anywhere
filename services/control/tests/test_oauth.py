@@ -285,3 +285,13 @@ async def test_oauth_connections_share_one_conversation(h):
                 await m.call_tool("propose_workload", {"request": {"kind": "desktop", "summary": "A VS Code desktop"}})
             ).is_error
     assert len(h.store.conversations) == 1
+
+
+async def test_a_rejected_consent_can_be_retried(h):
+    async with http(h) as c:
+        client_id = await register(c)
+        _, challenge = pkce()
+        request_id = await start(h, c, client_id, challenge)
+        res = await c.post(f"/v1/oauth/requests/{request_id}/decision", json={"approve": True, "scopes": []})
+        assert res.status_code == 422
+        assert await approve(c, request_id, ["read"])  # the request is still there
