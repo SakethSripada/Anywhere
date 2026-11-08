@@ -107,7 +107,7 @@ function hexToRgb(hex: string): [number, number, number] {
 
 /* ── Shared renderer ─────────────────────────────────────────────────── */
 
-type Orb = { ctx: CanvasRenderingContext2D; px: number; rgb: [number, number, number]; speed: number; t: number; drawn: boolean };
+type Orb = { ctx: CanvasRenderingContext2D; px: number; rgb: [number, number, number]; speed: number; t: number; drawn: boolean; visible: boolean };
 
 type Renderer = {
   gl: WebGLRenderingContext;
@@ -157,6 +157,7 @@ function createRenderer(): Renderer | null {
     e.preventDefault();
     renderer = undefined; // rebuilt on the next frame
     for (const o of orbs) o.drawn = false;
+    kick();
   });
   return {
     gl,
@@ -185,25 +186,48 @@ function draw(orb: Orb, r: Renderer) {
   orb.ctx.drawImage(canvas, 0, canvas.height - orb.px, orb.px, orb.px, 0, 0, orb.px, orb.px);
 }
 
+/** An orb needs a frame when it's on screen and either animating or not yet drawn. */
+const needsFrame = (orb: Orb) => orb.visible && (orb.speed !== 0 || !orb.drawn);
+
 function frame(now: number) {
+  raf = 0;
   if (renderer === undefined) renderer = createRenderer();
   const dt = last ? Math.min(0.1, (now - last) / 1000) : 0;
   last = now;
-  if (renderer) {
+  let more = false;
+  // No WebGL (renderer null): nothing can ever draw, so let the loop stop.
+  if (renderer && document.visibilityState === "visible") {
     for (const orb of orbs) {
-      if (orb.speed === 0 && orb.drawn) continue; // frozen and already on screen
+      if (!needsFrame(orb)) continue; // off screen, or frozen and already drawn
       orb.t += dt * orb.speed;
       draw(orb, renderer);
       orb.drawn = true;
+      if (orb.speed !== 0) more = true;
     }
   }
-  raf = orbs.size ? requestAnimationFrame(frame) : 0;
-  if (!raf) last = 0;
+  if (more) raf = requestAnimationFrame(frame);
+  else last = 0;
 }
 
+/** (Re)start the loop when something may need drawing; it idles otherwise. */
+function kick() {
+  if (raf || typeof document === "undefined" || document.visibilityState !== "visible") return;
+  for (const orb of orbs) {
+    if (needsFrame(orb)) {
+      raf = requestAnimationFrame(frame);
+      return;
+    }
+  }
+}
+
+let listening = false;
 function register(orb: Orb) {
   orbs.add(orb);
-  if (!raf) raf = requestAnimationFrame(frame);
+  if (!listening) {
+    listening = true;
+    document.addEventListener("visibilitychange", kick);
+  }
+  kick();
   return () => {
     orbs.delete(orb);
   };
@@ -218,6 +242,7 @@ export function FluidOrb({ size = 240, color = "#1A73F2", speed = 1, className, 
   useEffect(() => {
     if (orbRef.current) orbRef.current.drawn = false;
     if (orbRef.current) orbRef.current.speed = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : speed;
+    kick();
   }, [speed]);
 
   useEffect(() => {
@@ -229,10 +254,20 @@ export function FluidOrb({ size = 240, color = "#1A73F2", speed = 1, className, 
     canvas.height = px;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     // A random phase so several orbs on screen don't move in lockstep.
-    const orb: Orb = { ctx, px, rgb: hexToRgb(color), speed: reduce ? 0 : speed, t: 1 + Math.random() * 40, drawn: false };
+    const orb: Orb = { ctx, px, rgb: hexToRgb(color), speed: reduce ? 0 : speed, t: 1 + Math.random() * 40, drawn: false, visible: true };
     orbRef.current = orb;
     const unregister = register(orb);
+    // Off-screen orbs (scrolled away, hidden panels) don't animate.
+    const io =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver(([entry]) => {
+            orb.visible = entry?.isIntersecting ?? true;
+            kick();
+          });
+    io?.observe(canvas);
     return () => {
+      io?.disconnect();
       unregister();
       orbRef.current = null;
     };
