@@ -520,3 +520,33 @@ async def test_telemetry_can_be_turned_off(tmp_path):
     assert sup._telemetry_task is None
     await sup.shutdown()
     await asyncio.gather(sup._guard_task, return_exceptions=True)
+
+
+def test_desktop_setup_falls_back_to_blender_mirrors():
+    import subprocess
+
+    from anywhere.supervisor import _env, render
+
+    script = render(
+        _env("desktop-setup.sh"), DESKTOP_IMAGE="img", BLENDER_VERSION="4.5.15", BLENDER_SHA256="x", CUA_TOKEN="t"
+    )
+    assert subprocess.run(["bash", "-n"], input=script.encode()).returncode == 0
+    for mirror in ("download.blender.org", "mirrors.ocf.berkeley.edu", "ftp.nluug.nl"):
+        assert mirror in script
+    assert "--retry" in script and "sha256sum -c" in script
+
+
+async def test_setup_failures_keep_the_last_output_on_the_machine_log(tmp_path):
+    from anywhere.remote import RemoteError
+
+    sup, store, _ = make(tmp_path, FakeBrev())
+    logs: list[str] = []
+
+    async def append_logs(wid, text):
+        logs.append(text)
+
+    store.append_logs = append_logs
+    w = store.add(status="configuring")
+    await sup._fail(w, RemoteError("desktop-setup.sh exited 22\ncurl: (22) The requested URL returned error: 403"))
+    assert store.rows[1]["statusDetail"] == "desktop-setup.sh exited 22"
+    assert logs and "returned error: 403" in logs[0]

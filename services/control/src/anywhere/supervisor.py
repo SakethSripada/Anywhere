@@ -437,9 +437,18 @@ class Supervisor:
             await self._transition(w, final, reason)
 
     async def _fail(self, w: dict, exc: Exception) -> None:
-        message = str(exc).strip().splitlines()[0][:300] if str(exc).strip() else exc.__class__.__name__
+        lines = str(exc).strip().splitlines()
+        message = lines[0][:300] if lines else exc.__class__.__name__
         log.error("supervisor.failed", workload=w["id"], error=repr(exc))
         await self._event(w, message, "error")
+        if len(lines) > 1:
+            # Setup failures carry the script's last output (the actual curl or apt error).
+            # Keep it on the machine's log; the machine itself is about to be deleted.
+            await _safe(
+                self.store.append_logs(
+                    w["id"], "Last output before the failure:\n" + "\n".join(lines[1:])[-4000:] + "\n"
+                )
+            )
         if asyncio.current_task() is not self._agents.get(w["id"]):
             await self.stop_agent(w["id"])
         await self.vnc.close(w["id"])
