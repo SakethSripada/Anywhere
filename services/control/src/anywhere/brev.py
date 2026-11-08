@@ -166,9 +166,10 @@ class BrevCLI:
     #: Seconds between `brev refresh` attempts.
     REFRESH_RETRY_SECONDS = 5.0
 
-    async def refresh_ssh(self, attempts: int = 3) -> None:
-        """Rewrite ~/.brev/ssh_config. Retried: it runs right after a machine boots,
-        and a one-off API or network blip here used to fail (and delete) the machine."""
+    async def refresh_ssh(self, attempts: int = 8) -> None:
+        """Rewrite ~/.brev/ssh_config. Retried with backoff (about 3 minutes in all): it
+        runs right after a machine boots, and giving up here deletes a machine that is
+        fine. Seen live: Brev's API answered 504 three times in 15 seconds."""
         for attempt in range(attempts):
             try:
                 await self._run("refresh", timeout=90)
@@ -177,7 +178,7 @@ class BrevCLI:
                 if attempt == attempts - 1:
                     raise
                 log.warning("brev.refresh_retry", attempt=attempt, error=str(exc)[:200])
-                await asyncio.sleep(self.REFRESH_RETRY_SECONDS)
+                await asyncio.sleep(self.REFRESH_RETRY_SECONDS * min(2**attempt, 8))
 
     async def check_auth(self) -> int:
         """Confirm the CLI is authenticated. Returns how many instances the org has."""
