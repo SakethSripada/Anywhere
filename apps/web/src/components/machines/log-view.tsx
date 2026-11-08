@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 
 type Level = "all" | "warn" | "error";
@@ -30,7 +30,7 @@ function formatTime(d: Date) {
  * filter by text or severity without losing your place.
  */
 export function LogView({ workloadId, className, title = "Logs", toolbar }: { workloadId: bigint; className?: string; title?: ReactNode; toolbar?: ReactNode }) {
-  const [rows] = useTable(tables.myLogs);
+  const rows = useShared("myLogs").byWorkload.get(workloadId) ?? NONE;
   // Chunks are immutable, so each is split, timestamped and classified once.
   const [cache] = useState(() => new Map<bigint, Parsed>());
   const lines = useMemo<Line[]>(() => {
@@ -38,7 +38,7 @@ export function LogView({ workloadId, className, title = "Logs", toolbar }: { wo
     let carry = "";
     let carryTime = "";
     let carryKey = "";
-    const chunks = rows.filter((r) => r.workloadId === workloadId).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const chunks = [...rows].sort((a, b) => (a.id < b.id ? -1 : 1));
     const live = new Set<bigint>();
     for (const c of chunks) {
       live.add(c.id);
@@ -69,7 +69,7 @@ export function LogView({ workloadId, className, title = "Logs", toolbar }: { wo
     // Forget chunks the server has trimmed.
     for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
     return out.slice(-5000);
-  }, [rows, workloadId, cache]);
+  }, [rows, cache]);
 
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<Level>("all");
