@@ -676,13 +676,28 @@ class Anywhere:
         if not frames:
             raise ActionError("This run has no screenshots to make a timelapse from")
         key = Storage.artifact_key(owner, workload_id, f"agent-{run_id}-timelapse.gif")
-        if not await self.storage.head(key):
-            images = [await self.storage.get_bytes(f["key"]) for f in frames]
-            gif = await asyncio.to_thread(replay.timelapse_gif, images, frames, run["goal"])
-            await self.storage.put_bytes(key, gif, "image/gif")
-            await self.store.add_artifact(
-                new_id(), workload_id, f"Agent timelapse: {run['goal'][:60]}", key, "image/gif", len(gif)
-            )
+        # One render per GIF: a double click used to build (and list) it twice.
+        locks: dict[str, asyncio.Lock] = self.__dict__.setdefault("_gif_locks", {})
+        lock = locks.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                if not await self.storage.head(key):
+                    # Download the screenshots in parallel (a few at a time), not one by one.
+                    gate = asyncio.Semaphore(8)
+
+                    async def fetch(k: str) -> bytes:
+                        async with gate:
+                            return await self.storage.get_bytes(k)
+
+                    images = list(await asyncio.gather(*(fetch(f["key"]) for f in frames)))
+                    gif = await asyncio.to_thread(replay.timelapse_gif, images, frames, run["goal"])
+                    await self.storage.put_bytes(key, gif, "image/gif")
+                    await self.store.add_artifact(
+                        new_id(), workload_id, f"Agent timelapse: {run['goal'][:60]}", key, "image/gif", len(gif)
+                    )
+        finally:
+            if not lock.locked() and locks.get(key) is lock:
+                locks.pop(key, None)
         return {
             "url": self.storage.presign_get(key, expires=3600, filename=f"anywhere-agent-{run_id}.gif"),
             "frames": len(frames),
