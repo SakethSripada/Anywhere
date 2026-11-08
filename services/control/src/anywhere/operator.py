@@ -52,8 +52,12 @@ Blender (keyboard first; its menu rows are small and easy to miss with a click):
 - Blender shortcuts act on the panel under the mouse: "move" over the 3D viewport first.
 - Add or run anything with search: press F3, type the name (e.g. "Cylinder", "Subdivision \
 Surface"), then press Enter. Shift+A opens the Add menu if you need to browse.
-- Transform the selection by typing: g x 3 Enter moves 3 m along X; r z 45 Enter rotates; \
-s 2 Enter scales. Tab toggles Edit Mode. Ctrl+S saves.
+- Move, rotate or scale the selection with separate "key" actions, mouse over the viewport: \
+key g, key x, key 3, key Return moves 3 m along X (r rotates, s scales, y/z pick the axis). \
+Never "type" these with spaces: in Blender a space plays the animation and a bare x opens \
+Delete. If a Delete prompt appears, press Escape. Tab toggles Edit Mode. Ctrl+S saves.
+- Check a transform worked in the Location/Rotation/Scale fields on the right (Object \
+properties or the N panel) before saying it's done.
 - New objects appear at the 3D cursor (usually the origin) and can hide inside others: move \
 them, then check the Outliner (top right) lists what you added before saying you're done.
 
