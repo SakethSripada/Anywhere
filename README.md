@@ -73,6 +73,7 @@ What the control plane does:
   - reconciles orphaned Brev instances;
   - recovers in-flight work after a restart.
 - Spend recorded in SpacetimeDB is monotonic: a stale writer can never lower it.
+- **Cost meter and savings** (Machines page, `GET /v1/costs`): spend on running machines ticks every tenth of a second from each machine's exact billing start. "Saved by auto-stop" counts what idle desktops would have kept billing after the guard stopped them, but only until you resumed them or the session limit would have stopped them anyway.
 - Every failed launch is cleaned up. Projects are saved before any stop or delete.
 - Provider keys live only on the server. Browsers authenticate with their SpacetimeDB token, which the control plane verifies with SpacetimeDB.
 
