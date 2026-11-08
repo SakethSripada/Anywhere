@@ -116,6 +116,12 @@ def test_action_schema_requires_fields():
         Action(action="drag", x=1, y=1)
 
 
+def test_harmless_variations_in_the_model_reply_are_accepted():
+    a = Action.model_validate({"action": "Left_Click", "x": 1, "y": 2, "summary": "word " * 60})
+    assert a.action == "click" and len(a.summary) == 120
+    assert Action.model_validate({"action": "hotkey", "keys": ["ctrl", "s"]}).action == "key"
+
+
 async def test_scroll_down_is_positive_for_the_model_and_clamped():
     _, screen, _ = await run(
         [
