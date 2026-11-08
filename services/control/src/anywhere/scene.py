@@ -295,6 +295,8 @@ async def build(
             await app.send_text(owner, handle, f"I couldn't build that one: {reason}")
 
     try:
+        # A build is use: keep the idle guard from stopping the desktop under the demo.
+        await app.store.record_usage(wid, int(w.get("accruedCents", 0)), touch=True)
         remote = app.supervisor.remote(w)
         hero = await pick_subject(app.settings, request) if app.settings.gen3d_host else None
         # Generate the subject's 3D model while the setting's script is being written.

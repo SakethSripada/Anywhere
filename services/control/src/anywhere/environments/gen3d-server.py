@@ -66,6 +66,8 @@ def generate(prompt: str, seed: int = 0) -> tuple[bytes, dict]:
     with torch.no_grad():
         codes = model([fg], device=DEVICE)
         mesh = model.extract_mesh(codes, True, resolution=256)[0]
+    if mesh.is_watertight and mesh.volume < 0:
+        mesh.invert()  # inward-facing triangles render black in browsers that cull back faces
     mesh = to_gradio_3d_orientation(mesh)  # standard Y-up GLB: upright in Blender and in browsers
     t2 = time.time()
     glb = mesh.export(file_type="glb")
