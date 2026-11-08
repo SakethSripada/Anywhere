@@ -189,6 +189,11 @@ async def test_photon_project_check_uses_basic_auth():
 # ── Training telemetry protocol ─────────────────────────────────────────────
 
 
+def test_trainer_epochs_become_a_metric_for_the_step_card():
+    row = json.dumps({"step": 4, "loss": 2.5, "epoch": 1.5, "max_steps": 8})
+    assert {"name": "epoch", "step": 4, "value": 1.5} in sup_mod.metric_points([row])
+
+
 def test_poll_protocol_in_a_real_shell(tmp_path, monkeypatch):
     monkeypatch.setattr(sup_mod, "JOB_DIR", str(tmp_path))
     (tmp_path / "run.log").write_text("::step:: Checking the GPU\nhéllo\n")
@@ -246,3 +251,21 @@ def test_poll_protocol_cuts_at_line_boundaries_and_flags_missing_dirs(tmp_path, 
     monkeypatch.setattr(sup_mod, "JOB_DIR", str(tmp_path / "gone"))
     gone = poll(0)
     assert gone.found is False
+
+
+async def test_refresh_ssh_retries_a_transient_failure(tmp_path):
+    script = tmp_path / "brev"
+    count = tmp_path / "count"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}\n"
+        '[ "$n" -lt 1 ] && { echo "connection reset" >&2; exit 1; }\nexit 0\n'
+    )
+    script.chmod(0o755)
+    cli = BrevCLI(str(script), "bak-test", ProvisioningMode.LIVE)
+    cli.REFRESH_RETRY_SECONDS = 0
+    await cli.refresh_ssh()
+    assert count.read_text().strip() == "2"
+    count.write_text("-5")  # fails every time now
+    with pytest.raises(BrevError, match="connection reset"):
+        await cli.refresh_ssh(attempts=2)
