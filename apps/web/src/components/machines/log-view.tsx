@@ -9,10 +9,21 @@ import { tables, useTable } from "@/lib/stdb";
 import { cn } from "@/lib/utils";
 
 type Level = "all" | "warn" | "error";
-type Line = { n: number; text: string; time: string; level: "error" | "warn" | "info" };
+type Line = { key: string; n: number; text: string; time: string; level: "error" | "warn" | "info" };
+/** One chunk split into newline-separated parts, parsed once and reused. */
+type Parsed = { time: string; parts: string[]; levels: Line["level"][] };
 
 const ERR = /error|traceback|exception|failed|fatal|cuda out of memory/i;
 const WARN = /warn/i;
+const levelOf = (t: string): Line["level"] => (ERR.test(t) ? "error" : WARN.test(t) ? "warn" : "info");
+
+let timeFormat: Intl.DateTimeFormat | null = null;
+function formatTime(d: Date) {
+  // Same output as toLocaleTimeString(undefined, { hour12: false }), without
+  // building a formatter per call.
+  timeFormat ??= new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: false });
+  return timeFormat.format(d);
+}
 
 /**
  * Live log tail, terminal-style. Follows new output until you scroll up;
@@ -20,21 +31,45 @@ const WARN = /warn/i;
  */
 export function LogView({ workloadId, className, title = "Logs", toolbar }: { workloadId: bigint; className?: string; title?: ReactNode; toolbar?: ReactNode }) {
   const [rows] = useTable(tables.myLogs);
+  // Chunks are immutable, so each is split, timestamped and classified once.
+  const [cache] = useState(() => new Map<bigint, Parsed>());
   const lines = useMemo<Line[]>(() => {
     const out: Line[] = [];
     let carry = "";
     let carryTime = "";
+    let carryKey = "";
     const chunks = rows.filter((r) => r.workloadId === workloadId).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const live = new Set<bigint>();
     for (const c of chunks) {
-      const time = c.createdAt.toDate().toLocaleTimeString(undefined, { hour12: false });
-      const parts = (carry + c.text).split("\n");
-      carry = parts.pop() ?? "";
-      for (const p of parts) out.push({ n: out.length + 1, text: p, time: carryTime || time, level: ERR.test(p) ? "error" : WARN.test(p) ? "warn" : "info" });
+      live.add(c.id);
+      let parsed = cache.get(c.id);
+      if (!parsed) {
+        const parts = c.text.split("\n");
+        parsed = { time: formatTime(c.createdAt.toDate()), parts, levels: parts.map(levelOf) };
+        cache.set(c.id, parsed);
+      }
+      const { time, parts, levels } = parsed;
+      const last = parts.length - 1;
+      for (let i = 0; i < last; i++) {
+        // A line that began in an earlier chunk keeps that chunk's key and time.
+        const joined = i === 0 && carry !== "";
+        const text = joined ? carry + parts[0] : parts[i];
+        out.push({ key: joined ? carryKey : `${c.id}:${i}`, n: out.length + 1, text, time: carryTime || time, level: joined ? levelOf(text) : levels[i] });
+      }
+      if (last === 0) {
+        if (carry === "") carryKey = `${c.id}:0`;
+        carry += parts[0];
+      } else {
+        carry = parts[last];
+        carryKey = `${c.id}:${last}`;
+      }
       carryTime = carry ? time : "";
     }
-    if (carry) out.push({ n: out.length + 1, text: carry, time: carryTime, level: ERR.test(carry) ? "error" : WARN.test(carry) ? "warn" : "info" });
+    if (carry) out.push({ key: carryKey, n: out.length + 1, text: carry, time: carryTime, level: levelOf(carry) });
+    // Forget chunks the server has trimmed.
+    for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
     return out.slice(-5000);
-  }, [rows, workloadId]);
+  }, [rows, workloadId, cache]);
 
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<Level>("all");
@@ -130,7 +165,7 @@ export function LogView({ workloadId, className, title = "Logs", toolbar }: { wo
       >
         {shown.length ? (
           shown.map((l) => (
-            <div key={l.n} className={cn("group flex hover:bg-white/[0.03]", l.level === "error" && "bg-red-500/[0.06]")}>
+            <div key={l.key} className={cn("group flex [contain-intrinsic-size:auto_19px] [content-visibility:auto] hover:bg-white/[0.03]", l.level === "error" && "bg-red-500/[0.06]")}>
               <span className="w-11 shrink-0 pr-2 text-right text-neutral-700 select-none tabular group-hover:text-neutral-500">{l.n}</span>
               <span className="hidden w-[68px] shrink-0 text-neutral-600 select-none tabular md:inline">{l.time}</span>
               <span className={cn("pr-4", wrap ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "whitespace-pre", l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-300" : "text-neutral-300")}>
