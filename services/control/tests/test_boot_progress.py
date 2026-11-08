@@ -49,3 +49,33 @@ def test_boot_stage_words():
     assert boot_stage(inst("RUNNING", "NOT READY")) == "Machine is up, waiting for its shell"
     assert boot_stage(inst("RUNNING", "READY")) == "Machine is up"
     assert boot_stage(inst("WEIRD")) is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_fails_fast_when_brev_deletes_the_instance(monkeypatch):
+    from anywhere.brev import BrevError
+
+    stages = iter([inst("DEPLOYING"), inst("DELETING", "NOT READY")])
+    cli = BrevCLI("brev", "bak-test", ProvisioningMode.LIVE)
+
+    async def get(name):
+        return next(stages)
+
+    monkeypatch.setattr(cli, "get", get)
+    with pytest.raises(BrevError, match="deleting"):
+        await cli.wait_for("n", interval=0)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_fails_fast_when_the_instance_vanishes(monkeypatch):
+    from anywhere.brev import BrevError
+
+    stages = iter([None, inst("DEPLOYING"), None])
+    cli = BrevCLI("brev", "bak-test", ProvisioningMode.LIVE)
+
+    async def get(name):
+        return next(stages)
+
+    monkeypatch.setattr(cli, "get", get)
+    with pytest.raises(BrevError, match="disappeared"):
+        await cli.wait_for("n", interval=0)

@@ -249,6 +249,7 @@ class BrevCLI:
         deadline = asyncio.get_running_loop().time() + timeout
         last: Instance | None = None
         seen: tuple[str, str] | None = None
+        existed = False
         while asyncio.get_running_loop().time() < deadline:
             last = await self.get(name)
             if last and on_change and (last.status, last.shell_status) != seen:
@@ -261,6 +262,13 @@ class BrevCLI:
                 return last
             if last and last.status == "FAILURE":
                 raise BrevError(f"Instance {name} failed to deploy")
+            # Brev tears a failed deploy down by itself. Waiting out the full timeout
+            # would leave the user staring at "Provisioning" for nothing.
+            if want != "DELETING" and last and last.status == "DELETING":
+                raise BrevError(f"Brev is deleting {name}; the deploy didn't succeed")
+            if existed and last is None:
+                raise BrevError(f"Instance {name} disappeared from Brev")
+            existed = existed or last is not None
             await asyncio.sleep(interval)
         raise BrevError(f"Instance {name} did not reach {want} within {timeout / 60:.0f} min (last: {last})")
 
