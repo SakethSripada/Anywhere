@@ -43,15 +43,23 @@ export function LoaderGrid({ variant = "orbit", className, tone = "bg-ink" }: { 
   );
 }
 
-/** Elapsed time since `since` (epoch ms), ticking every 100ms. */
+/**
+ * Elapsed time since `since` (epoch ms). Ticks every 100ms for the first
+ * minute (tenths are shown), then every second; idle when `since` is 0.
+ */
 export function useElapsed(since: number) {
   const [now, setNow] = useState(0);
   useEffect(() => {
-    const tick = () => setNow(Date.now());
+    if (!since) return;
+    let t: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      const n = Date.now();
+      setNow(n);
+      t = setTimeout(tick, n - since < 60_000 ? 100 : 1000);
+    };
     tick();
-    const t = setInterval(tick, 100);
-    return () => clearInterval(t);
-  }, []);
+    return () => clearTimeout(t);
+  }, [since]);
   if (!now || !since) return "";
   const total = Math.max(0, (now - since) / 1000);
   if (total < 60) return `${total.toFixed(1)}s`;

@@ -73,8 +73,8 @@ export function Trace({
   meta?: ReactNode;
   icon?: ReactNode;
   defaultOpen?: boolean;
-  /** below the rows, e.g. a result or a thumbnail */
-  footer?: ReactNode;
+  /** below the rows, e.g. a result or a thumbnail; a function gets whether the trace is expanded */
+  footer?: ReactNode | ((expanded: boolean) => ReactNode);
 }) {
   const [manual, setManual] = useState<boolean | null>(null);
   const expanded = manual ?? defaultOpen ?? working;
@@ -143,7 +143,7 @@ export function Trace({
                 );
               })}
             </div>
-            {footer}
+            {typeof footer === "function" ? footer(expanded) : footer}
           </div>
         </div>
       </div>

@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
 import { MobileNavTrigger } from "../app/mobile-nav";
 import { AgentOrb } from "@/components/bui/orb";
 import { AppLogo, appKey } from "../app/app-logo";
-import { AgentPanel, type AgentPanelHandle } from "./agent-panel";
+import { AgentPanel, type AgentPanelHandle, type AgentPanelMemory } from "./agent-panel";
 import { DesktopStage } from "./desktop-stage";
 import { JobStage } from "./job-stage";
 import { LiveCost, Uptime, useWorkloadAction } from "./shared";
@@ -61,6 +61,7 @@ function Workspace({ w }: { w: Workload }) {
   const mobile = useIsMobile();
   const panel = usePanelRef();
   const agentRef = useRef<AgentPanelHandle>(null);
+  const agentMemory = useRef<AgentPanelMemory>({ cid: null, draft: "" });
   const [open, setOpen] = useState(true);
   const [sheet, setSheet] = useState(false);
   const [animating, setAnimating] = useState(false);
@@ -137,7 +138,7 @@ function Workspace({ w }: { w: Workload }) {
           <Sheet open={sheet} onOpenChange={setSheet}>
             <SheetContent side="right" className="w-full p-0 sm:max-w-md" showCloseButton={false}>
               <SheetTitle className="sr-only">Agent</SheetTitle>
-              <AgentPanel ref={agentRef} w={w} onCollapse={() => setSheet(false)} />
+              <AgentPanel ref={agentRef} w={w} memory={agentMemory} onCollapse={() => setSheet(false)} />
             </SheetContent>
           </Sheet>
         </>
@@ -159,7 +160,9 @@ function Workspace({ w }: { w: Workload }) {
           >
             {/* Fixed-width content: the panel clips it while animating instead of re-wrapping every frame. */}
             <div className={cn("h-full w-full min-w-[320px] transition-opacity duration-300", !open && "opacity-0")}>
-              <AgentPanel ref={agentRef} w={w} onCollapse={() => toggle(false)} />
+              {/* Collapsed, the panel used to stay fully live behind opacity-0 (subscriptions,
+                  timers, orbs, screenshot fetches). Unmount it once the collapse finishes. */}
+              {(open || animating) && <AgentPanel ref={agentRef} w={w} memory={agentMemory} onCollapse={() => toggle(false)} />}
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>

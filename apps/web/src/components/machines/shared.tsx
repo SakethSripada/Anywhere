@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { ApiError, useApi } from "@/lib/api";
 import { useNow } from "@/lib/data";
 import { cents, clock, duration, ms, perHour } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE, BOOT_STEPS, liveCents } from "@/lib/workloads";
 
@@ -41,7 +41,8 @@ export function useWorkloadAction(id: bigint) {
 }
 
 export function LiveCost({ w, className }: { w: Workload; className?: string }) {
-  const now = useNow(1000);
+  // Spend only moves while the machine is billable.
+  const now = useNow(1000, BILLABLE.has(w.status));
   return (
     <span className={cn("tabular", className)}>
       {cents(now ? liveCents(w, now) : w.accruedCents, { precise: true })}
@@ -51,7 +52,7 @@ export function LiveCost({ w, className }: { w: Workload; className?: string }) 
 }
 
 export function Uptime({ w }: { w: Workload }) {
-  const now = useNow(15_000);
+  const now = useNow(15_000, BILLABLE.has(w.status));
   if (!w.startedAt || !now) return <>-</>;
   const end = BILLABLE.has(w.status) ? now : ms(w.updatedAt);
   return <>{duration(end - ms(w.startedAt))}</>;
@@ -84,11 +85,8 @@ export function BootProgress({ w }: { w: Workload }) {
 const LEVEL: Record<string, string> = { warn: "bg-warning", warning: "bg-warning", error: "bg-destructive", success: "bg-success" };
 
 export function EventFeed({ workloadId, limit = 50, className }: { workloadId: bigint; limit?: number; className?: string }) {
-  const [rows] = useTable(tables.myEvents);
-  const events = useMemo(
-    () => rows.filter((e) => e.workloadId === workloadId).sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, limit),
-    [rows, workloadId, limit],
-  );
+  const rows = useShared("myEvents").byWorkload.get(workloadId) ?? NONE;
+  const events = useMemo(() => [...rows].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, limit), [rows, limit]);
   if (!events.length) return <p className={cn("text-[13px] text-muted-foreground", className)}>No activity yet.</p>;
   return (
     <ul className={cn("flex flex-col gap-2.5", className)}>

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState, type ReactNode } from "react";
 import { useAccount, useConversations, useMonthSpend, useNow, usePlatform, useWorkloads } from "@/lib/data";
 import { ago, cents, clock } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { useShared } from "@/lib/tables";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 import { ACTIVE, BILLABLE, href } from "@/lib/workloads";
@@ -117,8 +117,8 @@ function Section({ title, action, children }: { title: string; action?: ReactNod
 }
 
 function Activity() {
-  const [events] = useTable(tables.myEvents);
-  const { all } = useWorkloads();
+  const events = useShared("myEvents").rows;
+  const { byId } = useWorkloads();
   const recent = useMemo(() => [...events].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, 8), [events]);
   return (
     <Section title="Activity">
@@ -128,7 +128,7 @@ function Activity() {
         <ol className="relative">
           <span aria-hidden className="absolute top-2 bottom-2 left-[3px] w-px bg-border" />
           {recent.map((e) => {
-            const w = all.find((x) => x.id === e.workloadId);
+            const w = byId.get(e.workloadId);
             return (
               <li key={String(e.id)} className="relative flex gap-3 py-1.5 pl-4">
                 <span
