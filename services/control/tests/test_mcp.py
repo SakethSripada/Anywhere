@@ -1,5 +1,6 @@
 """The MCP server, end to end: real HTTP through the auth layer, the real SDK client, fake backends."""
 
+import asyncio
 import base64
 import io
 import json
@@ -536,3 +537,44 @@ def test_token_endpoints_require_a_browser_identity(tmp_path):
         # An MCP token is not a browser identity, so it can never mint more tokens.
         mcp_token = {"Authorization": "Bearer awmcp_" + "z" * 43}
         assert c.post("/v1/mcp/tokens", json={"name": "x"}, headers=mcp_token).status_code == 401
+
+
+class _ConversationApp:
+    """Just enough of Anywhere for `_conversation`: a real vault and a slow store."""
+
+    def __init__(self, tmp_path):
+        from anywhere.vault import Vault
+
+        self.vault = Vault(tmp_path / "vault.json")
+        self.created: list[int] = []
+        app = self
+
+        class Store:
+            async def upsert_conversation(self, cid, owner, title, channel):
+                await asyncio.sleep(0.01)
+                app.created.append(cid)
+
+        self.store = Store()
+
+
+async def test_parallel_first_calls_share_one_conversation(tmp_path):
+    from anywhere.mcp_server import Principal, _conversation
+
+    app = _ConversationApp(tmp_path)
+    app.vault.section_put("oauth_grants", "5", {"id": 5, "owner": ALICE})
+    p = Principal(1, "d", ALICE, "Claude", frozenset({"read"}), grant_id=5)
+    cids = await asyncio.gather(*(_conversation(app, p) for _ in range(4)))
+    assert len(set(cids)) == 1 and len(app.created) == 1
+
+
+async def test_a_revoke_during_first_call_is_not_undone(tmp_path):
+    from anywhere.mcp_server import Principal, _conversation
+
+    app = _ConversationApp(tmp_path)
+    app.vault.section_put("oauth_grants", "5", {"id": 5, "owner": ALICE})
+    p = Principal(1, "d", ALICE, "Claude", frozenset({"read"}), grant_id=5)
+    task = asyncio.create_task(_conversation(app, p))
+    await asyncio.sleep(0)
+    app.vault.drop_grant(5)  # user revokes while the conversation is being created
+    await task
+    assert app.vault.section_get("oauth_grants", "5") is None
