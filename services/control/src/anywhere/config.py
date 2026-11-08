@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     max_session_hours: float = 4.0
     desktop_idle_minutes: int = 20
     budget_tick_seconds: int = 30
+    #: How often running machines report GPU utilization, VRAM, temperature and power (0 turns it off).
+    gpu_telemetry_seconds: int = 10
 
     # Object storage (any S3-compatible API: Cloudflare R2, AWS S3, MinIO)
     s3_endpoint_url: str | None = None
