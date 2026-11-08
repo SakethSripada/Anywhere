@@ -61,3 +61,16 @@ def test_empty_env_values_count_as_unset(monkeypatch):
     monkeypatch.setenv("BREV_API_KEY", "")
     s = Settings(_env_file=None)
     assert not s.nemotron_ready and not s.brev_ready
+
+
+def test_idle_rate_limit_keys_are_swept(monkeypatch):
+    from anywhere import api
+
+    api._hits.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(api, "_last_sweep", 0.0)
+    api.rate_limit("ip:1", 5)
+    clock[0] += 120
+    api.rate_limit("ip:2", 5)
+    assert "ip:1" not in api._hits and "ip:2" in api._hits
