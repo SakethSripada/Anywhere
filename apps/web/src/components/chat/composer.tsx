@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 
 type Attachment = { key: string; file: File; progress: number; uploadId?: number; profile?: UploadProfile; error?: string };
 
-export type ComposerHandle = { focus(): void; fill(text: string): void };
+export type ComposerHandle = { focus(): void; fill(text: string): void; value(): string };
 
 const PREFS = [
   { value: "balanced", label: "Balanced", description: "Good hardware at a fair price" },
@@ -46,6 +46,11 @@ export const Composer = forwardRef<
 >(function Composer({ onSubmit, placeholder = "Ask Anywhere to do something…", autoFocus, busy, onStop, context, compact, allowAttachments = true }, ref) {
   const api = useApi();
   const [text, setText] = useState("");
+  // Latest text for `value()`, so a handle captured earlier still reads current input.
+  const textRef = useRef(text);
+  useLayoutEffect(() => {
+    textRef.current = text;
+  }, [text]);
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -62,6 +67,7 @@ export const Composer = forwardRef<
   }, []);
 
   useImperativeHandle(ref, () => ({
+    value: () => textRef.current,
     focus: () => area.current?.focus(),
     fill: (t) => {
       setText(t);
