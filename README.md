@@ -62,6 +62,10 @@ What the control plane does:
 6. Every desktop and job has its own page (`/w/{id}`): the live screen or the job's metrics and logs, plus an agent panel that continues that machine's conversation with the agent focused on it. Every agent tool call streams into the chat as it happens. "Make a low-poly tree" starts the operator loop: screenshot → Nemotron vision picks one action → Cua executes it → verify. Each step streams into `agent_step`. **Take over** stops the run and makes the stream interactive. **Hand to agent** resumes it.
 7. **Stop** copies `~/Projects` to S3 before stopping the machine. Billing pauses, and **Resume** restores it.
 
+### Watch links
+
+Share on a running desktop makes a link anyone can open without an account to watch the desktop and the agent's steps live. The stream comes from a second VNC server started with `-viewonly -nosel`, so the desktop itself refuses input and the clipboard isn't shared. Links last 1 h to 1 day, only their hash is stored, a new link replaces the old one, and turning one off disconnects everyone watching. Watching doesn't keep a desktop from idle-stopping.
+
 ### Safety and budget
 
 - `PROVISIONING_MODE` defaults to `disabled`. `dry_run` validates with Brev without billing, and only `live` creates machines.
@@ -107,6 +111,7 @@ What the control plane does:
 | Desktop on Brev (Cua Linux image, Blender, x11vnc/websockify) | Built | Not yet run on a Brev GPU. Xvfb has no hardware GL, so viewport rendering is software and Cycles renders use the GPU via CUDA/OptiX |
 | Cua computer-use operator | **Tested** | Fakes for screen and model. The screen adapter and `desktop-start.sh` were run against the real `ghcr.io/trycua/linux:24.04` container locally (screenshots, input, shell, noVNC), without a GPU |
 | noVNC stream through the ticketed proxy | Built | Needs a running desktop |
+| Watch-only share links (view-only VNC, public watch page) | Built | Live stream needs a running desktop |
 | S3 projects, uploads, artifacts | Built | Needs bucket credentials (R2 recommended) |
 | LoRA/QLoRA training job, metrics, artifacts | **Tested** | Config and dataset inspection tested; GPU run pending |
 | Photon iMessage bridge (inbound, outbound, linking) | Built | Typechecks; needs a Photon project |

@@ -18,7 +18,7 @@ import {
   Play,
   RotateCw,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,6 +35,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ACTION_VERB, parseDetail, useAgentState, type Control } from "@/lib/agent";
 import { ApiError, useApi } from "@/lib/api";
+import { apiWsUrl } from "@/lib/config";
 import { useNow } from "@/lib/data";
 import { duration, ms } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -54,6 +55,10 @@ function LiveDesktop({ w, onAskAgent }: { w: Workload; onAskAgent: () => void })
   const api = useApi();
   const agent = useAgentState(w);
   const screen = useRef<VncHandle>(null);
+  const streamUrl = useCallback(async () => {
+    const { ticket } = await api.post<{ ticket: string }>(`/v1/desktops/${w.id}/session`);
+    return apiWsUrl(`/v1/desktops/${w.id}/vnc?ticket=${encodeURIComponent(ticket)}`);
+  }, [api, w.id]);
   const stage = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState<Scale>("fit");
   const [quality, setQuality] = useState<Quality>("balanced");
@@ -204,7 +209,8 @@ function LiveDesktop({ w, onAskAgent }: { w: Workload; onAskAgent: () => void })
       <div className="relative min-h-0 flex-1">
         <VncScreen
           ref={screen}
-          workloadId={w.id}
+          streamKey={String(w.id)}
+          streamUrl={streamUrl}
           viewOnly={viewOnly}
           scale={scale}
           quality={quality}
