@@ -29,6 +29,7 @@ from .llm import ainvoke_json
 log = structlog.get_logger()
 
 MAX_STEPS = 40
+MAX_NOTCHES = 10
 
 #: What the operator says when the user takes the controls mid-task.
 PAUSED = "You took control. I'll pick up when you hand it back."
@@ -46,6 +47,8 @@ How to work:
 - Look carefully at the latest screenshot before acting. Coordinates are pixels in that \
 screenshot (origin top-left, size {width}x{height}).
 - Prefer reliable keyboard shortcuts when an application supports them.
+- To scroll, give the point to scroll at and "dy" in wheel notches: positive scrolls down, \
+negative scrolls up, at most 10 at a time.
 - After an action, verify its effect on the next screenshot before moving on. If something \
 didn't work, try a different approach instead of repeating it.
 - When the goal is achieved and visibly verified, return action "done" with a short summary \
@@ -249,7 +252,10 @@ async def _execute(screen: Screen, a: Action, frame: Frame) -> str:
         case "drag":
             await screen.drag(*xy(a.x, a.y), *xy(a.x2, a.y2))
         case "scroll":
-            await screen.scroll(*xy(a.x, a.y), a.dy or 3)
+            # The model gives notches with positive meaning down; Cua's wheel scrolls up for
+            # positive values. Clamp so a pixel-sized number can't spin hundreds of notches.
+            notches = max(-MAX_NOTCHES, min(MAX_NOTCHES, a.dy or 3))
+            await screen.scroll(*xy(a.x, a.y), -notches)
         case "type":
             await screen.type(a.text or "")
         case "key":
