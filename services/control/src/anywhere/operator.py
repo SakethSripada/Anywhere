@@ -30,6 +30,9 @@ log = structlog.get_logger()
 
 MAX_STEPS = 40
 
+#: What the operator says when the user takes the controls mid-task.
+PAUSED = "You took control. I'll pick up when you hand it back."
+
 SYSTEM = """You are Anywhere's desktop operator. You control a real Linux (XFCE) desktop \
 by looking at screenshots and choosing ONE action at a time.
 
@@ -125,7 +128,7 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
 
     async def observe(state: OpState) -> OpState:
         if not await has_control():
-            return {"status": "paused", "result": "You took control. I'll pick up when you hand it back."}
+            return {"status": "paused", "result": PAUSED}
         png = await screen.screenshot()
         # PIL resize + JPEG encode takes ~50-150 ms; off the loop so it can't stall
         # the VNC relay or other requests.
@@ -172,7 +175,7 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
             }
 
         if not await has_control():
-            return {"status": "paused", "result": "You took control. I'll pick up when you hand it back."}
+            return {"status": "paused", "result": PAUSED}
 
         outcome = "ok"
         try:
