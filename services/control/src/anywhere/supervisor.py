@@ -70,7 +70,7 @@ def render(template: str, **values: str) -> str:
     return out
 
 
-Notify = Callable[[dict, str, str], Awaitable[None]]
+Notify = Callable[..., Awaitable[None]]  # (workload, kind, body, attachment=None)
 
 
 @dataclass
@@ -600,29 +600,34 @@ class Supervisor:
         inputs = plan.get("inputs", {})
         intent = plan.get("intent", {})
         src = await self.store.workload(int(inputs["source_workload_id"]))
-        if not src or src["owner"] != w["owner"] or src["status"] != Status.RUNNING:
-            raise RemoteError("The desktop with your scene isn't running anymore; start it and try again")
-        src_remote = self.remote(src)
+        if not src or src["owner"] != w["owner"]:
+            raise RemoteError("The desktop with your scene is gone")
+        await remote.run(f"rm -rf {JOB_DIR} && mkdir -p {JOB_DIR}/project")
+        if src["status"] == Status.RUNNING:
+            await self._event(w, f"Copying your project from {src['title']}")
+            await _relay(
+                self.remote(src),
+                f"tar -czf - -C {PROJECTS_DIR} --exclude=./renders .",
+                remote,
+                f"tar -xzf - -C {JOB_DIR}/project",
+            )
+        else:
+            _, key = self._project(src)
+            if not self.settings.storage_ready or not await self.storage.head(key):
+                raise RemoteError(
+                    f"{src['title']} isn't running and has no saved copy of its files; start it and try again"
+                )
+            await self._event(w, f"Copying the saved copy of {src['title']}'s project")
+            proc = remote.popen(f"tar -xzf - -C {JOB_DIR}/project --exclude=./renders", stdin=subprocess.PIPE)
+            await self.storage.download_stream(key, proc)
         blend = inputs.get("blend_path")
         if not blend:
-            found = await src_remote.run(
-                f"cd {PROJECTS_DIR} && find . -name '*.blend' -not -path './renders/*' -printf '%T@ %P\\n' | sort -nr | head -1",
-                check=False,
-                timeout=30,
+            found = await remote.run(
+                f"cd {JOB_DIR}/project && find . -name '*.blend' -printf '%T@ %P\\n'", check=False, timeout=30
             )
-            blend = found.stdout.strip().partition(" ")[2]
-        if not blend:
-            raise RemoteError("There's no saved .blend in ~/Projects on that desktop")
+            blend = pick_blend(found.stdout, inputs.get("scene"))
         if not BLEND_PATH.match(blend) or ".." in blend.split("/"):
             raise RemoteError(f"Rename {blend} to use only letters, numbers, spaces and - _ . (no quotes)")
-        await self._event(w, f"Copying your project from {src['title']}")
-        await remote.run(f"rm -rf {JOB_DIR} && mkdir -p {JOB_DIR}/project")
-        await _relay(
-            src_remote,
-            f"tar -czf - -C {PROJECTS_DIR} --exclude=./renders .",
-            remote,
-            f"tar -xzf - -C {JOB_DIR}/project",
-        )
         version = self.settings.blender_version
         runner = render(
             _env("render-run.sh"), BLENDER_VERSION=version, BLENDER_SHA256=BLENDER_SHA256.get(version, ""), BLEND=blend
@@ -667,6 +672,8 @@ class Supervisor:
                     size = await self.storage.upload_stream(proc, key, "application/gzip")
                     await self.store.add_artifact(new_id(), w["id"], "Rendered frames", key, "application/gzip", size)
                     where = "Your frames are ready to download."
+                    if not int(chunk.get("offset") or 0):
+                        await self._save_preview(w, remote)
                 else:
                     src = await self.store.workload(int(source)) if source else None
                     if not src or src["status"] != Status.RUNNING:
@@ -691,14 +698,34 @@ class Supervisor:
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             await self._force_delete(w, name, "Machine released after rendering", final=None)
         if not chunk:
-            await self.notify(w, "status", f"{w['title']} finished. {where}")
+            await self.notify(w, "status", f"{w['title']} finished. {where}", attachment=self._preview(w))
             return
         # A split render reports once: when its last part is done.
         parts = await self._farm_parts(int(chunk["farm_id"]))
         if parts and all(p["status"] == Status.SUCCEEDED for p in parts):
+            first = next((p for p in parts if not _chunk(p).get("offset")), None)
             await self.notify(
-                w, "status", f"All {chunk['total']} frames are rendered across {len(parts)} GPUs. {where}"
+                w,
+                "status",
+                f"All {chunk['total']} frames are rendered across {len(parts)} GPUs. {where}",
+                attachment=self._preview(first) if first else None,
             )
+
+    async def _save_preview(self, w: dict, remote: Remote) -> None:
+        """Keep a JPEG of the first frame (render-frames.py writes it) to text back as a picture."""
+        key = Storage.artifact_key(w["owner"], w["id"], "first-frame.jpg")
+        try:
+            proc = remote.popen(f"cat {JOB_DIR}/preview.jpg", stdout=subprocess.PIPE)
+            size = await self.storage.upload_stream(proc, key, "image/jpeg")
+        except Exception as exc:
+            log.info("render.preview_missing", workload=w["id"], error=str(exc)[:200])
+            return
+        if size:
+            await self.store.add_artifact(new_id(), w["id"], "First frame", key, "image/jpeg", size)
+            self.vault.update(w["id"], preview=key)
+
+    def _preview(self, w: dict) -> str | None:
+        return self.vault.get(w["id"]).get("preview")
 
     async def _farm_parts(self, farm_id: int) -> list[dict]:
         parts = []
@@ -1028,6 +1055,41 @@ BOOT_READY = "Desktop is live"
 BOOT_RESUME = "Restarting the machine"
 BOOT_TRAINING = "Training started"
 BOOT_RENDERING = "Rendering started"
+
+
+def _chunk(w: dict) -> dict:
+    try:
+        return json.loads(w["planJson"]).get("inputs", {}).get("chunk") or {}
+    except (ValueError, TypeError):
+        return {}
+
+
+_FILLER = {"my", "the", "a", "scene", "file", "blend", "project", "render"}
+
+
+def pick_blend(listing: str, scene: str | None) -> str:
+    """Choose a .blend from `find -printf '%T@ %P'` output: the one whose path best matches
+    the name the user gave (ties go to the newest), or the newest when no name was given."""
+    files = []
+    for line in listing.splitlines():
+        ts, _, path = line.strip().partition(" ")
+        if path.endswith(".blend") and not path.startswith("renders/"):
+            with contextlib.suppress(ValueError):
+                files.append((float(ts), path))
+    if not files:
+        raise RemoteError("There's no saved .blend in ~/Projects on that desktop")
+    files.sort(reverse=True)
+    words = [t for t in re.findall(r"[a-z0-9]+", (scene or "").lower()) if t not in _FILLER]
+    if not words:
+        return files[0][1]
+    scored = [(sum(t in path.lower() for t in words), ts, path) for ts, path in files]
+    best = max(scored)
+    if best[0] == 0:
+        names = ", ".join(p.rsplit("/", 1)[-1] for _, p in files[:6])
+        raise RemoteError(f"I couldn't find a scene called “{scene}”. Saved scenes: {names}")
+    return best[2]
+
+
 #: A .blend path relative to ~/Projects that is safe to put in a script (no quotes or `$`).
 BLEND_PATH = re.compile(r"^[\w .@+-]+(/[\w .@+-]+)*\.blend$")
 
