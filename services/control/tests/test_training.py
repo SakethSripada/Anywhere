@@ -48,3 +48,16 @@ def test_config_is_clamped_to_allowlisted_models():
     profile = inspect_dataset("t.jsonl", data, len(data))
     cfg = build_config(params_b=7, epochs=None, profile=profile, dataset_path="data.jsonl", vram_gb=24)
     assert cfg.method == "qlora" and cfg.max_seq_len == 2048 and cfg.epochs == 3
+
+
+def test_lora_training_script_keeps_gradients_flowing_through_checkpointed_layers():
+    # Plain LoRA (the default for models up to 1.5B) freezes the embeddings; with
+    # gradient checkpointing on, the first backward() fails unless the inputs are
+    # made to require grad or non-reentrant checkpointing is used. Torch isn't
+    # installed here, so check the vetted script's source.
+    from importlib import resources
+
+    src = resources.files("anywhere.environments").joinpath("train.py").read_text()
+    compile(src, "train.py", "exec")
+    assert "model.enable_input_require_grads()" in src
+    assert '"use_reentrant": False' in src
