@@ -38,7 +38,9 @@ import { cents } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ACTIVE, href, liveCents } from "@/lib/workloads";
 import { needsAttention, StatusDot } from "../machines/status";
+import { MachineMenu } from "../machines/machine-menu";
 import { AppLogo, appKey } from "./app-logo";
+import { TaskMenu } from "./task-menu";
 import { Logo } from "./logo";
 
 export function AppSidebar() {
@@ -83,7 +85,8 @@ function Groups() {
   const { workloads } = useWorkloads();
   const { conversations } = useConversations();
   const { setOpenMobile } = useSidebar();
-  const live = workloads.filter((w) => ACTIVE.has(w.status) || w.status === "planned").slice(0, 8);
+  const pending = workloads.filter((w) => w.status === "planned").slice(0, 6);
+  const live = workloads.filter((w) => ACTIVE.has(w.status) || w.status === "stopped").slice(0, 8);
   const close = () => setOpenMobile(false);
   const nav = [
     { href: "/", label: "Home", icon: House, active: pathname === "/" },
@@ -109,18 +112,8 @@ function Groups() {
         </SidebarGroupContent>
       </SidebarGroup>
 
-      {live.length > 0 && (
-        <SidebarGroup className="py-1.5">
-          <SidebarGroupLabel className="h-7 text-[11px] font-medium tracking-[0.04em] text-muted-foreground uppercase">Running</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu className="gap-0.5">
-              {live.map((w) => (
-                <LiveItem key={String(w.id)} w={w} active={pathname === href(w)} onClick={close} />
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      )}
+      <MachineGroup label="Needs approval" items={pending} pathname={pathname} onClick={close} />
+      <MachineGroup label="Running" items={live} pathname={pathname} onClick={close} />
 
       {conversations.length > 0 && (
         <SidebarGroup className="py-1.5 group-data-[collapsible=icon]:hidden">
@@ -131,11 +124,12 @@ function Groups() {
                 <SidebarMenuItem key={String(c.id)}>
                   <SidebarMenuButton
                     isActive={pathname === `/c/${c.id}`}
-                    className="h-7 text-[13px] text-sidebar-foreground/65 data-active:text-sidebar-foreground"
+                    className="h-7 pr-8 text-[13px] text-sidebar-foreground/65 data-active:text-sidebar-foreground"
                     render={<Link href={`/c/${c.id}`} onClick={close} prefetch={false} />}
                   >
                     <span>{c.title || "Untitled task"}</span>
                   </SidebarMenuButton>
+                  <TaskMenu id={c.id} title={c.title} className={HOVER_ACTION} />
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -143,6 +137,26 @@ function Groups() {
         </SidebarGroup>
       )}
     </>
+  );
+}
+
+/** Reveal a row's manage button on hover or keyboard focus (and while its menu is open). */
+const HOVER_ACTION =
+  "absolute top-1/2 right-1 size-6 -translate-y-1/2 opacity-0 transition-opacity group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 data-[popup-open]:opacity-100 group-data-[collapsible=icon]:hidden";
+
+function MachineGroup({ label, items, pathname, onClick }: { label: string; items: Workload[]; pathname: string; onClick: () => void }) {
+  if (!items.length) return null;
+  return (
+    <SidebarGroup className="py-1.5">
+      <SidebarGroupLabel className="h-7 text-[11px] font-medium tracking-[0.04em] text-muted-foreground uppercase">{label}</SidebarGroupLabel>
+      <SidebarGroupContent>
+        <SidebarMenu className="gap-0.5">
+          {items.map((w) => (
+            <LiveItem key={String(w.id)} w={w} active={pathname === href(w)} onClick={onClick} />
+          ))}
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
   );
 }
 
@@ -161,10 +175,16 @@ function LiveItem({ w, active, onClick }: { w: Workload; active: boolean; onClic
           {needsAttention(w.status) && <StatusDot status={w.status} className="absolute -right-1 -bottom-0.5 ring-2 ring-sidebar" />}
         </span>
         <span className="min-w-0 flex-1 truncate">{w.title}</span>
-        <span className={cn("shrink-0 text-[11px] tabular group-data-[collapsible=icon]:hidden", w.status === "planned" ? "text-warning" : "text-muted-foreground")}>
-          {w.status === "planned" ? "Approve" : cents(now ? liveCents(w, now) : w.accruedCents)}
+        <span
+          className={cn(
+            "shrink-0 text-[11px] tabular transition-opacity group-focus-within/menu-item:opacity-0 group-hover/menu-item:opacity-0 group-data-[collapsible=icon]:hidden",
+            w.status === "planned" ? "text-warning" : "text-muted-foreground",
+          )}
+        >
+          {w.status === "planned" ? "Approve" : w.status === "stopped" ? "Stopped" : cents(now ? liveCents(w, now) : w.accruedCents)}
         </span>
       </SidebarMenuButton>
+      <MachineMenu w={w} className={HOVER_ACTION} />
     </SidebarMenuItem>
   );
 }
