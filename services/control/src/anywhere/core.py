@@ -486,7 +486,7 @@ class Anywhere:
 
     def _not_busy(self, w: dict) -> None:
         if self.supervisor.busy(w["id"]):
-            raise ActionError("Hang on — this machine is still finishing its last operation")
+            raise ActionError("Hang on, this machine is still finishing its last operation")
 
     async def stop(self, owner: str, workload_id: int) -> None:
         w = await self.owned(owner, workload_id)
