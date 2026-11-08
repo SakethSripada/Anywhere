@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from . import budget, llm, render_bench
+from . import budget, llm, render_bench, replay
 from .brev import BrevCLI
 from .catalog import Catalog
 from .config import Settings
@@ -505,6 +505,55 @@ class Anywhere:
             "measured_on": f"two test renders at {probe['probe_width']}x{probe['probe_height']}",
             "other_gpus": sorted(compare, key=lambda c: c["seconds_per_frame"]),
             "note": "Denoising adds a little on top. Other-GPU times scale this measurement by Blender Open Data benchmarks.",
+        }
+
+    # ── Agent replays ─────────────────────────────────────────────────────
+
+    async def _replay_frames(self, owner: str, workload_id: int, run_id: int) -> tuple[dict, list[dict]]:
+        await self.owned(owner, workload_id)
+        run = next((r for r in await self.store.agent_runs(workload_id) if int(r["id"]) == run_id), None)
+        if run is None:
+            raise ActionError("That agent run wasn't found on this machine")
+        frames = replay.frames_from_steps(await self.store.agent_steps(run_id))
+        frames = [f for f in frames if Storage.owns(owner, f["key"])]
+        return run, frames
+
+    async def replay(self, owner: str, workload_id: int, run_id: int) -> dict:
+        """The frames of one desktop-agent run, with short-lived links to each screenshot."""
+        run, frames = await self._replay_frames(owner, workload_id, run_id)
+        if frames and not self.settings.storage_ready:
+            raise ActionError("Replays need object storage, which isn't set up on this server")
+        started, ended = run.get("startedAt"), run.get("endedAt")
+        return {
+            "run_id": run_id,
+            "goal": run["goal"],
+            "status": run["status"],
+            "result": run.get("result") or "",
+            "seconds": round((ended - started).total_seconds()) if started and ended else None,
+            "frames": [
+                {**{k: v for k, v in f.items() if k != "key"}, "url": self.storage.presign_get(f["key"], expires=3600)}
+                for f in frames
+            ],
+        }
+
+    async def replay_gif(self, owner: str, workload_id: int, run_id: int) -> dict:
+        """Render (once) and link an annotated timelapse GIF of a desktop-agent run."""
+        if not self.settings.storage_ready:
+            raise ActionError("Timelapses need object storage, which isn't set up on this server")
+        run, frames = await self._replay_frames(owner, workload_id, run_id)
+        if not frames:
+            raise ActionError("This run has no screenshots to make a timelapse from")
+        key = Storage.artifact_key(owner, workload_id, f"agent-{run_id}-timelapse.gif")
+        if not await self.storage.head(key):
+            images = [await self.storage.get_bytes(f["key"]) for f in frames]
+            gif = await asyncio.to_thread(replay.timelapse_gif, images, frames, run["goal"])
+            await self.storage.put_bytes(key, gif, "image/gif")
+            await self.store.add_artifact(
+                new_id(), workload_id, f"Agent timelapse: {run['goal'][:60]}", key, "image/gif", len(gif)
+            )
+        return {
+            "url": self.storage.presign_get(key, expires=3600, filename=f"anywhere-agent-{run_id}.gif"),
+            "frames": len(frames),
         }
 
     async def resume_agent(self, owner: str, workload_id: int) -> int | None:
