@@ -20,15 +20,32 @@ BLENDER_SHA256="{{BLENDER_SHA256}}"
 NAME=anywhere-desktop
 
 step "Checking the GPU"
-nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
-  || { echo "::error:: No NVIDIA GPU is visible on this machine"; exit 1; }
+# Brev can report a fresh VM as ready while the NVIDIA driver is still loading,
+# so give it a few minutes before calling the GPU missing.
+for i in $(seq 1 36); do
+  nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader && break
+  [ "$i" = 36 ] && { echo "::error:: No NVIDIA GPU is visible on this machine"; exit 1; }
+  sleep 5
+done
 
-DOCKER=docker
-docker ps >/dev/null 2>&1 || DOCKER="sudo docker"
-$DOCKER info >/dev/null 2>&1 || sudo systemctl start docker
+# Docker may still be starting this early in the first boot.
+command -v docker >/dev/null || { echo "::error:: Docker is not installed on this machine"; exit 1; }
+DOCKER=
+for i in $(seq 1 36); do
+  if docker info >/dev/null 2>&1; then DOCKER=docker; break; fi
+  if sudo -n docker info >/dev/null 2>&1; then DOCKER="sudo docker"; break; fi
+  [ "$i" = 1 ] && { sudo -n systemctl start docker >/dev/null 2>&1 || true; }
+  sleep 5
+done
+[ -n "$DOCKER" ] || { echo "::error:: Docker did not start on this machine"; exit 1; }
 
 step "Fetching the desktop image"
-$DOCKER pull -q "$IMAGE"
+# A registry hiccup shouldn't cost the whole launch.
+for i in 1 2 3; do
+  $DOCKER pull -q "$IMAGE" && break
+  [ "$i" = 3 ] && { echo "::error:: Could not download the desktop image $IMAGE"; exit 1; }
+  sleep 10
+done
 
 if ! $DOCKER container inspect "$NAME" >/dev/null 2>&1; then
   step "Starting the desktop"

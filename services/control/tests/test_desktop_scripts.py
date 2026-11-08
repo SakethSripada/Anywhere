@@ -71,3 +71,19 @@ def test_desktop_setup_publishes_both_vnc_bridges_on_loopback(tmp_path):
     # desktop-start.sh serves the watch-link stream on 6081; unpublished, it can't be tunneled to.
     for port in (3211, 6080, 6081):
         assert f"-p 127.0.0.1:{port}:{port}" in run
+
+
+def test_desktop_setup_waits_for_docker_on_first_boot(tmp_path):
+    env = _fakes(tmp_path)
+    (tmp_path / "info_fails").write_text("6")  # the daemon answers on the fourth look (two probes each)
+    result = _run(_setup_script(), env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::step:: Desktop environment installed" in result.stdout
+
+
+def test_desktop_setup_names_a_missing_gpu(tmp_path):
+    env = _fakes(tmp_path)
+    (tmp_path / "bin" / "nvidia-smi").write_text("#!/usr/bin/env bash\nexit 9\n")
+    result = _run(_setup_script(), env)
+    assert result.returncode == 1
+    assert "::error:: No NVIDIA GPU is visible on this machine" in result.stdout
