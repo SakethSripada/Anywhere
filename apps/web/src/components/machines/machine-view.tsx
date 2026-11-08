@@ -130,11 +130,17 @@ function Workspace({ w }: { w: Workload }) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const work = w.kind === "desktop" ? <DesktopStage w={w} onAskAgent={askAgent} /> : <JobStage w={w} />;
-  // The desktop stays mounted while Insights is open, so its stream doesn't reconnect on every switch.
+  // The desktop stays mounted while Insights is open, so its stream doesn't reconnect on
+  // every switch. A job has no stream to keep, so it unmounts and stops its clocks.
   const stage = (
     <>
-      <div className={cn("h-full min-h-0", view !== "work" && "hidden")}>{work}</div>
+      {w.kind === "desktop" ? (
+        <div className={cn("h-full min-h-0", view !== "work" && "hidden")}>
+          <DesktopStage w={w} onAskAgent={askAgent} />
+        </div>
+      ) : (
+        view === "work" && <JobStage w={w} />
+      )}
       {view === "insights" && <Insights w={w} />}
     </>
   );
