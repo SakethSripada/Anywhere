@@ -171,7 +171,7 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
     async def observe(state: OpState) -> OpState:
         if not await has_control():
             return {"status": "paused", "result": PAUSED}
-        png = await screen.screenshot()
+        png = await _screenshot(screen)
         # PIL resize + JPEG encode takes ~50-150 ms; off the loop so it can't stall
         # the VNC relay or other requests.
         frame = await asyncio.to_thread(prepare_frame, png)
@@ -297,6 +297,21 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
     g.add_edge("decide", "act")
     g.add_conditional_edges("act", after_act, ["observe", END])
     return g.compile()
+
+
+async def _screenshot(screen: Screen, attempts: int = 3, delay: float = 2.0) -> bytes:
+    """Screenshots are safe to repeat, and one slow read over the SSH tunnel
+    ("Timeout on reading data from socket", seen live) shouldn't end the run."""
+    for attempt in range(attempts):
+        try:
+            return await screen.screenshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(delay * (attempt + 1))
+    raise AssertionError("unreachable")
 
 
 def describe_failure(exc: Exception) -> str:

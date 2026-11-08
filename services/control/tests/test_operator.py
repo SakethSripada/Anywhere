@@ -197,3 +197,20 @@ async def test_model_coordinates_are_read_on_a_0_to_1000_grid():
 
     a = _from_grid(Action(action="click", x=214, y=112), 1280, 800)
     assert (a.x, a.y) == (274, 89)
+
+
+async def test_a_slow_screenshot_is_retried_not_fatal():
+    from anywhere import operator as op
+
+    class Flaky:
+        n = 0
+
+        async def screenshot(self):
+            self.n += 1
+            if self.n == 1:
+                raise TimeoutError("Timeout on reading data from socket")
+            return b"png"
+
+    s = Flaky()
+    assert await op._screenshot(s, delay=0) == b"png"
+    assert s.n == 2
