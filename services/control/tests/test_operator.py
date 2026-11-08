@@ -233,3 +233,77 @@ async def test_keys_on_a_type_action_are_pressed_after_the_text():
         ]
     )
     assert [c[0] for c in screen.calls] == ["type", "keys"]
+
+
+class BlenderScreen(FakeScreen):
+    """Plays Blender's script runner: decodes the script, 'runs' it, answers like the runner."""
+
+    def __init__(self, result):
+        super().__init__()
+        self.result = result
+        self.scripts = []
+
+    async def shell(self, command, timeout=60):
+        import base64
+        import re
+
+        self.calls.append(("shell", command))
+        self.scripts.append(base64.b64decode(re.search(r"echo (\S+) \| base64 -d", command).group(1)).decode())
+        return 0, self.result
+
+
+async def run_blender(result, replies):
+    screen = BlenderScreen(result)
+
+    async def record(*a): ...
+
+    async def has_control():
+        return True
+
+    graph = build_operator(llm=ScriptedLLM(replies), screen=screen, record=record, has_control=has_control)
+    return await graph.ainvoke({"goal": "test", "step": 0, "history": []}), screen
+
+
+async def test_blender_python_sends_the_code_and_reports_the_traceback():
+    code = (
+        'import bpy\nfor i in range(3):\n    bpy.ops.mesh.primitive_cube_add(location=(i * 2, 0, 0))\nprint("made {3}")'
+    )
+    final, screen = await run_blender(
+        "error\nTraceback (most recent call last):\nNameError: name 'foo' is not defined",
+        [{"action": "blender_python", "code": code, "summary": "Building"}, {"action": "done", "text": "ok"}],
+    )
+    assert screen.scripts == [code]  # quotes, braces and newlines survive the trip
+    assert "/tmp/anywhere-run/" in screen.calls[0][1]
+    assert final["status"] == "done"
+
+
+async def test_blender_python_result_reaches_the_model():
+    from anywhere.operator import run_in_blender
+
+    assert await run_in_blender(BlenderScreen("ok\nmade 3"), "print('made 3')") == "ok, printed: made 3"
+    assert (await run_in_blender(BlenderScreen("error\nNameError: foo"), "foo")).startswith("error in your code")
+    assert "didn't pick up" in await run_in_blender(BlenderScreen("NOT_PICKED_UP"), "x = 1")
+
+
+def test_model_code_with_raw_newlines_in_the_json_string_is_accepted():
+    from anywhere.llm import parse_json_model
+
+    reply = '{"action": "blender_python", "code": "import bpy\nprint(1)"}'
+    assert parse_json_model(reply, Action).code == "import bpy\nprint(1)"
+    assert Action.model_validate({"action": "python", "code": "x=1"}).action == "blender_python"
+
+
+def test_a_reply_with_text_or_braces_after_the_json_still_parses():
+    from anywhere.llm import parse_json_model
+
+    reply = 'Sure: {"action": "blender_python", "code": "d = {1: 2}\nprint(f\'{d}\')"}\nThat builds it {done}.'
+    assert parse_json_model(reply, Action).code == "d = {1: 2}\nprint(f'{d}')"
+    two = '{"action": "wait"} {"action": "key", "keys": ["ctrl", "s"]}'
+    assert parse_json_model(two, Action).action == "key"
+
+
+def test_python_style_escapes_and_a_missing_closing_brace_are_repaired():
+    from anywhere.llm import parse_json_model
+
+    reply = '{"thought": "fix", "action": "blender_python", "code": "print(\\\'hi\\\')"</action>'
+    assert parse_json_model(reply, Action).code == "print('hi')"

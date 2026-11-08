@@ -82,7 +82,8 @@ log("info", "spectrum.ready");
 
 /* ── Inbound ───────────────────────────────────────────────────────────── */
 
-type InboundReply = { reply: string | null; duplicate?: boolean };
+type InlineAttachment = { name: string; mime_type: string; data_base64: string };
+type InboundReply = { reply: string | null; duplicate?: boolean; attachments?: InlineAttachment[] };
 
 async function forward(handle: string, text: string, messageId: string): Promise<InboundReply> {
   const res = await fetch(`${config.controlUrl}/v1/bridge/inbound`, {
@@ -111,9 +112,19 @@ async function handleInbound(space: Space, message: Message) {
 
   await space.responding(async () => {
     try {
-      const { reply, duplicate } = await forward(handle, text.slice(0, 4000), message.id);
-      if (duplicate || !reply) return;
-      await message.reply(reply);
+      const { reply, duplicate, attachments } = await forward(handle, text.slice(0, 4000), message.id);
+      if (duplicate) return;
+      if (reply) await message.reply(reply);
+      // Pictures the agent took this turn (e.g. "send me a screenshot") follow the text.
+      for (const a of attachments ?? []) {
+        try {
+          const bytes = Buffer.from(a.data_base64, "base64");
+          await space.send(attachment(bytes, { name: a.name, mimeType: a.mime_type }));
+          log("info", "inbound.attachment_sent", { handle: redact(handle), bytes: bytes.length });
+        } catch (err) {
+          log("warn", "inbound.attachment_failed", { handle: redact(handle), error: String(err) });
+        }
+      }
     } catch (err) {
       log("error", "inbound.failed", { handle: redact(handle), error: String(err) });
       await message.reply("I hit a snag reaching Anywhere. Give it a moment and try again.");
@@ -212,31 +223,51 @@ async function sendAttachment(n: Notification) {
   log("info", "outbound.attachment_sent", { id: String(n.id), bytes: bytes.length });
 }
 
+function watchOutbox(conn: DbConnection) {
+  conn.db.workerOutbox.onInsert((_ctx, row) => void deliver(conn, row));
+  conn
+    .subscriptionBuilder()
+    .onApplied(() => {
+      for (const row of conn.db.workerOutbox.iter()) void deliver(conn, row);
+    })
+    .onError((ctx) => log("error", "spacetime.subscription_error", { error: String(ctx.event) }))
+    .subscribe("SELECT * FROM worker_outbox");
+}
+
+let initialRetry = 0;
+
 function connectSpacetime() {
+  let connected = false;
   DbConnection.builder()
     .withUri(config.stdbUri)
     .withDatabaseName(config.stdbDatabase)
     .withToken(config.stdbToken)
     .withAutomaticReconnect()
     .onConnect((conn, identity) => {
+      connected = true;
+      initialRetry = 0;
       health.spacetime = true;
       log("info", "spacetime.connected", { identity: identity.toHexString().slice(0, 12) });
-      conn.db.workerOutbox.onInsert((_ctx, row) => void deliver(conn, row));
-      conn
-        .subscriptionBuilder()
-        .onApplied(() => {
-          for (const row of conn.db.workerOutbox.iter()) void deliver(conn, row);
-        })
-        .onError((ctx) => log("error", "spacetime.subscription_error", { error: String(ctx.event) }))
-        .subscribe("SELECT * FROM worker_outbox");
+      watchOutbox(conn);
+    })
+    // Reconnects keep the handlers and replay the subscription (onApplied re-scans the
+    // outbox), but they call this instead of onConnect, so health must be restored here.
+    .onAutomaticReconnect(() => {
+      health.spacetime = true;
+      log("info", "spacetime.reconnected");
     })
     .onDisconnect(() => {
       health.spacetime = false;
       log("warn", "spacetime.disconnected");
     })
-    .onConnectError((_ctx, err) => {
+    .onConnectError((_ctx, err, nextAttempt) => {
       health.spacetime = false;
-      log("error", "spacetime.connect_error", { error: String(err) });
+      log("error", "spacetime.connect_error", { error: String(err), nextAttempt });
+      // The SDK never retries a failed *first* connection (SpacetimeDB down at boot), so we do.
+      if (!connected) {
+        const delay = Math.min(30_000, 1_000 * 2 ** initialRetry++);
+        setTimeout(connectSpacetime, delay);
+      }
     })
     .build();
 }

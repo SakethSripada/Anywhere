@@ -695,10 +695,18 @@ def _routes():
             await app.store.upsert_conversation(cid, owner, "Messages", "imessage")
             app.vault.update(0, **{f"imessage:{owner}": cid})
         await app.store.append_message(cid, "user", "text", body.text, 0, "imessage")
-        reply = await _agent_turn(
-            app, request.app.state.agent, TurnContext(owner, cid, "imessage"), body.text, post=True
-        )
-        return {"reply": reply}
+        ctx = TurnContext(owner, cid, "imessage")
+        reply = await _agent_turn(app, request.app.state.agent, ctx, body.text, post=True)
+        # Pictures the agent took this turn (send_screenshot) go out right after the reply.
+        attachments = [
+            {
+                "name": f"screenshot-{i + 1}.jpg",
+                "mime_type": "image/jpeg",
+                "data_base64": base64.b64encode(jpeg).decode(),
+            }
+            for i, jpeg in enumerate(ctx.attachments)
+        ]
+        return {"reply": reply, "attachments": attachments}
 
     return r
 

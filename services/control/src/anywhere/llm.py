@@ -60,16 +60,42 @@ def vision(settings: Settings):
     return model
 
 
-_JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
-
-
 def parse_json_model(text: str, model: type[T]) -> T:
-    """Extract and validate the last JSON object in a model reply."""
+    """Extract and validate the last JSON object in a model reply.
+
+    Decodes object by object rather than first-brace-to-last: a reply that carries code
+    (blender_python) often has braces, or a second object, after the one we want."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    match = _JSON_BLOCK.search(text)
-    if not match:
+    decoder = json.JSONDecoder(strict=False)  # models put raw newlines inside long strings
+    found: list[object] = []
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+            found.append(obj)
+            i = text.find("{", end)
+        except json.JSONDecodeError:
+            i = text.find("{", i + 1)
+    if not found and "{" in text:
+        # Repairs for the slips seen live in long code-carrying replies: Python-style \\'
+        # escapes (invalid JSON) and a reply cut off before its closing brace.
+        start = text[text.index("{") :].replace("\\'", "'")
+        cut = start[: start.rfind('"') + 1]  # drop anything trailing the last string
+        for candidate in (start, start + "}", cut + "}"):
+            try:
+                found.append(decoder.raw_decode(candidate)[0])
+                break
+            except json.JSONDecodeError:
+                continue
+    if not found:
         raise ValueError("No JSON object in reply")
-    return model.model_validate(json.loads(match.group(0)))
+    error: ValidationError | None = None
+    for obj in reversed(found):
+        try:
+            return model.model_validate(obj)
+        except ValidationError as exc:
+            error = error or exc
+    raise error
 
 
 async def ainvoke_json(llm: ChatNVIDIA, messages: list[BaseMessage], model: type[T], retries: int = 1) -> T:

@@ -80,8 +80,13 @@ class Anywhere:
             await self.store.append_message(int(w["conversationId"]), "assistant", kind, body, int(w["id"]), "system")
         except Exception as exc:
             log.warning("notify.message_failed", error=str(exc))
+        await self.text_phones(w["owner"], body, attachment)
+
+    async def text_phones(self, owner: str, body: str, attachment: str | None = None) -> int:
+        """Queue an iMessage to each of the owner's linked phones; returns how many were queued."""
+        sent = 0
         try:
-            for handle in await self.store.handles_for(w["owner"]):
+            for handle in await self.store.handles_for(owner):
                 nid = new_id()
                 if attachment:
                     # The outbox row only carries text; the bridge asks for the picture by id.
@@ -91,9 +96,11 @@ class Anywhere:
                         str(nid),
                         {"key": attachment, "name": name, "at": datetime.now(UTC).isoformat()},
                     )
-                await self.store.enqueue_notification(nid, w["owner"], "imessage", handle, body)
+                await self.store.enqueue_notification(nid, owner, "imessage", handle, body)
+                sent += 1
         except Exception as exc:
             log.warning("notify.imessage_failed", error=str(exc))
+        return sent
 
     # ── Ownership helpers ─────────────────────────────────────────────────
 
@@ -535,9 +542,12 @@ class Anywhere:
 
     # ── Desktop agent ─────────────────────────────────────────────────────
 
-    async def operate(self, owner: str, workload_id: int, goal: str, *, replace: bool = False) -> int:
+    async def operate(
+        self, owner: str, workload_id: int, goal: str, *, replace: bool = False, channel: str = "web"
+    ) -> int:
         """Start the desktop agent on `goal`. With `replace`, a task already in
-        progress is stopped first (the user steering it from chat)."""
+        progress is stopped first (the user steering it from chat). A goal that
+        came over iMessage (`channel`) is answered there too when it finishes."""
         w = await self.owned(owner, workload_id)
         if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
             raise ActionError("The desktop needs to be running first")
@@ -552,8 +562,15 @@ class Anywhere:
                 self._halts.pop(workload_id, None)
         if w["controller"] != "agent":
             await self.store.set_controller(workload_id, "agent")
-        self.vault.update(workload_id, last_goal=goal)
+        self.vault.update(workload_id, last_goal=goal, agent_channel=channel)
         return self.supervisor.start_agent(w, goal, self._run_operator)
+
+    def set_progress_updates(self, workload_id: int, every_minutes: int) -> int:
+        """Text a progress update (with the latest screenshot) every N minutes while
+        the desktop agent works on this machine; 0 turns updates off."""
+        minutes = max(0, min(int(every_minutes), 60))
+        self.vault.update(workload_id, update_every_min=minutes)
+        return minutes
 
     async def halt_agent(self, owner: str, workload_id: int, *, pause: bool = False) -> None:
         """Stop the desktop agent and give the user the controls.
@@ -570,11 +587,18 @@ class Anywhere:
         finally:
             self._halts.pop(workload_id, None)
 
+    #: How often a running desktop agent checks whether a progress text is due, and
+    #: the seconds in one "minute" of the user's update interval (shortened in tests).
+    UPDATE_TICK = 15.0
+    UPDATE_MINUTE = 60.0
+
     async def _run_operator(self, w: dict, goal: str, run_id: int) -> None:
         await self.store.start_agent_run(run_id, w["id"], goal)
         status, result = "failed", ""
         shots = 0
         last_touch = float("-inf")
+        #: The newest stored screenshot and the last thing the agent did, for texts.
+        latest: dict[str, str] = {"key": "", "act": ""}
 
         async def record(kind: str, summary: str, detail: str, jpeg: bytes | None) -> None:
             nonlocal shots, last_touch
@@ -586,6 +610,10 @@ class Anywhere:
                     await self.storage.put_bytes(key, jpeg, "image/jpeg")
                 except Exception:
                     key = ""
+            if key:
+                latest["key"] = key
+            if kind == "act":
+                latest["act"] = summary
             if kind == "observe" and not key:
                 return
             await self.store.add_agent_step(run_id, kind, summary, detail, key)
@@ -600,6 +628,21 @@ class Anywhere:
             current = await self.store.workload(w["id"])
             return bool(current and current["controller"] == "agent" and current["status"] == Status.RUNNING)
 
+        async def progress_texts() -> None:
+            """Text the latest step and screenshot every N minutes, if the user asked for updates."""
+            loop = asyncio.get_running_loop()
+            last_sent = loop.time()
+            while True:
+                await asyncio.sleep(self.UPDATE_TICK)
+                every = int(self.vault.get(int(w["id"])).get("update_every_min") or 0)
+                if not every or loop.time() - last_sent < every * self.UPDATE_MINUTE:
+                    continue
+                last_sent = loop.time()
+                doing = f" Last step: {latest['act']}." if latest["act"] else ""
+                body = f'Update on {w["title"]}: still working on "{_clip(goal, 90)}".{doing}'
+                await self.text_phones(w["owner"], body, latest["key"] or None)
+
+        ticker = asyncio.create_task(progress_texts())
         try:
             async with connect_screen(self.supervisor.remote(w), self.vault.agent_token(w["id"])) as screen:
                 graph = build_operator(
@@ -617,11 +660,20 @@ class Anywhere:
             log.exception("operator.crashed", workload=w["id"])
             result = describe_failure(exc)
         finally:
+            ticker.cancel()
             await self.store.finish_agent_run(run_id, status, result[:2000])
             if result:
                 await self.store.append_message(
                     int(w["conversationId"]), "assistant", "agent", result[:4000], int(w["id"]), "system"
                 )
+            # A task asked for over iMessage is answered there, with a picture of the result.
+            if status in ("done", "failed") and self.vault.get(int(w["id"])).get("agent_channel") == "imessage":
+                body = (
+                    f"Done on {w['title']}: {_clip(result, 600)}"
+                    if status == "done"
+                    else f"I couldn't finish that on {w['title']}: {_clip(result, 600)}"
+                )
+                await self.text_phones(w["owner"], body, latest["key"] or None)
 
     # ── Render estimates ──────────────────────────────────────────────────
 
@@ -872,6 +924,11 @@ class Anywhere:
             upload_id,
             {"owner": owner, "key": key, "name": name, "size": size, "profile": profile.model_dump(by_alias=True)},
         )
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def describe_intent(intent: Intent, upload_id: int | None = None, note: str | None = None) -> str:
