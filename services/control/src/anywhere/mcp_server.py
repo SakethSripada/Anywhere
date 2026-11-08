@@ -290,19 +290,27 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
 
 async def _conversation(app: Anywhere, p: Principal) -> int:
     """One conversation per token (or per OAuth connection, whose access tokens rotate hourly),
-    so the user can see in the web app what the agent asked for."""
-    grant = app.vault.section_get("oauth_grants", str(p.grant_id)) if p.grant_id is not None else None
-    record = grant if grant is not None else (app.vault.mcp_token(p.digest) or {})
-    cid = record.get("conversation_id")
-    if cid:
-        return int(cid)
-    cid = new_id()
-    await app.store.upsert_conversation(cid, p.owner, f"Agent: {p.name}"[:60], "mcp")
-    if grant is not None:
-        app.vault.section_put("oauth_grants", str(p.grant_id), {**grant, "conversation_id": cid})
-    else:
-        app.vault.update_mcp_token(p.digest, conversation_id=cid)
-    return cid
+    so the user can see in the web app what the agent asked for.
+
+    Serialised per connection: parallel first calls would otherwise each create a
+    conversation. The id is merged in with section_update, which does nothing if
+    the connection was revoked meanwhile, so a revoke is never undone."""
+    key = f"grant:{p.grant_id}" if p.grant_id is not None else f"token:{p.digest}"
+    locks: dict[str, asyncio.Lock] = app.__dict__.setdefault("_mcp_conversation_locks", {})
+    async with locks.setdefault(key, asyncio.Lock()):
+        grant = app.vault.section_get("oauth_grants", str(p.grant_id)) if p.grant_id is not None else None
+        record = grant if grant is not None else (app.vault.mcp_token(p.digest) or {})
+        cid = record.get("conversation_id")
+        if cid:
+            locks.pop(key, None)
+            return int(cid)
+        cid = new_id()
+        await app.store.upsert_conversation(cid, p.owner, f"Agent: {p.name}"[:60], "mcp")
+        if grant is not None:
+            app.vault.section_update("oauth_grants", str(p.grant_id), conversation_id=cid)
+        else:
+            app.vault.update_mcp_token(p.digest, conversation_id=cid)
+        return cid
 
 
 async def _note(app: Anywhere, p: Principal, workload_id: int, text: str) -> None:
