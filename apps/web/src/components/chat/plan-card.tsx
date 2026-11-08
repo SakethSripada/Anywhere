@@ -15,6 +15,7 @@ import { approach, CONFIDENCE, parsePlan, type Offer } from "@/lib/plan";
 import { cn } from "@/lib/utils";
 import { ACTIVE, href } from "@/lib/workloads";
 import { StatusText } from "../machines/status";
+import { GpuCompare } from "./gpu-compare";
 
 function useActions(id: bigint) {
   const api = useApi();
@@ -38,6 +39,7 @@ function useActions(id: bigint) {
 export function PlanCard({ workloadId }: { workloadId: bigint }) {
   const { workload: w, ready } = useWorkload(workloadId);
   const { busy, act } = useActions(workloadId);
+  const [compare, setCompare] = useState(false);
 
   if (!w) return ready ? null : <Skeleton className="h-40 w-full max-w-xl rounded-2xl" />;
   const plan = parsePlan(w.planJson);
@@ -91,11 +93,25 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
       </div>
 
       <Collapsible>
-        <div className="flex items-center gap-2 border-t px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t px-3 py-2">
           <CollapsibleTrigger className="group flex items-center gap-1 rounded-md px-2 py-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground">
             Details
             <ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180" />
           </CollapsibleTrigger>
+          {plan.alternatives.length > 0 && (
+            <button
+              type="button"
+              aria-expanded={compare}
+              onClick={() => setCompare((c) => !c)}
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2 py-1 text-[13px] whitespace-nowrap transition-colors hover:text-foreground",
+                compare ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              Compare
+              <ChevronDown className={cn("size-3.5 transition-transform", compare && "rotate-180")} />
+            </button>
+          )}
           <div className="ml-auto flex items-center gap-2">
             {planned ? (
               <>
@@ -147,6 +163,7 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
           </div>
         </CollapsibleContent>
       </Collapsible>
+      {compare && <GpuCompare plan={plan} />}
     </article>
   );
 }
