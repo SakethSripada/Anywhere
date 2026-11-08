@@ -31,7 +31,7 @@ from typing import Any
 import structlog
 
 from . import budget, savings, sharing
-from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
+from .brev import BrevCLI, BrevError, Instance, ProvisioningDisabled, instance_name
 from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
@@ -163,6 +163,15 @@ class Supervisor:
         except Exception as exc:  # telemetry must never break a workflow
             log.warning("supervisor.event_failed", error=str(exc))
 
+    def _boot_progress(self, w: dict):
+        """Turn Brev's boot stages into activity lines, so a 5 to 10 minute wait isn't silent."""
+
+        async def report(inst: Instance) -> None:
+            if message := boot_stage(inst):
+                await self._event(w, message)
+
+        return report
+
     def remote(self, w: dict) -> Remote:
         name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
         return self.remote_factory(name)
@@ -197,13 +206,13 @@ class Supervisor:
                     created = await self.brev.create(name, w["instanceType"], boot)
                 if created.dry_run:
                     await self._event(w, "Dry run: Brev accepted this request. No machine was created.", "success")
-                    await self._transition(w, Status.CANCELLED, "Dry run complete — nothing was billed")
+                    await self._transition(w, Status.CANCELLED, "Dry run complete, nothing was billed")
                     await self.notify(
                         w, "status", "Dry run complete: Brev validated the plan. Switch to live mode to run it."
                     )
                     return
                 await self._event(w, f"Machine requested ({w['instanceType']}). Waiting for it to boot…")
-                await self.brev.wait_for(name, want="RUNNING", timeout=25 * 60)
+                await self.brev.wait_for(name, want="RUNNING", timeout=25 * 60, on_change=self._boot_progress(w))
                 await self.brev.refresh_ssh()
                 remote = self.remote(w)
                 await _until(remote.reachable, timeout=6 * 60, what="SSH access")
@@ -427,7 +436,7 @@ class Supervisor:
                 await self._transition(w, Status.PROVISIONING, "Resuming your machine")
                 await self._event(w, BOOT_RESUME)
                 await self.brev.start(name)
-                await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60)
+                await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60, on_change=self._boot_progress(w))
                 await self.brev.refresh_ssh()
                 remote = self.remote(w)
                 await _until(remote.reachable, timeout=6 * 60, what="SSH access")
@@ -1287,3 +1296,19 @@ def _now() -> datetime:
 
 
 __all__ = ["Supervisor", "StorageUnavailable", "render"]
+
+
+#: Brev's instance statuses in the words the activity feed uses.
+_BOOT_STAGES = {
+    "DEPLOYING": "Brev is allocating the GPU",
+    "STARTING": "Machine is starting",
+    "STOPPED": "Machine is stopped",
+    "STOPPING": "Machine is stopping",
+}
+
+
+def boot_stage(inst: Instance) -> str | None:
+    """One activity line per boot stage, or None when there's nothing new to say."""
+    if inst.status == "RUNNING":
+        return "Machine is up, waiting for its shell" if not inst.ready else "Machine is up"
+    return _BOOT_STAGES.get(inst.status)
