@@ -427,10 +427,16 @@ class ProposeIn(BaseModel):
         description="Render jobs: split the frames across this many GPUs at once (faster, similar cost).",
     )
     render_from_workload_id: int | None = Field(
-        None, ge=1, le=2**53, description="Render jobs: the running desktop whose ~/Projects holds the scene."
+        None,
+        ge=1,
+        le=2**53,
+        description="Render jobs: the desktop whose ~/Projects holds the scene (running, or stopped with saved files).",
     )
     blend_path: str | None = Field(
         None, max_length=300, description="Render jobs: the .blend inside ~/Projects. Defaults to the newest one."
+    )
+    scene: str | None = Field(
+        None, max_length=80, description='Render jobs: the scene\'s name ("alley") when the .blend path is not known.'
     )
     preference: Preference | None = None
     max_budget_usd: float | None = Field(None, ge=0, le=1000)
@@ -542,7 +548,7 @@ def build_server() -> MCPServer:
         you may approve it after the user agrees; otherwise the user approves it in the web app."""
 
         async def run(app: Anywhere, p: Principal):
-            data = request.model_dump(exclude={"dataset_upload_id", "render_from_workload_id", "blend_path"})
+            data = request.model_dump(exclude={"dataset_upload_id", "render_from_workload_id", "blend_path", "scene"})
             intent = Intent.model_validate(data)
             cid = await _conversation(app, p)
             result = await app.propose(
@@ -553,6 +559,7 @@ def build_server() -> MCPServer:
                 auto_approve="spend" in p.scopes,
                 render_from=request.render_from_workload_id,
                 blend_path=request.blend_path,
+                scene=request.scene,
             )
             if result.get("ok") and result.get("workload_id"):
                 w = await app.store.workload(int(result["workload_id"]))
