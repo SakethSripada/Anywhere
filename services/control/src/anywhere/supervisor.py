@@ -627,7 +627,12 @@ class Supervisor:
         runner = render(
             _env("render-run.sh"), BLENDER_VERSION=version, BLENDER_SHA256=BLENDER_SHA256.get(version, ""), BLEND=blend
         )
-        cfg = {"frames": int(intent.get("render_frames") or 1), "samples": intent.get("render_samples")}
+        chunk = inputs.get("chunk") or {}
+        cfg = {
+            "frames": int(intent.get("render_frames") or 1),
+            "offset": int(chunk.get("offset") or 0),
+            "samples": intent.get("render_samples"),
+        }
         await remote.write_file(f"{JOB_DIR}/config.json", json.dumps(cfg).encode())
         await remote.write_file(f"{JOB_DIR}/render-frames.py", _env("render-frames.py").encode())
         await remote.write_file(f"{JOB_DIR}/run.sh", runner.encode(), mode="0755")
@@ -636,7 +641,12 @@ class Supervisor:
         )
         self.vault.update(w["id"], log_offset=0, metric_lines=0, blend=blend)
         frames = cfg["frames"]
-        await self._transition(w, Status.RUNNING, f"Rendering {frames} frame{'s' if frames != 1 else ''} of {blend}")
+        what = (
+            f"frames {cfg['offset'] + 1}–{cfg['offset'] + frames} of {chunk['total']}"
+            if chunk
+            else f"{frames} frame{'s' if frames != 1 else ''}"
+        )
+        await self._transition(w, Status.RUNNING, f"Rendering {what} of {blend}")
         await self._event(w, BOOT_RENDERING)
         await self.notify(
             w, "status", f"Rendering started on a {w['gpuName']}. I'll message you when the frames are ready."
@@ -645,7 +655,11 @@ class Supervisor:
     async def _finish_render(self, w: dict, remote: Remote) -> None:
         async with self._lock(w["id"]):
             await self._event(w, "Rendering finished. Saving your frames")
-            source = json.loads(w["planJson"]).get("inputs", {}).get("source_workload_id")
+            inputs = json.loads(w["planJson"]).get("inputs", {})
+            source = inputs.get("source_workload_id")
+            chunk = inputs.get("chunk") or {}
+            # Every part of a split render lands in the farm's folder, so the frames merge.
+            folder = int(chunk.get("farm_id") or w["id"])
             try:
                 if self.settings.storage_ready:
                     key = Storage.artifact_key(w["owner"], w["id"], "frames.tar.gz")
@@ -660,15 +674,15 @@ class Supervisor:
                             "Couldn't save the frames: object storage isn't set up and the desktop "
                             "they came from is no longer running"
                         )
-                    dest = f"{PROJECTS_DIR}/renders/{w['id']}"
+                    dest = f"{PROJECTS_DIR}/renders/{folder}"
                     await _relay(
                         remote,
                         f"tar -czf - -C {JOB_DIR}/renders .",
                         self.remote(src),
                         f"mkdir -p {dest} && tar -xzf - -C {dest}",
                     )
-                    where = f"Your frames are in ~/Projects/renders/{w['id']} on {src['title']}."
-                    await self._event(w, f"Frames saved to ~/Projects/renders/{w['id']} on {src['title']}", "success")
+                    where = f"Your frames are in ~/Projects/renders/{folder} on {src['title']}."
+                    await self._event(w, f"Frames saved to ~/Projects/renders/{folder} on {src['title']}", "success")
                 await self._transition(w, Status.SUCCEEDED, "Render complete")
             except Exception as exc:
                 await self._fail(w, exc)
@@ -676,7 +690,26 @@ class Supervisor:
             await self._settle_usage(w)
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             await self._force_delete(w, name, "Machine released after rendering", final=None)
-        await self.notify(w, "status", f"{w['title']} finished. {where}")
+        if not chunk:
+            await self.notify(w, "status", f"{w['title']} finished. {where}")
+            return
+        # A split render reports once: when its last part is done.
+        parts = await self._farm_parts(int(chunk["farm_id"]))
+        if parts and all(p["status"] == Status.SUCCEEDED for p in parts):
+            await self.notify(
+                w, "status", f"All {chunk['total']} frames are rendered across {len(parts)} GPUs. {where}"
+            )
+
+    async def _farm_parts(self, farm_id: int) -> list[dict]:
+        parts = []
+        for w in await _quiet(self.store.workloads()) or []:
+            try:
+                chunk = json.loads(w["planJson"]).get("inputs", {}).get("chunk") or {}
+            except (ValueError, TypeError):
+                continue
+            if int(chunk.get("farm_id") or 0) == farm_id:
+                parts.append(w)
+        return parts
 
     # ── Desktop agent ─────────────────────────────────────────────────────
 

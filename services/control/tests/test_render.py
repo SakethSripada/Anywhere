@@ -200,3 +200,83 @@ def test_render_progress_becomes_metrics():
     points = metric_points(rows)
     assert {"name": "progress", "step": 2, "value": 0.5} in points
     assert {"name": "seconds_per_frame", "step": 1, "value": 12.5} in points
+
+
+# ── Split renders (render farm) ─────────────────────────────────────────────
+
+
+async def test_approving_a_split_render_launches_one_part_per_gpu(app):
+    app.settings.max_concurrent_instances = 6
+    desktop(app)
+    updates = []
+
+    async def update_workload_plan(id, title, plan_json, est_low, est_high):
+        updates.append(id)
+        app.store.rows[id].update(title=title, planJson=plan_json, estLowCents=est_low, estHighCents=est_high)
+
+    app.store.update_workload_plan = update_workload_plan
+    launched = []
+    app.supervisor.launch = lambda w: launched.append(w)
+    intent = Intent(kind="render", summary="animation", render_frames=10, render_machines=4)
+    farm = await app.propose(ALICE, 1, intent, render_from=11, auto_approve=False)
+    total_high = app.store.rows[farm["workload_id"]]["estHighCents"]
+    result = await app.approve(ALICE, farm["workload_id"])
+    assert result["machines"] == 4 and len(launched) == 4 and updates == [farm["workload_id"]]
+    chunks = [json.loads(w["planJson"])["inputs"]["chunk"] for w in launched]
+    assert [c["frames"] for c in chunks] == [3, 3, 2, 2]  # 10 frames, as even as possible
+    assert [c["offset"] for c in chunks] == [0, 3, 6, 8]
+    assert {c["farm_id"] for c in chunks} == {farm["workload_id"]}
+    assert all(app.store.rows[int(w["id"])]["status"] == "approved" for w in launched)
+    assert app.store.rows[farm["workload_id"]]["title"] == "Render part 1 of 4 (frames 1–3 of 10)"
+    assert sum(app.store.rows[int(w["id"])]["estHighCents"] for w in launched) >= total_high
+
+
+async def test_a_split_render_waits_for_room_for_all_its_gpus(app):
+    app.settings.max_concurrent_instances = 2
+    desktop(app)  # already one running machine
+    intent = Intent(kind="render", summary="animation", render_frames=8, render_machines=4)
+    plan = await app.propose(ALICE, 1, intent, render_from=11, auto_approve=False)
+    assert plan["ok"] and not plan["allowed"]
+    assert any("4 GPUs at once" in b for b in plan["blockers"])
+
+
+async def test_render_parts_render_their_own_frames_into_one_folder(app):
+    desktop(app)
+    notes = []
+
+    async def notify(w, kind, body):
+        notes.append(body)
+
+    app.supervisor.notify = notify
+    ScriptedRemote.rules = [("find .", "1731000000.0 alley.blend\n")]
+    farm_id = 30
+    parts = []
+    for i, (offset, size) in enumerate([(0, 3), (3, 3)]):
+        plan = {
+            "requirements": {"environment": "blender-render"},
+            "intent": {"render_frames": size},
+            "inputs": {
+                "source_workload_id": 11,
+                "blend_path": None,
+                "chunk": {"index": i, "count": 2, "offset": offset, "frames": size, "total": 6, "farm_id": farm_id},
+            },
+        }
+        parts.append(
+            app.store.add(
+                id=farm_id + i,
+                owner=ALICE,
+                kind="batch",
+                status="configuring",
+                conversationId=1,
+                planJson=json.dumps(plan),
+            )
+        )
+    await app.supervisor._configure_render(parts[1], app.supervisor.remote(parts[1]), json.loads(parts[1]["planJson"]))
+    assert app.store.rows[31]["statusDetail"] == "Rendering frames 4–6 of 6 of alley.blend"
+    # Part 2 finishing first doesn't announce; the last part to finish does.
+    await app.supervisor._finish_batch(app.store.rows[31], app.supervisor.remote(parts[1]))
+    assert app.relays[-1][1].startswith("mkdir -p ~/workspace/anywhere/projects/renders/30")
+    assert not any("All 6 frames" in n for n in notes)
+    app.store.rows[30]["status"] = "running"
+    await app.supervisor._finish_batch(app.store.rows[30], app.supervisor.remote(parts[0]))
+    assert any("All 6 frames are rendered across 2 GPUs" in n for n in notes)

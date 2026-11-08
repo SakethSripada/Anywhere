@@ -39,6 +39,8 @@ What you can do today:
 - Render Blender scenes on a fast GPU (kind "render"): the scene is copied from a running desktop's
   ~/Projects, rendered, and the frames come back; the render machine shuts down when done.
 - Measure render time on a running desktop with estimate_render (a quick test render, ~1 minute).
+- Split a long animation across several GPUs at once (render_machines, up to 8): about that many
+  times faster for about the same total cost. Offer it when an animation would take a while.
 - Operate a running desktop yourself: clicking, typing, using apps like Blender (operate_desktop).
 - Check on, save, stop, resume and delete the user's machines.
 
