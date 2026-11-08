@@ -42,6 +42,9 @@ class Decision:
     requires_approval: bool
     blockers: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: The blockers that clear by themselves (another machine stopping). A plan shows
+    #: them but stays approvable: approval re-evaluates against the live state.
+    waits: list[str] = field(default_factory=list)
 
 
 def evaluate(
@@ -55,21 +58,22 @@ def evaluate(
 ) -> Decision:
     blockers: list[str] = []
     notes: list[str] = []
+    waits: list[str] = []
 
     if not account.activated:
         blockers.append("Your account hasn't been activated yet. Redeem an invite code in Settings.")
 
     if kind == "desktop" and "desktop" in spend.account_active_kinds:
-        blockers.append("You already have a desktop running. Open it, or stop it before starting another.")
+        waits.append("You already have a desktop running. Open it, or stop it before starting another.")
 
     if machines > 1 and spend.active_instances + machines > limits.max_concurrent_instances:
         free = max(0, limits.max_concurrent_instances - spend.active_instances)
-        blockers.append(
+        waits.append(
             f"This render uses {machines} GPUs at once, but only {free} more machine"
             f"{'s' if free != 1 else ''} can run right now. Ask for fewer GPUs, or stop a machine first."
         )
     elif spend.active_instances >= limits.max_concurrent_instances:
-        blockers.append(
+        waits.append(
             f"Anywhere is limited to {limits.max_concurrent_instances} running machine"
             f"{'s' if limits.max_concurrent_instances != 1 else ''} right now. Stop one to continue."
         )
@@ -92,11 +96,13 @@ def evaluate(
     if not requires_approval:
         notes.append(f"Within your auto-approve limit of {usd(account.approval_threshold_cents)}.")
 
+    blocked = blockers + waits
     return Decision(
-        allowed=not blockers,
-        requires_approval=requires_approval or bool(blockers),
-        blockers=blockers,
+        allowed=not blocked,
+        requires_approval=requires_approval or bool(blocked),
+        blockers=blocked,
         notes=notes,
+        waits=waits,
     )
 
 

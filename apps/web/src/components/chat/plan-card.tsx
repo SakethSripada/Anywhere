@@ -9,7 +9,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ApiError, useApi } from "@/lib/api";
-import { useWorkload } from "@/lib/data";
+import { useWorkload, useWorkloads } from "@/lib/data";
 import { centsRange, hoursRange } from "@/lib/format";
 import { approach, CONFIDENCE, parsePlan, type Offer } from "@/lib/plan";
 import { cn } from "@/lib/utils";
@@ -42,6 +42,9 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
   const { busy, act } = useActions(workloadId);
   const [compare, setCompare] = useState(false);
   const [renderOpen, setRenderOpen] = useState(false);
+  const { workloads } = useWorkloads();
+  // "Stop a machine first" is only true while another one is on; approval re-checks it live.
+  const othersOn = workloads.some((o) => o.id !== workloadId && ACTIVE.has(o.status));
 
   if (!w) return ready ? null : <Skeleton className="h-40 w-full max-w-xl rounded-2xl" />;
   const plan = parsePlan(w.planJson);
@@ -87,6 +90,13 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
         {planned &&
           blockers.map((b) => (
             <p key={b} className="mt-3 text-[13px] text-destructive">
+              {b}
+            </p>
+          ))}
+        {planned &&
+          othersOn &&
+          (plan.policy?.waits ?? []).map((b) => (
+            <p key={b} className="mt-3 text-[13px] text-warning">
               {b}
             </p>
           ))}

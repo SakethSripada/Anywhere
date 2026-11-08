@@ -48,7 +48,7 @@ export type PlanDoc = {
   alternatives: { offer: Offer; estimate: Estimate }[];
   outputs: string[];
   warnings: string[];
-  policy?: { blockers: string[]; notes: string[] };
+  policy?: { blockers: string[]; notes: string[]; waits?: string[] };
   inputs?: {
     dataset_name?: string;
     dataset_rows?: number;

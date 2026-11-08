@@ -306,7 +306,11 @@ class Anywhere:
             limits=self._limits(),
             machines=result.machines,
         )
-        plan_doc["policy"] = {"blockers": decision.blockers, "notes": decision.notes}
+        plan_doc["policy"] = {
+            "blockers": [b for b in decision.blockers if b not in decision.waits],
+            "waits": decision.waits,
+            "notes": decision.notes,
+        }
 
         wid = new_id()
         offer = result.selected.offer
