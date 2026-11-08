@@ -161,7 +161,7 @@ function Delta({ from, to }: { from: number; to: number }) {
 }
 
 function Metrics({ series }: { series: Map<string, Point[]> }) {
-  const names = [...series.keys()].filter((n) => n !== "progress" && n !== "epoch" && n !== "eval_loss").sort((a, b) => (a === "loss" ? -1 : b === "loss" ? 1 : a.localeCompare(b)));
+  const names = [...series.keys()].filter((n) => n !== "progress" && n !== "epoch" && n !== "eval_loss" && !n.startsWith("gpu.")).sort((a, b) => (a === "loss" ? -1 : b === "loss" ? 1 : a.localeCompare(b)));
   const [picked, setPicked] = useState<string | null>(null);
   const name = picked && series.has(picked) ? picked : (names[0] ?? "loss");
   const points = series.get(name) ?? [];

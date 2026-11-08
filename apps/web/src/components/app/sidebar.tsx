@@ -162,7 +162,7 @@ function LiveItem({ w, active, onClick }: { w: Workload; active: boolean; onClic
         </span>
         <span className="min-w-0 flex-1 truncate">{w.title}</span>
         <span className={cn("shrink-0 text-[11px] tabular group-data-[collapsible=icon]:hidden", w.status === "planned" ? "text-warning" : "text-muted-foreground")}>
-          {w.status === "planned" ? "review" : cents(now ? liveCents(w, now) : w.accruedCents)}
+          {w.status === "planned" ? "Approve" : cents(now ? liveCents(w, now) : w.accruedCents)}
         </span>
       </SidebarMenuButton>
     </SidebarMenuItem>
@@ -174,8 +174,15 @@ function ModeLabel() {
   const mode = platform?.provisioningMode;
   if (!mode || mode === "live") return null;
   return (
-    <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 py-px text-[10.5px] font-medium text-warning group-data-[collapsible=icon]:hidden">
-      {mode === "dry_run" ? "Dry run" : "Plans only"}
+    <span
+      title={
+        mode === "dry_run"
+          ? "Test mode: Brev checks each request, but no machine is created or billed."
+          : "Test mode: Anywhere plans machines but doesn't start them."
+      }
+      className="cursor-help rounded-md border border-warning/30 bg-warning/10 px-1.5 py-px text-[10.5px] font-medium text-warning group-data-[collapsible=icon]:hidden"
+    >
+      Test mode
     </span>
   );
 }

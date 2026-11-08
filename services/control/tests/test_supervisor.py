@@ -452,3 +452,71 @@ async def test_a_slow_desktop_does_not_block_other_vnc_connects():
     assert await asyncio.wait_for(t.port_for(2, Fast()), 1) == 2
     gate.set()
     assert await slow == 1
+
+
+class _GpuRemote(FakeRemote):
+    out = "87, 6144, 23034, 61, 72.45\n"
+
+    async def run(self, command, **kw):
+        from anywhere.remote import Result
+
+        return Result(0, self.out, "") if command.startswith("nvidia-smi") else Result(0, "", "")
+
+
+def test_parses_nvidia_smi_and_skips_unavailable_fields():
+    from anywhere.supervisor import parse_gpu_query
+
+    assert parse_gpu_query("87, 6144, 23034, 61, 72.45\n") == {
+        "util_pct": 87.0,
+        "mem_used_gb": 6.0,
+        "mem_total_gb": 22.49,
+        "temp_c": 61.0,
+        "power_w": 72.45,
+    }
+    assert parse_gpu_query("3, 512, 15360, 40, [N/A]")["util_pct"] == 3.0
+    assert "power_w" not in parse_gpu_query("3, 512, 15360, 40, [N/A]")
+    assert parse_gpu_query("NVIDIA-SMI has failed") is None
+    assert parse_gpu_query("") is None
+    # Multi-GPU machines report the first GPU.
+    assert parse_gpu_query("10, 1024, 2048, 30, 20\n90, 1024, 2048, 70, 200\n")["util_pct"] == 10.0
+
+
+async def test_gpu_samples_are_stored_as_metrics_with_elapsed_seconds(tmp_path):
+    s = Settings(_env_file=None, brev_api_key="bak-test", data_dir=tmp_path)
+    store = FakeStore()
+    stored: list[dict] = []
+
+    async def add_metrics(wid, points):
+        stored.extend(points)
+
+    store.add_metrics = add_metrics
+
+    async def notify(*_):
+        return None
+
+    sup = Supervisor(s, store, FakeBrev(), Storage(s), Vault(tmp_path / "v.json"), notify, remote_factory=_GpuRemote)
+    w = store.add(status="running", startedAt=ago(2))
+    first = await sup.sample_gpu(w)
+    names = {p["name"] for p in first}
+    assert names == {"gpu.util_pct", "gpu.mem_used_gb", "gpu.mem_total_gb", "gpu.temp_c", "gpu.power_w"}
+    assert all(115 <= p["step"] <= 125 for p in first)  # ~2 minutes since start
+    second = await sup.sample_gpu(w)
+    assert "gpu.mem_total_gb" not in {p["name"] for p in second}  # the total is sent once
+    assert len(stored) == len(first) + len(second)
+
+
+async def test_only_running_machines_are_sampled(tmp_path):
+    sup, store, _ = make(tmp_path, FakeBrev())
+    store.add(id=1, status="running")
+    store.add(id=2, status="stopped")
+    store.add(id=3, status="provisioning")
+    await sup.tick()
+    assert set(sup._sampling) == {1}
+
+
+async def test_telemetry_can_be_turned_off(tmp_path):
+    sup, _, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=0)
+    sup.start_guard()
+    assert sup._telemetry_task is None
+    await sup.shutdown()
+    await asyncio.gather(sup._guard_task, return_exceptions=True)
