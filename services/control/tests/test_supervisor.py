@@ -201,3 +201,45 @@ async def test_platform_row_is_only_written_when_it_changes(tmp_path):
     await sup.tick()
     await sup.tick()
     assert len(writes) == 1
+
+
+class LocalRemote:
+    """Runs the supervisor's shell snippets locally, against a temp directory."""
+
+    def __init__(self, root):
+        self.root = root
+
+    async def run(self, command, *, timeout=120, input=None, check=True):
+        from anywhere.remote import Result
+
+        proc = await asyncio.create_subprocess_shell(
+            command.replace("~/", f"{self.root}/"),
+            stdin=asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            executable="/bin/bash",
+        )
+        out, err = await proc.communicate(input)
+        return Result(proc.returncode or 0, out.decode(), err.decode())
+
+    async def write_file(self, path, content, mode="0644"):
+        await self.run(f"mkdir -p $(dirname {path}) && cat > {path} && chmod {mode} {path}", input=content)
+
+
+async def test_streamed_setup_reads_new_output_and_reports_steps(tmp_path, monkeypatch):
+    from anywhere import supervisor as mod
+    from anywhere.remote import RemoteError
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(mod.asyncio, "sleep", lambda s: real_sleep(0.05))
+    sup, store, _ = make(tmp_path, FakeBrev())
+    w = store.add()
+    remote = LocalRemote(tmp_path)
+    ok = "echo '::step:: one'; sleep 0.1; printf 'partial'; sleep 0.1; echo ' line'; echo '::step:: two'"
+    await sup._run_streamed(w, remote, ok, f"{mod.STATE_DIR}/ok.sh", timeout=20)
+    assert [m for _, _, m in store.events] == ["one", "two"]
+
+    bad = "echo '::step:: three'; echo 'boom detail'; exit 3"
+    with pytest.raises(RemoteError, match="exited 3") as err:
+        await sup._run_streamed(w, remote, bad, f"{mod.STATE_DIR}/bad.sh", timeout=20)
+    assert "boom detail" in str(err.value)
