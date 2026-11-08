@@ -30,7 +30,7 @@ from typing import Any
 
 import structlog
 
-from . import budget
+from . import budget, savings
 from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
 from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
@@ -378,7 +378,18 @@ class Supervisor:
                 await self._event(w, f"Stopping failed: {exc}. Deleting the machine instead.", "error")
                 await self._force_delete(w, name, "Deleted after a failed stop")
 
+    def _record_idle_stop(self, w: dict, segment_start: datetime | None) -> None:
+        now = _now()
+        rec = savings.record(now, segment_start, self.settings.max_session_hours, w)
+        self.vault.section_put(savings.SECTION, f"{w['id']}:{int(now.timestamp())}", rec)
+
+    def _close_idle_stops(self, wid: int) -> None:
+        for key, rec in self.vault.section_items(savings.SECTION):
+            if rec["workload_id"] == wid and not rec.get("resumed_at"):
+                self.vault.section_update(savings.SECTION, key, resumed_at=_now().isoformat())
+
     async def _resume(self, w: dict) -> None:
+        self._close_idle_stops(int(w["id"]))
         async with self._lock(w["id"]):
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             try:
@@ -865,6 +876,8 @@ class Supervisor:
             if action:
                 log.info("guard.action", workload=w["id"], action=action.action, reason=action.reason)
                 await self._event(w, f"{action.reason}. Stopping to protect your budget.", "warn")
+                if action.reason.startswith("Idle"):
+                    self._record_idle_stop(w, start)
                 if action.action == "save_and_stop":
                     self.stop(w, action.reason)
                 else:
