@@ -350,9 +350,10 @@ function Hud(props: {
   onTakeOver: () => void;
   onHandBack: () => void;
 }) {
-  const now = useNow(1000);
   const { control, w } = props;
   const saving = w.status === "saving";
+  // Don't tick while the HUD is hidden (the user has control).
+  const now = useNow(1000, !(control === "user" && !saving));
   if (control === "user" && !saving) return null;
   const thought = props.step ? parseDetail(props.step)?.thought : undefined;
 
@@ -417,7 +418,8 @@ function Hud(props: {
 function DesktopState({ w }: { w: Workload }) {
   const { busy, run } = useWorkloadAction(w.id);
   const booting = ["approved", "provisioning", "configuring"].includes(w.status);
-  const now = useNow(1000);
+  // Only the boot timer moves; stopped or failed machines don't need a clock.
+  const now = useNow(1000, booting);
 
   if (w.status === "planned") {
     return (

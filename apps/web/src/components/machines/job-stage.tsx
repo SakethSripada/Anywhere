@@ -63,7 +63,8 @@ export function JobStage({ w }: { w: Workload }) {
 function Overview({ w }: { w: Workload }) {
   const plan = useMemo(() => parsePlan(w.planJson), [w.planJson]);
   const series = useSeries(w.id);
-  const now = useNow(1000);
+  // Only a running job's elapsed time and ETA change by the second.
+  const now = useNow(1000, BILLABLE.has(w.status));
   const loss = series.get("loss") ?? [];
   const latest = loss.at(-1);
   const prior = loss.length > 20 ? loss[Math.max(0, loss.length - 21)] : loss[0];
@@ -288,7 +289,7 @@ function Spec({ label, value, mono, wide }: { label: string; value: string; mono
 }
 
 function JobState({ w }: { w: Workload }) {
-  const now = useNow(1000);
+  const now = useNow(1000, BILLABLE.has(w.status));
   if (w.status === "planned") {
     return (
       <div className="h-full overflow-y-auto">

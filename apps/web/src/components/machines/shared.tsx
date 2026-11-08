@@ -41,7 +41,8 @@ export function useWorkloadAction(id: bigint) {
 }
 
 export function LiveCost({ w, className }: { w: Workload; className?: string }) {
-  const now = useNow(1000);
+  // Spend only moves while the machine is billable.
+  const now = useNow(1000, BILLABLE.has(w.status));
   return (
     <span className={cn("tabular", className)}>
       {cents(now ? liveCents(w, now) : w.accruedCents, { precise: true })}
@@ -51,7 +52,7 @@ export function LiveCost({ w, className }: { w: Workload; className?: string }) 
 }
 
 export function Uptime({ w }: { w: Workload }) {
-  const now = useNow(15_000);
+  const now = useNow(15_000, BILLABLE.has(w.status));
   if (!w.startedAt || !now) return <>-</>;
   const end = BILLABLE.has(w.status) ? now : ms(w.updatedAt);
   return <>{duration(end - ms(w.startedAt))}</>;

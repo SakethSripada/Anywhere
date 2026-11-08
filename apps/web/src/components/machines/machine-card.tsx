@@ -105,7 +105,7 @@ export function JobPreview({ w }: { w: Workload }) {
 }
 
 export function MachineCard({ w }: { w: Workload }) {
-  const now = useNow(2000);
+  const now = useNow(2000, BILLABLE.has(w.status));
   return (
     <Link
       href={href(w)}
