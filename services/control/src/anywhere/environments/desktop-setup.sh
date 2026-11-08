@@ -50,8 +50,12 @@ done
 if ! $DOCKER container inspect "$NAME" >/dev/null 2>&1; then
   step "Starting the desktop"
   # 6080 is the interactive VNC bridge, 6081 the view-only one for watch links.
+  # GPU for compute only (CUDA/OptiX for Cycles, NVENC). The graphics/display
+  # capabilities inject NVIDIA's GLX into the container, and the image's Xvfb
+  # (+extension GLX) then failed to start on a live T4. The viewport renders in
+  # software on Xvfb either way.
   if ! out=$($DOCKER run -d --name "$NAME" --restart unless-stopped \
-    --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
+    --gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     -e CUA_ENV_TOKEN="{{CUA_TOKEN}}" \
     --shm-size=2g \
     -p 127.0.0.1:3211:3211 -p 127.0.0.1:6080:6080 -p 127.0.0.1:6081:6081 \

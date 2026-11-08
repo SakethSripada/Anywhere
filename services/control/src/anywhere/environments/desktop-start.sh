@@ -27,7 +27,12 @@ done
 # Two of each run (the interactive stream and a view-only one for watch links), told
 # apart by port. `pgrep -x` matches process names exactly (`pgrep -f` would match
 # this very `sh -c` command line), and grep then picks the port from `-a`'s args.
-XUSER=$($DOCKER exec "$NAME" stat -c %U /tmp/.X11-unix/X1) || fail "The desktop's display did not start"
+# On failure, show why: the image's supervisord logs each program (Xvfb and the
+# session run under "desktop").
+why() {
+  $DOCKER exec "$NAME" sh -c 'tail -n 15 /var/log/supervisor/desktop*.log 2>/dev/null; tail -n 5 /var/log/supervisor/supervisord.log 2>/dev/null' >&2 || true
+}
+XUSER=$($DOCKER exec "$NAME" stat -c %U /tmp/.X11-unix/X1 2>/dev/null) || { why; fail "The desktop's display did not start"; }
 launch() {
   $DOCKER exec -u "$XUSER" -d "$NAME" sh -c \
     'pgrep -a -x x11vnc | grep -q -- "-rfbport 5900" || x11vnc -display :1 -forever -shared -nopw -localhost -rfbport 5900 -noxdamage -quiet'
@@ -57,4 +62,5 @@ for i in $(seq 1 40); do
   if [ $((i % 5)) = 0 ]; then launch || true; fi
   sleep 1
 done
+why
 fail "The desktop's VNC and Cua services did not come up"

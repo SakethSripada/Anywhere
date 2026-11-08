@@ -18,6 +18,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 SSH_OPTS = [
+    # Brev's generated ssh_config sets RequestTTY yes. Without -T every command's
+    # stderr starts with "Pseudo-terminal will not be allocated…", which hid the
+    # real error on a live run.
+    "-T",
     "-o",
     "BatchMode=yes",
     "-o",
@@ -49,6 +53,16 @@ NO_MUX_OPTS = ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
 
 class RemoteError(Exception):
     pass
+
+
+def describe_exit(code: int, stderr: str) -> str:
+    """Headline first (the user sees the first line), detail after (kept in the logs).
+    Our scripts end with one plain-language line on stderr, after any diagnostics."""
+    lines = [ln for ln in stderr.strip().splitlines() if ln.strip()]
+    if not lines:
+        return f"Remote command exited {code}"
+    detail = "\n".join(lines[-40:])
+    return f"{lines[-1].strip()[:300]}\n(exit {code})\n{detail[-3000:]}"
 
 
 @dataclass(frozen=True)
@@ -84,7 +98,7 @@ class Remote:
             raise RemoteError(f"Remote command timed out after {timeout:.0f}s") from exc
         result = Result(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
         if check and result.code != 0:
-            raise RemoteError(f"Remote command exited {result.code}: {result.stderr.strip()[-600:]}")
+            raise RemoteError(describe_exit(result.code, result.stderr))
         return result
 
     async def write_file(self, path: str, content: bytes, mode: str = "0644") -> None:
