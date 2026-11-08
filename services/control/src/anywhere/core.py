@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from . import budget, llm, render_bench, replay
+from . import budget, llm, render_bench, replay, sharing
 from .brev import BrevCLI
 from .catalog import Catalog
 from .config import Settings
@@ -619,6 +619,91 @@ class Anywhere:
         return {
             "url": self.storage.presign_get(key, expires=3600, filename=f"anywhere-agent-{run_id}.gif"),
             "frames": len(frames),
+        }
+
+    # ── Watch links ───────────────────────────────────────────────────────
+
+    def _share_of(self, wid: int) -> tuple[str, dict] | None:
+        for key, rec in self.vault.section_items(sharing.SECTION):
+            if rec["workload_id"] == wid:
+                return key, rec
+        return None
+
+    async def create_share(self, owner: str, workload_id: int, hours: float = 4) -> dict:
+        """A new watch-only link for a running desktop (replacing any earlier one)."""
+        w = await self.owned(owner, workload_id)
+        if w["kind"] != "desktop":
+            raise ActionError("Only desktops can be shared")
+        if w["status"] != Status.RUNNING:
+            raise ActionError("Start the desktop first; people can watch it while it runs")
+        # Desktops started before watch links existed don't have the view-only stream
+        # yet; the start script is idempotent and brings up whatever's missing.
+        try:
+            await self.supervisor.ensure_desktop_services(w)
+        except Exception as exc:
+            raise ActionError(f"Couldn't set up the watch stream on the desktop: {exc}") from exc
+        revoked = self.revoke_share_now(workload_id)
+        token, rec = sharing.make(workload_id, owner, hours)
+        self.vault.section_put(sharing.SECTION, sharing.digest(token), rec)
+        return {"token": token, "expires_at": rec["expires_at"], "replaced": revoked}
+
+    async def share_status(self, owner: str, workload_id: int) -> dict:
+        await self.owned(owner, workload_id)
+        found = self._share_of(workload_id)
+        if not found or not sharing.live(found[1]):
+            return {"active": False}
+        return {"active": True, "expires_at": found[1]["expires_at"], "created_at": found[1]["created_at"]}
+
+    async def revoke_share(self, owner: str, workload_id: int) -> str | None:
+        await self.owned(owner, workload_id)
+        return self.revoke_share_now(workload_id)
+
+    def revoke_share_now(self, workload_id: int) -> str | None:
+        """Drop the desktop's link; returns its digest so open streams can be closed."""
+        found = self._share_of(workload_id)
+        if found:
+            self.vault.section_pop(sharing.SECTION, found[0])
+            return found[0]
+        return None
+
+    async def watched(self, token: str) -> tuple[dict, dict]:
+        """The share record and workload behind a token, or ActionError if it's not usable."""
+        rec = self.vault.section_get(sharing.SECTION, sharing.digest(token))
+        if not sharing.live(rec):
+            raise ActionError("This watch link has expired or was turned off")
+        assert rec is not None
+        w = await self.store.workload(rec["workload_id"])
+        if not w or w["owner"] != rec["owner"]:
+            raise ActionError("This watch link has expired or was turned off")
+        return rec, w
+
+    async def watch_view(self, token: str) -> dict:
+        """What someone with a watch link may see: the desktop's state and the agent's steps."""
+        rec, w = await self.watched(token)
+        agent = None
+        runs = await self.store.agent_runs(int(w["id"]))
+        if runs:
+            run = runs[0]
+            steps = await self.store.agent_step_summaries(int(run["id"]))
+            agent = {
+                "goal": run["goal"],
+                "status": run["status"],
+                "result": run.get("result") or "",
+                "steps": [
+                    {"seq": int(s["seq"]), "kind": s["kind"], "summary": s["summary"]}
+                    for s in steps
+                    if s["kind"] != "observe"
+                ][-40:],
+            }
+        plan = json.loads(w.get("planJson") or "{}")
+        return {
+            "title": w["title"],
+            "status": w["status"],
+            "gpu": w["gpuName"],
+            "app": plan.get("intent", {}).get("application"),
+            "controller": w.get("controller") or "",
+            "expires_at": rec["expires_at"],
+            "agent": agent,
         }
 
     async def resume_agent(self, owner: str, workload_id: int) -> int | None:

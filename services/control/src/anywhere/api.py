@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.routing import Route
 
-from . import budget
+from . import budget, sharing
 from .agent import Agent, TurnContext
 from .auth import Identity, require_bridge
 from .brev import BrevCLI
@@ -234,6 +234,10 @@ def _default_summary(body: PlanIn) -> str:
 
 class ActivateIn(BaseModel):
     code: str = Field(min_length=1, max_length=128)
+
+
+class ShareIn(BaseModel):
+    hours: float = Field(4, ge=0.25, le=24)
 
 
 class GoalIn(BaseModel):
@@ -449,6 +453,66 @@ def _routes():
             log.warning("vnc.proxy_failed", workload=workload_id, error=str(exc))
             await ws.close(code=1011)
 
+    # Watch links -----------------------------------------------------------
+
+    @r.post("/v1/workloads/{workload_id}/share")
+    async def create_share(workload_id: int, body: ShareIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"share:{owner}", 10)
+        made = await app.create_share(owner, workload_id, body.hours)
+        await _drop_watchers(made.pop("replaced"))
+        return made
+
+    @r.get("/v1/workloads/{workload_id}/share")
+    async def share_status(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        return await app.share_status(owner, workload_id)
+
+    @r.delete("/v1/workloads/{workload_id}/share")
+    async def revoke_share(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        await _drop_watchers(await app.revoke_share(owner, workload_id))
+        return {"ok": True}
+
+    @r.get("/v1/watch/{token}")
+    async def watch(token: str, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"watch:{sharing.digest(token)}", 240)
+        try:
+            return await app.watch_view(token)
+        except ActionError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @r.websocket("/v1/watch/{token}/vnc")
+    async def watch_vnc(ws: WebSocket, token: str):
+        app: Anywhere = ws.app.state.anywhere
+        try:
+            rec, w = await app.watched(token)
+        except ActionError:
+            await ws.close(code=4404)
+            return
+        key = sharing.digest(token)
+        viewers = _watchers.setdefault(key, set())
+        if w["status"] != Status.RUNNING or len(viewers) >= MAX_WATCHERS:
+            await ws.close(code=4429 if w["status"] == Status.RUNNING else 4404)
+            return
+        await ws.accept(subprotocol="binary" if "binary" in ws.scope.get("subprotocols", []) else None)
+        viewers.add(ws)
+        try:
+            port = await app.supervisor.vnc.watch.port_for(int(w["id"]), app.supervisor.remote(w))
+            async with websockets.connect(
+                f"ws://127.0.0.1:{port}/websockify", subprotocols=["binary"], max_size=None, open_timeout=15
+            ) as upstream:
+                # Watching doesn't count as using the desktop, so it still idle-stops.
+                await asyncio.wait_for(_relay(ws, upstream, _no_touch), timeout=sharing.seconds_left(rec))
+        except (WebSocketDisconnect, websockets.ConnectionClosed, TimeoutError):
+            with contextlib.suppress(Exception):
+                await ws.close(code=1001)
+        except Exception as exc:
+            log.warning("watch.proxy_failed", workload=w["id"], error=str(exc))
+            with contextlib.suppress(Exception):
+                await ws.close(code=1011)
+        finally:
+            viewers.discard(ws)
+            if not viewers:
+                _watchers.pop(key, None)
+
     # Uploads & files -------------------------------------------------------
 
     @r.post("/v1/uploads")
@@ -650,6 +714,21 @@ async def _agent_turn(app: Anywhere, agent: Agent, ctx: TurnContext, text: str, 
         entry[1] -= 1
         if entry[1] == 0:
             _turn_locks.pop(ctx.conversation_id, None)
+
+
+#: Open watch-link streams by link digest, so turning a link off disconnects them.
+_watchers: dict[str, set[WebSocket]] = {}
+MAX_WATCHERS = 12
+
+
+async def _drop_watchers(key: str | None) -> None:
+    for ws in list(_watchers.pop(key, set()) if key else ()):
+        with contextlib.suppress(Exception):
+            await ws.close(code=4403)
+
+
+async def _no_touch() -> None:
+    return None
 
 
 async def _relay(client: WebSocket, upstream, touch) -> None:
