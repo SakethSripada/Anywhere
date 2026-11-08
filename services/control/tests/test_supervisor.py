@@ -155,3 +155,15 @@ async def test_reconcile_deletes_orphans_on_the_second_pass(tmp_path):
     assert ("delete", instance_name(99)) not in brev.calls
     await sup.reconcile([])
     assert ("delete", instance_name(99)) in brev.calls
+
+
+async def test_billing_survives_a_lost_vault(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev, max_session_hours=4)
+    # No vault entry at all, as after a redeploy without its volume.
+    store.add(kind="desktop", status="running", hourlyCents=100, startedAt=ago(5 * 60), lastActiveAt=ago(1))
+    brev.instances[instance_name(1)] = "RUNNING"
+    await sup.tick()
+    await drain(sup)
+    assert store.rows[1]["accruedCents"] >= 500  # 5 h at $1/h kept accruing
+    assert store.rows[1]["status"] in ("stopped", "stopping", "saving")  # session limit enforced
