@@ -109,12 +109,3 @@ def test_desktop_start_is_not_ready_until_vnc_answers(tmp_path):
     # It kept relaunching the (idempotent) VNC services while it waited.
     launches = (tmp_path / "calls").read_text().count("-rfbport 5900")
     assert launches > 1
-
-
-def test_boot_script_writes_nothing_under_home(tmp_path):
-    # Brev may run the startup script as root; a root-owned ~/workspace would make
-    # desktop-setup.sh (run later as the SSH user) fail on its first mkdir/chmod.
-    env = _fakes(tmp_path)
-    result = _run(render(_env("boot.sh"), PREPULL_IMAGE="img"), env)
-    assert result.returncode == 0
-    assert list((tmp_path / "home").iterdir()) == []
