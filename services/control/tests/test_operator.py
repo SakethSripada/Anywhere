@@ -214,3 +214,12 @@ async def test_a_slow_screenshot_is_retried_not_fatal():
     s = Flaky()
     assert await op._screenshot(s, delay=0) == b"png"
     assert s.n == 2
+
+
+def test_keys_lists_are_chords_only_with_modifiers():
+    from anywhere.operator import key_chords
+
+    assert key_chords(["ctrl", "s"]) == [["ctrl", "s"]]
+    assert key_chords(["g", "x", "3", "return"]) == [["g"], ["x"], ["3"], ["return"]]
+    assert key_chords(["shift", "a", "escape"]) == [["shift", "a"], ["escape"]]
+    assert key_chords(["f3"]) == [["f3"]]
