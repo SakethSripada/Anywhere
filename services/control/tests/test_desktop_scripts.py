@@ -109,3 +109,12 @@ def test_desktop_start_is_not_ready_until_vnc_answers(tmp_path):
     # It kept relaunching the (idempotent) VNC services while it waited.
     launches = (tmp_path / "calls").read_text().count("-rfbport 5900")
     assert launches > 1
+
+
+def test_remote_errors_lead_with_the_scripts_last_line():
+    from anywhere.remote import describe_exit
+
+    msg = describe_exit(1, "Xvfb: GLX failed\nmore noise\nThe desktop's display did not start\n")
+    assert msg.splitlines()[0] == "The desktop's display did not start"
+    assert "Xvfb: GLX failed" in msg
+    assert describe_exit(255, "") == "Remote command exited 255"
