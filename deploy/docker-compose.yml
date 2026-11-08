@@ -41,6 +41,7 @@ services:
     env_file: .env
     environment:
       PUBLIC_WEB_ORIGIN: https://${DOMAIN}
+      PUBLIC_API_URL: https://${DOMAIN}/api
       CORS_ORIGINS: '["https://${DOMAIN}"]'
       DATA_DIR: /data
     volumes:

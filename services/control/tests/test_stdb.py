@@ -4,7 +4,11 @@ from datetime import UTC, datetime
 
 from anywhere.stdb import decode
 
-TS = {"Product": {"elements": [{"name": {"some": "__timestamp_micros_since_unix_epoch__"}, "algebraic_type": {"I64": []}}]}}
+TS = {
+    "Product": {
+        "elements": [{"name": {"some": "__timestamp_micros_since_unix_epoch__"}, "algebraic_type": {"I64": []}}]
+    }
+}
 OPT_TS = {
     "Sum": {
         "variants": [

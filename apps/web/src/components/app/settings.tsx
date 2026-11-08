@@ -14,6 +14,7 @@ import { useAccount, useMonthSpend, useNow } from "@/lib/data";
 import { cents, ms } from "@/lib/format";
 import { reducers, tables, useReducer, useSession, useTable } from "@/lib/stdb";
 import { cn } from "@/lib/utils";
+import { AgentAccess } from "./agent-access";
 import { PageHeader } from "./page-header";
 
 export function SettingsView() {
@@ -24,6 +25,7 @@ export function SettingsView() {
         <Profile />
         <Spending />
         <Messaging />
+        <AgentAccess Section={Section} />
         <Integrations />
       </div>
     </div>

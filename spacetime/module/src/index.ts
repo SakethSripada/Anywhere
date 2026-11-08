@@ -894,3 +894,9 @@ export const workerAgentRuns = spacetimedb.view(
   t.array(agentRun.rowType),
   (ctx) => (isWorker(ctx) ? [...ctx.db.agentRun.iter()] : []),
 );
+
+export const workerAgentSteps = spacetimedb.view(
+  { name: "worker_agent_steps", public: true },
+  t.array(agentStep.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.agentStep.iter()] : []),
+);
