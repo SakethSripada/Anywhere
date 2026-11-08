@@ -130,3 +130,14 @@ def test_every_epoch_count_the_planner_accepts_builds_a_config():
 def test_json_strings_with_unicode_line_separators_are_one_row():
     data = (json.dumps({"text": "one two"}, ensure_ascii=False) + "\n").encode() * 3
     assert inspect_dataset("t.jsonl", data, len(data)).rows == 3
+
+
+def test_the_sample_fine_tune_dataset_plans_the_smallest_lora_run():
+    from pathlib import Path
+
+    path = Path(__file__).parents[3] / "examples" / "datasets" / "short-answers.jsonl"
+    data = path.read_bytes()
+    profile = inspect_dataset(path.name, data, len(data))
+    assert profile.schema_ == "prompt_response" and profile.rows == 60
+    cfg = build_config(params_b=0.5, epochs=5, profile=profile, dataset_path="data.jsonl", vram_gb=16)
+    assert cfg.base_model == "Qwen/Qwen2.5-0.5B-Instruct" and cfg.method == "lora"
