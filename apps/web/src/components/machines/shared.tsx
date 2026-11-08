@@ -14,7 +14,7 @@ import { BILLABLE, BOOT_STEPS, liveCents } from "@/lib/workloads";
 export type Action = "approve" | "cancel" | "stop" | "resume" | "save" | "delete";
 
 const DONE: Partial<Record<Action, string>> = {
-  stop: "Stopping — files are saved first",
+  stop: "Saving files, then stopping",
   resume: "Resuming",
   delete: "Deleting the machine",
   cancel: "Cancelled",
@@ -52,7 +52,7 @@ export function LiveCost({ w, className }: { w: Workload; className?: string }) 
 
 export function Uptime({ w }: { w: Workload }) {
   const now = useNow(15_000);
-  if (!w.startedAt || !now) return <>—</>;
+  if (!w.startedAt || !now) return <>-</>;
   const end = BILLABLE.has(w.status) ? now : ms(w.updatedAt);
   return <>{duration(end - ms(w.startedAt))}</>;
 }
