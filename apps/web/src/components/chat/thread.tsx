@@ -3,11 +3,11 @@
 import type { Message, Workload } from "@anywhere/stdb";
 import { ArrowDown } from "lucide-react";
 import Link from "next/link";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LoadingStatus } from "@/components/bui/loader";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import { agentBusy, toItems, type ChatItem } from "@/lib/chat";
-import { useNow, useWorkload } from "@/lib/data";
+import { toItems, useAgentBusy, type ChatItem } from "@/lib/chat";
+import { useWorkload } from "@/lib/data";
 import { clock, ms } from "@/lib/format";
 import { useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
@@ -17,6 +17,8 @@ import { PlanCard, PlanRow } from "./plan-card";
 import { RunTrace, ToolRun } from "./tool-run";
 
 export type Pending = { id: string; text: string };
+
+const NO_ITEMS: ChatItem[] = [];
 
 type StreamItem =
   | { kind: "chat"; at: number; item: ChatItem }
@@ -34,16 +36,18 @@ export function Thread({
   compact,
   focus,
   className,
+  busy: busyProp,
 }: {
   messages: readonly Message[];
   pending: Pending[];
+  /** whether the agent is mid-turn, when the parent already knows */
+  busy?: boolean;
   compact?: boolean;
   /** stream this machine's agent runs and events in as well */
   focus?: Workload;
   className?: string;
 }) {
   const items = useMemo(() => toItems(messages), [messages]);
-  const now = useNow(1000);
   const runs = useShared("myAgentRuns").rows;
   const events = useShared("myEvents").rows;
 
@@ -61,8 +65,10 @@ export function Thread({
     return out.sort((a, b) => a.at - b.at);
   }, [items, runs, events, focus]);
 
-  const busy = pending.length > 0 || agentBusy(items, now);
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  // A parent that already tracks this passes `busy` down; otherwise derive it here.
+  const ownBusy = useAgentBusy(busyProp === undefined ? items : NO_ITEMS);
+  const busy = busyProp ?? (pending.length > 0 || ownBusy);
+  const lastUser = useMemo(() => messages.findLast((m) => m.role === "user"), [messages]);
   const scroller = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
@@ -134,7 +140,8 @@ function itemTime(item: ChatItem): number {
 
 const prose = (compact?: boolean) => (compact ? "text-[13.5px] leading-[1.7] text-ink" : undefined);
 
-function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; focused: boolean }) {
+// Memoized: scroll state, pending bubbles and busy changes re-render the thread, not every item.
+const Item = memo(function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; focused: boolean }) {
   switch (item.type) {
     case "user":
       return <UserBubble text={item.m.body} channel={item.m.channel} time={clock(item.m.createdAt)} compact={compact} />;
@@ -151,7 +158,7 @@ function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; f
     default:
       return <Markdown text={item.m.body} className={prose(compact)} />;
   }
-}
+});
 
 /** Full card below xl, compact row at xl and up: mount only the one that shows. */
 function WidePlan({ workloadId }: { workloadId: bigint }) {
