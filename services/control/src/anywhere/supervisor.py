@@ -969,7 +969,7 @@ class Supervisor:
             try:
                 await self.tick()
             except Exception as exc:
-                log.warning("guard.tick_failed", error=str(exc))
+                log.warning("guard.tick_failed", error=repr(exc), exc_info=True)
             await asyncio.sleep(self.settings.budget_tick_seconds)
 
     async def tick(self) -> None:
@@ -1277,7 +1277,7 @@ def metric_points(rows: list[str]) -> list[dict]:
                 points.append({"name": "seconds_per_frame", "step": done, "value": float(row["seconds"])})
             continue
         step = int(row.get("step", 0) or 0)
-        for name in ("loss", "eval_loss", "learning_rate", "grad_norm"):
+        for name in ("loss", "eval_loss", "learning_rate", "grad_norm", "epoch"):
             value = row.get(name)
             if isinstance(value, int | float) and not isinstance(value, bool):
                 points.append({"name": name, "step": step, "value": float(value)})
