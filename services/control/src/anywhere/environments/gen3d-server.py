@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import rembg
 import torch
+import trimesh
 from diffusers import AutoPipelineForText2Image
 from PIL import Image
 
@@ -70,6 +71,9 @@ def generate(prompt: str, seed: int = 0) -> tuple[bytes, dict]:
         mesh = model.extract_mesh(codes, True, resolution=320)[
             0
         ]  # 320: ~60% more triangles than 256 for ~2.5 s; edges stop looking lumpy
+    # Marching cubes leaves contour-line ridges on smooth surfaces (car hoods, hulls). Taubin
+    # smoothing removes them without shrinking the shape or rounding off wings and fins.
+    trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=12)
     if mesh.is_watertight and mesh.volume < 0:
         mesh.invert()  # inward-facing triangles render black in browsers that cull back faces
     mesh = to_gradio_3d_orientation(mesh)  # standard Y-up GLB: upright in Blender and in browsers
