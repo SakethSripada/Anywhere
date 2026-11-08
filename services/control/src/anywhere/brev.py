@@ -104,8 +104,12 @@ class BrevCLI:
             raise BrevError(f"Brev CLI not found at '{self.binary}'") from exc
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # Reap the child so timeouts and cancelled callers don't leave zombies behind.
             proc.kill()
+            await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise BrevError(f"brev {args[0]} timed out after {timeout:.0f}s") from exc
         if proc.returncode != 0:
             message = (err or out).decode(errors="replace").strip()[-800:]
