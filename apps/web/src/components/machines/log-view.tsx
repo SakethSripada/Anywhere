@@ -9,7 +9,16 @@ import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 
 type Level = "all" | "warn" | "error";
-type Line = { key: string; n: number; text: string; time: string; level: "error" | "warn" | "info" };
+type Line = { key: string; n: number; text: string; time: string; level: "error" | "warn" | "info"; step?: boolean };
+
+/** Setup scripts mark progress with `::step:: Name` (and `::error::`); show those as plain headings. */
+const STEP = /^::step::\s*/;
+function present(l: Line): Line {
+  if (STEP.test(l.text)) return { ...l, text: l.text.replace(STEP, ""), step: true };
+  if (l.text.startsWith("::error::")) return { ...l, text: l.text.replace(/^::error::\s*/, ""), level: "error" };
+  if (l.text.startsWith("::ready::")) return { ...l, text: "Ready", step: true };
+  return l;
+}
 /** One chunk split into newline-separated parts, parsed once and reused. */
 type Parsed = { time: string; parts: string[]; levels: Line["level"][] };
 
@@ -68,7 +77,7 @@ export function LogView({ workloadId, className, title = "Logs", toolbar }: { wo
     if (carry) out.push({ key: carryKey, n: out.length + 1, text: carry, time: carryTime, level: levelOf(carry) });
     // Forget chunks the server has trimmed.
     for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
-    return out.slice(-5000);
+    return out.slice(-5000).map(present);
   }, [rows, cache]);
 
   const [query, setQuery] = useState("");
@@ -168,7 +177,7 @@ export function LogView({ workloadId, className, title = "Logs", toolbar }: { wo
             <div key={l.key} className={cn("group flex [contain-intrinsic-size:auto_19px] [content-visibility:auto] hover:bg-white/[0.03]", l.level === "error" && "bg-red-500/[0.06]")}>
               <span className="w-11 shrink-0 pr-2 text-right text-neutral-700 select-none tabular group-hover:text-neutral-500">{l.n}</span>
               <span className="hidden w-[68px] shrink-0 text-neutral-600 select-none tabular md:inline">{l.time}</span>
-              <span className={cn("pr-4", wrap ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "whitespace-pre", l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-300" : "text-neutral-300")}>
+              <span className={cn("pr-4", wrap ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "whitespace-pre", l.level === "error" ? "text-red-400" : l.level === "warn" ? "text-amber-300" : l.step ? "font-medium text-white" : "text-neutral-300")}>
                 {query ? highlight(l.text, query) : l.text || " "}
               </span>
             </div>
