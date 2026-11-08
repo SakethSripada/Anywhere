@@ -22,7 +22,7 @@ from .desktop import connect_screen
 from .doctor import Readiness
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
-from .operator import PAUSED, build_operator
+from .operator import PAUSED, build_operator, describe_failure
 from .planner import Intent, Plan, Unsupported, plan
 from .stdb import SpacetimeClient
 from .storage import Storage
@@ -608,7 +608,7 @@ class Anywhere:
             raise
         except Exception as exc:
             log.exception("operator.crashed", workload=w["id"])
-            result = f"I hit a problem operating the desktop: {exc}"
+            result = describe_failure(exc)
         finally:
             await self.store.finish_agent_run(run_id, status, result[:2000])
             if result:
