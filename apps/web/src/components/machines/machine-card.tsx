@@ -4,56 +4,68 @@ import type { Workload } from "@anywhere/stdb";
 import { ArrowUpRight } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
+import { useAgentState } from "@/lib/agent";
 import { useNow } from "@/lib/data";
 import { cents } from "@/lib/format";
-import { parsePlan } from "@/lib/plan";
 import { tables, useTable } from "@/lib/stdb";
 import { cn } from "@/lib/utils";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
+import { AppLogo, appKey, appName } from "../app/app-logo";
 import { Uptime } from "./shared";
 import { StatusChip } from "./status";
 
-const APP: Record<string, string> = { blender: "Blender", vscode: "VS Code", jupyter: "JupyterLab", terminal: "Linux desktop" };
 
-export function Sparkline({ values, className }: { values: number[]; className?: string }) {
+export function Sparkline({ values, className, fill = true }: { values: number[]; className?: string; fill?: boolean }) {
   if (values.length < 2) return null;
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const pts = values.map((v, i) => `${(i / (values.length - 1)) * 100},${max === min ? 50 : 92 - ((v - min) / (max - min)) * 84}`).join(" ");
+  const pts = values.map((v, i) => [(i / (values.length - 1)) * 100, max === min ? 50 : 92 - ((v - min) / (max - min)) * 84] as const);
+  const line = pts.map(([x, y]) => `${x},${y}`).join(" ");
   return (
     <svg viewBox="0 0 100 100" preserveAspectRatio="none" className={cn("h-full w-full", className)} aria-hidden>
-      <polyline points={pts} fill="none" stroke="var(--chart-1)" strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      <defs>
+        <linearGradient id="spark-fill" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor="var(--chart-1)" stopOpacity="0.22" />
+          <stop offset="100%" stopColor="var(--chart-1)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {fill && <polygon points={`0,100 ${line} 100,100`} fill="url(#spark-fill)" />}
+      <polyline points={line} fill="none" stroke="var(--chart-1)" strokeWidth="1.75" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
     </svg>
   );
 }
 
 export function DesktopPreview({ w }: { w: Workload }) {
-  const [runs] = useTable(tables.myAgentRuns);
-  const [steps] = useTable(tables.myAgentSteps);
-  const run = useMemo(() => runs.filter((r) => r.workloadId === w.id).sort((a, b) => Number(b.startedAt.toMillis() - a.startedAt.toMillis()))[0], [runs, w.id]);
-  const last = useMemo(() => (run ? steps.filter((s) => s.runId === run.id).sort((a, b) => b.seq - a.seq)[0] : undefined), [steps, run]);
-  const app = APP[parsePlan(w.planJson)?.intent.application ?? ""] ?? "Desktop";
+  const { working, last } = useAgentState(w);
+  const app = appKey(w);
   const live = w.status === "running";
-  const working = live && run?.status === "running" && w.controller === "agent";
   return (
-    <div className={cn("relative flex h-full flex-col justify-between overflow-hidden rounded-lg bg-screen p-3 text-white", !live && "opacity-70")}>
-      <div className="flex items-center gap-1.5 text-[11px] text-white/60">
+    <div className={cn("relative flex h-full flex-col overflow-hidden rounded-[7px] canvas-dots text-white", working && "agent-glow")}>
+      <div className="flex h-6 shrink-0 items-center gap-1.5 border-b border-white/[0.05] bg-black/40 px-2.5 text-[10.5px] text-white/50">
         <span className="flex gap-1">
-          <span className="size-1.5 rounded-full bg-white/25" />
-          <span className="size-1.5 rounded-full bg-white/25" />
-          <span className="size-1.5 rounded-full bg-white/25" />
+          <span className="size-1.5 rounded-full bg-white/20" />
+          <span className="size-1.5 rounded-full bg-white/20" />
+          <span className="size-1.5 rounded-full bg-white/20" />
         </span>
-        <span className="ml-1 truncate">{app}</span>
-        {working && <span className="ml-auto rounded bg-success/90 px-1.5 py-px text-[10px] font-semibold tracking-wide text-white">AGENT</span>}
-        {live && !working && <span className="ml-auto text-[10px] tracking-wide text-white/50">{w.controller === "user" ? "YOU" : "IDLE"}</span>}
+        <AppLogo app={app} size={11} className="ml-1" />
+        <span className="truncate">{appName(app)}</span>
+        {working && (
+          <span className="ml-auto flex items-center gap-1 rounded bg-agent px-1.5 py-px text-[9.5px] font-semibold tracking-wide text-white">
+            <span className="size-1.5 animate-pulse rounded-full bg-white" /> AGENT
+          </span>
+        )}
+        {live && !working && <span className="ml-auto text-[9.5px] tracking-wide text-white/40">{w.controller === "user" ? "YOU" : "IDLE"}</span>}
       </div>
-      <div className="min-w-0">
+      <div className="flex min-h-0 flex-1 items-end p-2.5">
         {working && last ? (
-          <p className="truncate text-xs text-white/80">{last.summary}</p>
+          <p className="truncate text-[11.5px] text-white/85">
+            <span className="mr-1.5 inline-block size-1.5 animate-pulse rounded-full bg-agent align-middle" />
+            {last.summary}
+          </p>
         ) : live ? (
-          <p className="text-xs text-white/50">Ready — open to stream</p>
+          <p className="text-[11.5px] text-white/45">Ready</p>
         ) : (
-          <p className="text-xs text-white/50">{w.statusDetail || "Not running"}</p>
+          <p className="truncate text-[11.5px] text-white/45">{w.statusDetail || "Not running"}</p>
         )}
       </div>
     </div>
@@ -62,22 +74,33 @@ export function DesktopPreview({ w }: { w: Workload }) {
 
 export function JobPreview({ w }: { w: Workload }) {
   const [metrics] = useTable(tables.myMetrics);
-  const loss = useMemo(
-    () =>
-      metrics
-        .filter((m) => m.workloadId === w.id && m.name === "loss")
+  const { loss, progress } = useMemo(() => {
+    const mine = metrics.filter((m) => m.workloadId === w.id);
+    return {
+      loss: mine
+        .filter((m) => m.name === "loss")
         .sort((a, b) => a.step - b.step)
         .map((m) => m.value),
-    [metrics, w.id],
-  );
+      progress: mine.filter((m) => m.name === "progress").sort((a, b) => b.step - a.step)[0]?.value,
+    };
+  }, [metrics, w.id]);
   const latest = loss.at(-1);
   return (
-    <div className="flex h-full flex-col justify-between rounded-lg border bg-subtle p-3">
-      <div className="flex items-baseline justify-between text-[11px] text-muted-foreground">
-        <span>Training loss</span>
-        {latest != null && <span className="font-mono text-xs text-foreground tabular">{latest.toFixed(3)}</span>}
+    <div className="relative flex h-full flex-col overflow-hidden rounded-[7px] bg-inset">
+      <div className="flex items-baseline justify-between px-2.5 pt-2 text-[10.5px] text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <AppLogo app="pytorch" size={11} /> loss
+        </span>
+        {latest != null && <span className="text-[11.5px] text-foreground tabular">{latest.toFixed(3)}</span>}
       </div>
-      <div className="h-10">{loss.length > 1 ? <Sparkline values={loss.slice(-120)} /> : <p className="text-xs text-muted-foreground">{w.statusDetail || "Waiting for metrics"}</p>}</div>
+      <div className="min-h-0 flex-1">
+        {loss.length > 1 ? <Sparkline values={loss.slice(-160)} /> : <p className="px-2.5 pt-2 text-[11.5px] text-muted-foreground">{w.statusDetail || "Waiting for metrics"}</p>}
+      </div>
+      {progress != null && (
+        <div className="absolute inset-x-0 bottom-0 h-0.5 bg-border">
+          <div className="h-full bg-brand" style={{ width: `${progress * 100}%` }} />
+        </div>
+      )}
     </div>
   );
 }
@@ -87,19 +110,20 @@ export function MachineCard({ w }: { w: Workload }) {
   return (
     <Link
       href={href(w)}
-      className="group flex flex-col gap-3 rounded-xl border bg-card p-3 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-foreground/15 hover:shadow-lg"
+      className="group flex flex-col gap-3 rounded-card bg-card p-2.5 shadow-hairline transition-[box-shadow,transform] duration-200 hover:-translate-y-px hover:shadow-overlay"
     >
-      <div className="h-24">{w.kind === "desktop" ? <DesktopPreview w={w} /> : <JobPreview w={w} />}</div>
-      <div className="flex items-start justify-between gap-2 px-0.5">
+      <div className="h-28">{w.kind === "desktop" ? <DesktopPreview w={w} /> : <JobPreview w={w} />}</div>
+      <div className="flex items-start justify-between gap-2 px-1 pb-0.5">
         <div className="min-w-0">
-          <div className="flex items-center gap-1 truncate text-sm font-medium">
+          <div className="flex items-center gap-1 text-[13px] font-medium">
             <span className="truncate">{w.title}</span>
             <ArrowUpRight className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
           </div>
-          <div className="mt-0.5 truncate text-xs text-muted-foreground">
-            {w.gpuName} · {BILLABLE.has(w.status) ? (
+          <div className="mt-0.5 truncate text-[11.5px] text-muted-foreground">
+            <span>{w.gpuName}</span> ·{" "}
+            {BILLABLE.has(w.status) ? (
               <>
-                <Uptime w={w} /> · {cents(now ? liveCents(w, now) : w.accruedCents, { precise: true })}
+                <Uptime w={w} /> · <span className="tabular">{cents(now ? liveCents(w, now) : w.accruedCents, { precise: true })}</span>
               </>
             ) : w.status === "planned" ? (
               `up to ${cents(w.estHighCents)}`
@@ -108,7 +132,7 @@ export function MachineCard({ w }: { w: Workload }) {
             )}
           </div>
         </div>
-        <StatusChip status={w.status} />
+        <StatusChip status={w.status} className="text-[12px]" />
       </div>
     </Link>
   );

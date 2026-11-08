@@ -1,18 +1,19 @@
 "use client";
 
-import { ArrowRight, ChevronRight } from "lucide-react";
+import { ArrowRight, ArrowUpRight } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
-import { useAccount, useMonthSpend, useNow, usePlatform, useWorkloads } from "@/lib/data";
-import { cents, clock } from "@/lib/format";
+import { useMemo, useState, type ReactNode } from "react";
+import { useAccount, useConversations, useMonthSpend, useNow, usePlatform, useWorkloads } from "@/lib/data";
+import { ago, cents, clock } from "@/lib/format";
 import { tables, useTable } from "@/lib/stdb";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 import { ACTIVE, BILLABLE, href } from "@/lib/workloads";
+import { AppLogo } from "../app/app-logo";
 import { PageHeader } from "../app/page-header";
 import { Composer } from "../chat/composer";
-import { MachineTable } from "../machines/machine-table";
+import { MachineCard } from "../machines/machine-card";
 import { LaunchDialog } from "./launch-dialog";
 import { TEMPLATES, type Template } from "./templates";
 
@@ -33,51 +34,67 @@ export function Home() {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader title="Home" />
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="@container mx-auto w-full max-w-5xl px-6 pt-10 pb-16">
-          <h1 className="text-2xl font-semibold tracking-[-0.02em]">
-            {account ? `What should we run, ${account.displayName.split(" ")[0]}?` : "What should we run?"}
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">Describe the work. Anywhere picks the GPU, sets it up, and shows the cost before anything is billed.</p>
-
-          <div className="mt-5">
-            <Composer onSubmit={submit} autoFocus placeholder="e.g. Set up Blender with a GPU for a low-poly scene" />
+        {/* Hero: the one thing to do here */}
+        <section className="relative border-b">
+          <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+            <div className="absolute inset-0 [background-image:radial-gradient(color-mix(in_srgb,var(--foreground)_7%,transparent)_1px,transparent_1px)] [background-size:20px_20px] [mask-image:radial-gradient(ellipse_70%_80%_at_50%_0%,black,transparent)]" />
+            <div className="absolute -top-40 left-1/2 h-80 w-[720px] -translate-x-1/2 rounded-full bg-agent/10 blur-3xl" />
           </div>
-
-          <div className="mt-3 grid grid-cols-1 gap-2 @lg:grid-cols-2 @3xl:grid-cols-4">
-            {TEMPLATES.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setTemplate(t)}
-                className="group flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors hover:border-foreground/20 hover:bg-accent"
-              >
-                <t.icon className="size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-brand" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium">{t.title}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{t.tagline}</span>
-                </span>
-                <ChevronRight className="size-3.5 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
-              </button>
-            ))}
+          <div className="@container relative mx-auto w-full max-w-3xl px-6 pt-14 pb-10">
+            <h1 className="text-[28px] leading-tight font-semibold tracking-[-0.025em]">
+              {account ? `What should we run, ${account.displayName.split(" ")[0]}?` : "What should we run?"}
+            </h1>
+            <div className="mt-5">
+              <Composer onSubmit={submit} autoFocus placeholder="e.g. Set up Blender on a GPU for a low-poly island scene" />
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2 @2xl:grid-cols-4">
+              {TEMPLATES.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTemplate(t)}
+                  className="group flex flex-col gap-3 rounded-card bg-card p-3.5 text-left shadow-hairline transition-[background-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:bg-hover hover:shadow-btn"
+                >
+                  <span className="grid size-8 place-items-center rounded-control bg-field shadow-hairline transition-transform duration-200 group-hover:scale-105">
+                    <AppLogo app={t.logo} size={18} />
+                  </span>
+                  <span>
+                    <span className="block text-[13px] font-medium">{t.title}</span>
+                    <span className="mt-0.5 block text-[11.5px] leading-4 text-muted-foreground">{t.tagline}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
+        </section>
 
+        <div className="@container mx-auto w-full max-w-6xl px-6 pt-10 pb-20">
           <Section
-            title="Machines"
+            title="Your machines"
             action={
-              <Link href="/machines" className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+              <Link href="/machines" className="flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground">
                 View all <ArrowRight className="size-3" />
               </Link>
             }
           >
             {active.length ? (
-              <MachineTable rows={active.slice(0, 6)} />
+              <div className="grid grid-cols-1 gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
+                {active.slice(0, 6).map((w) => (
+                  <MachineCard key={String(w.id)} w={w} />
+                ))}
+              </div>
             ) : (
-              <p className="rounded-lg border border-dashed px-4 py-6 text-center text-[13px] text-muted-foreground">No machines running. Pick a template or describe a task above.</p>
+              <div className="rounded-card bg-card px-6 py-10 text-center shadow-hairline">
+                <p className="text-[13px] font-medium">Nothing running</p>
+              </div>
             )}
           </Section>
 
-          <div className="mt-10 grid gap-8 @3xl:grid-cols-[1fr_260px]">
-            <Activity />
+          <div className="mt-14 grid gap-10 @4xl:grid-cols-[1fr_300px]">
+            <div className="grid gap-8 @2xl:grid-cols-2 @4xl:grid-cols-[1.3fr_1fr]">
+              <Activity />
+              <RecentTasks />
+            </div>
             <Usage />
           </div>
         </div>
@@ -87,11 +104,11 @@ export function Home() {
   );
 }
 
-function Section({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
+function Section({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return (
-    <section className="mt-10">
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-[13px] font-medium text-muted-foreground">{title}</h2>
+    <section>
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="eyebrow">{title}</h2>
         {action}
       </div>
       {children}
@@ -102,29 +119,59 @@ function Section({ title, action, children }: { title: string; action?: React.Re
 function Activity() {
   const [events] = useTable(tables.myEvents);
   const { all } = useWorkloads();
-  const recent = useMemo(() => [...events].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, 10), [events]);
+  const recent = useMemo(() => [...events].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, 8), [events]);
   return (
-    <section>
-      <h2 className="mb-2 text-[13px] font-medium text-muted-foreground">Activity</h2>
+    <Section title="Activity">
       {recent.length === 0 ? (
         <p className="text-[13px] text-muted-foreground">Nothing yet.</p>
       ) : (
-        <ul className="font-mono text-xs leading-6">
+        <ol className="relative">
+          <span aria-hidden className="absolute top-2 bottom-2 left-[3px] w-px bg-border" />
           {recent.map((e) => {
             const w = all.find((x) => x.id === e.workloadId);
             return (
-              <li key={String(e.id)} className="flex gap-4">
-                <span className="shrink-0 text-faint tabular">{clock(e.createdAt)}</span>
-                <Link href={w ? href(w) : "/machines"} className="min-w-0 truncate font-sans text-[13px] hover:underline">
-                  {w && <span className="text-foreground">{w.title}</span>}
-                  <span className={cn("ml-2", e.level === "error" ? "text-destructive" : e.level.startsWith("warn") ? "text-warning" : "text-muted-foreground")}>{e.message}</span>
+              <li key={String(e.id)} className="relative flex gap-3 py-1.5 pl-4">
+                <span
+                  className={cn(
+                    "absolute top-[11px] left-0 size-[7px] rounded-full ring-4 ring-background",
+                    e.level === "error" ? "bg-red" : e.level.startsWith("warn") ? "bg-warning" : "bg-line-strong",
+                  )}
+                />
+                <Link href={w ? href(w) : "/machines"} className="min-w-0 flex-1 text-[13px] leading-5 hover:underline">
+                  <span className={cn(e.level === "error" ? "text-destructive" : "text-foreground/85")}>{e.message}</span>
+                  {w && <span className="block truncate text-[11.5px] text-muted-foreground">{w.title}</span>}
                 </Link>
+                <span className="shrink-0 pt-0.5 text-[11px] text-faint tabular">{clock(e.createdAt)}</span>
               </li>
             );
           })}
+        </ol>
+      )}
+    </Section>
+  );
+}
+
+function RecentTasks() {
+  const { conversations } = useConversations();
+  const now = useNow(60_000);
+  return (
+    <Section title="Recent tasks">
+      {conversations.length === 0 ? (
+        <p className="text-[13px] text-muted-foreground">Your conversations with Anywhere show up here.</p>
+      ) : (
+        <ul className="-mx-2">
+          {conversations.slice(0, 7).map((c) => (
+            <li key={String(c.id)}>
+              <Link href={`/c/${c.id}`} className="group flex items-center gap-3 rounded-lg px-2 py-1.5 transition-colors hover:bg-accent/60">
+                <span className="min-w-0 flex-1 truncate text-[13px] text-foreground/85 group-hover:text-foreground">{c.title || "Untitled task"}</span>
+                <span className="shrink-0 text-[11.5px] text-faint">{now ? ago(c.updatedAt, now) : ""}</span>
+                <ArrowUpRight className="size-3.5 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
+              </Link>
+            </li>
+          ))}
         </ul>
       )}
-    </section>
+    </Section>
   );
 }
 
@@ -133,42 +180,45 @@ function Usage() {
   const { platform } = usePlatform();
   const { workloads } = useWorkloads();
   const spent = useMonthSpend();
-  const now = useNow(60_000);
   const cap = account?.monthlyCapCents ?? 0;
   const burn = workloads.filter((w) => BILLABLE.has(w.status)).reduce((s, w) => s + w.hourlyCents, 0);
   const credit = platform ? Math.max(0, platform.globalBudgetCents - platform.globalSpentCents) : null;
   const pct = cap ? Math.min(100, (spent / cap) * 100) : 0;
-  void now;
   return (
-    <section>
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-[13px] font-medium text-muted-foreground">Usage</h2>
-        <Link href="/settings#spending" className="text-xs text-muted-foreground hover:text-foreground">
+    <Section
+      title="Usage"
+      action={
+        <Link href="/settings#spending" className="text-[12px] text-muted-foreground hover:text-foreground">
           Limits
         </Link>
-      </div>
-      <dl className="divide-y rounded-lg border text-[13px]">
-        <Row label="This month" value={`${cents(spent)} / ${cents(cap)}`}>
-          <div className="mt-2 h-1 overflow-hidden rounded-full bg-muted">
-            <div className="h-full rounded-full bg-brand" style={{ width: `${pct}%` }} />
+      }
+    >
+      <div className="rounded-card bg-card shadow-hairline">
+        <div className="px-4 pt-3.5 pb-4">
+          <div className="text-[11.5px] text-muted-foreground">This month</div>
+          <div className="mt-1 flex items-baseline gap-1.5">
+            <span className="text-2xl font-semibold tracking-tight tabular">{cents(spent)}</span>
+            <span className="text-[12px] text-muted-foreground tabular">of {cents(cap)}</span>
           </div>
-        </Row>
-        <Row label="Burn rate" value={burn ? `${cents(burn)}/hr` : "—"} />
-        <Row label="Shared credit" value={credit == null ? "—" : cents(credit)} />
-        <Row label="Auto-approve" value={account?.approvalThresholdCents ? `≤ ${cents(account.approvalThresholdCents)}` : "Off"} />
-      </dl>
-    </section>
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+            <div className={cn("h-full rounded-full transition-[width]", pct > 85 ? "bg-warning" : "bg-brand")} style={{ width: `${Math.max(1.5, pct)}%` }} />
+          </div>
+        </div>
+        <dl className="divide-y border-t text-[12.5px]">
+          <Row label="Burn rate" value={burn ? `${cents(burn)}/hr` : "-"} />
+          <Row label="Shared credit left" value={credit == null ? "-" : cents(credit)} />
+          <Row label="Auto-approve" value={account?.approvalThresholdCents ? `≤ ${cents(account.approvalThresholdCents)}` : "Always ask"} />
+        </dl>
+      </div>
+    </Section>
   );
 }
 
-function Row({ label, value, children }: { label: string; value: string; children?: React.ReactNode }) {
+function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="px-3 py-2.5">
-      <div className="flex items-baseline justify-between">
-        <dt className="text-muted-foreground">{label}</dt>
-        <dd className="font-medium tabular">{value}</dd>
-      </div>
-      {children}
+    <div className="flex items-baseline justify-between px-4 py-2.5">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="text-[12px] tabular">{value}</dd>
     </div>
   );
 }

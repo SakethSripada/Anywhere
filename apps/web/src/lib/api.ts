@@ -17,7 +17,7 @@ type Json = Record<string, unknown> | unknown[] | null;
 
 async function request<T>(path: string, init: RequestInit & { token: string | null; identity: string | null }): Promise<T> {
   const { token, identity, headers, ...rest } = init;
-  if (!token) throw new ApiError("Still connecting — try again in a second", 0);
+  if (!token) throw new ApiError("Still connecting. Try again in a second.", 0);
   let res: Response;
   try {
     res = await fetch(`${config.apiUrl}${path}`, {
@@ -87,7 +87,7 @@ export async function uploadDataset(
     xhr.setRequestHeader("Content-Type", meta.content_type);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => (xhr.status < 300 ? resolve() : reject(new ApiError("Upload was rejected by storage", xhr.status)));
-    xhr.onerror = () => reject(new ApiError("Upload failed — check your connection", 0));
+    xhr.onerror = () => reject(new ApiError("Upload failed. Check your connection.", 0));
     xhr.send(file);
   });
   const done = await api.post<{ upload_id: number; profile: UploadProfile }>(`/v1/uploads/${upload_id}/complete`, meta);

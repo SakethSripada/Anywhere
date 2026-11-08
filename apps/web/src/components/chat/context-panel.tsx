@@ -31,7 +31,7 @@ export function ContextPanel({ conversationId }: { conversationId: bigint | null
             <Monitor className="size-5" />
           </span>
           <p className="text-sm font-medium">No machine yet</p>
-          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">When Anywhere proposes a plan for this task, you’ll review and approve it here, then watch it come up.</p>
+          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">Plans for this task show up here for you to approve.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-4 p-4">
@@ -54,7 +54,7 @@ function Entry({ w, primary }: { w: Workload; primary: boolean }) {
             <div className="mb-2 text-xs font-medium text-muted-foreground">What happens when you approve</div>
             <ol className="flex flex-col gap-2 text-[13px]">
               {(w.kind === "desktop"
-                ? ["Anywhere reserves the GPU on NVIDIA Brev", "It installs the desktop and your apps", "You open it here and work in the browser", "Stop any time — your files are saved first"]
+                ? ["Anywhere reserves the GPU on NVIDIA Brev", "It installs the desktop and your apps", "You open it here and work in the browser", "Stop any time, your files are saved first"]
                 : ["Anywhere reserves the GPU on NVIDIA Brev", "It downloads your dataset and starts training", "Watch loss and logs live; ask the agent anything", "Results are saved and the machine shuts down"]
               ).map((t, i) => (
                 <li key={t} className="flex gap-2.5">
@@ -73,7 +73,7 @@ function Entry({ w, primary }: { w: Workload; primary: boolean }) {
         <Header w={w} />
         <div className="progress-indeterminate my-4 h-1 rounded-full bg-muted" />
         <BootProgress w={w} />
-        <p className="mt-4 text-xs leading-5 text-muted-foreground">Usually 5–10 minutes. You can leave this page — Anywhere keeps going and notifies you.</p>
+        <p className="mt-4 text-xs leading-5 text-muted-foreground">Usually 5–10 minutes. You can leave this page.</p>
       </div>
     );
   }
