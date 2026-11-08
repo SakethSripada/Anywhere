@@ -9,7 +9,7 @@ import { useMediaQuery } from "@/hooks/use-media-query";
 import { toItems, useAgentBusy, type ChatItem } from "@/lib/chat";
 import { useWorkload } from "@/lib/data";
 import { clock, ms } from "@/lib/format";
-import { useShared } from "@/lib/tables";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { href } from "@/lib/workloads";
 import { Markdown } from "./markdown";
@@ -48,8 +48,12 @@ export function Thread({
   className?: string;
 }) {
   const items = useMemo(() => toItems(messages), [messages]);
-  const runs = useShared("myAgentRuns").rows;
-  const events = useShared("myEvents").rows;
+  // Runs and events only join the stream for a focused machine; otherwise
+  // don't subscribe, and don't recompute or re-scroll on their changes.
+  const runRows = useShared("myAgentRuns", !!focus).rows;
+  const eventRows = useShared("myEvents", !!focus).rows;
+  const runs = focus ? runRows : NONE;
+  const events = focus ? eventRows : NONE;
 
   const stream = useMemo<StreamItem[]>(() => {
     const out: StreamItem[] = items.map((item) => ({ kind: "chat", at: itemTime(item), item }));

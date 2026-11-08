@@ -207,10 +207,11 @@ export function TablesProvider({ children }: { children: ReactNode }) {
 /**
  * Read a table from the shared subscription. The table is subscribed while at
  * least one reader is mounted; `name` must be a constant at each call site.
+ * With `enabled` false this reader doesn't keep the table subscribed.
  */
-export function useShared<K extends TableName>(name: K): Slices[K] {
+export function useShared<K extends TableName>(name: K, enabled = true): Slices[K] {
   const register = useContext(Registry);
   if (!register) throw new Error("useShared must be used under <TablesProvider>");
-  useEffect(() => register(name), [register, name]);
+  useEffect(() => (enabled ? register(name) : undefined), [register, name, enabled]);
   return useContext(contexts[name]);
 }
