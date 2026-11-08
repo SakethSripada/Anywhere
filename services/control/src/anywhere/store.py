@@ -95,6 +95,11 @@ class Store:
             w["stoppable"],
         )
 
+    async def update_workload_plan(
+        self, id: int, title: str, plan_json: str, est_low_cents: int, est_high_cents: int
+    ) -> None:
+        await self.client.call("update_workload_plan", id, title, plan_json, est_low_cents, est_high_cents)
+
     async def transition(self, id: int, to: str, detail: str) -> None:
         await self.client.call("transition_workload", id, to, detail)
 
