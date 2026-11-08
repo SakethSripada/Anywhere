@@ -30,6 +30,7 @@ class RunStore(McpStore):
         self.steps.append({"runId": run_id, "kind": kind, "summary": summary, "detail": detail})
 
     async def finish_agent_run(self, id, status, result):
+        await asyncio.sleep(0.05)  # a real reducer call takes a round trip
         run = next(r for r in self.runs if r["id"] == id)
         run.update(status=status, result=result)
 
@@ -127,3 +128,16 @@ async def test_steering_from_chat_replaces_the_task_and_stop_keeps_the_machine_o
     stopped = json.loads(await tools["stop_desktop_agent"].ainvoke({"workload_id": 11}))
     assert stopped["ok"] and not app.supervisor.agent_running(11)
     assert store.rows[11]["status"] == "running" and store.rows[11]["controller"] == "user"
+
+
+async def test_two_stops_at_once_still_record_how_the_run_ended(app):
+    store = app.store
+    run_id = await app.operate(ALICE, 11, "Add a cube")
+    await until(lambda: any(s["kind"] == "act" for s in store.steps))
+
+    async def second_click():
+        await asyncio.sleep(0.01)  # lands while the run is recording how it ended
+        await app.halt_agent(ALICE, 11, pause=True)
+
+    await asyncio.gather(app.halt_agent(ALICE, 11, pause=True), second_click())
+    assert next(r for r in store.runs if r["id"] == run_id)["status"] == "paused"

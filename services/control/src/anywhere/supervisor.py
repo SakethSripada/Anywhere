@@ -442,7 +442,9 @@ class Supervisor:
                     await self.brev.stop(name)
                     await self.brev.wait_for(name, want="STOPPED", timeout=10 * 60)
                     await self._transition(w, Status.STOPPED, reason)
-                    await self.notify(w, "status", f"{w['title']} stopped. Your files are saved. Resume anytime.")
+                    await self.notify(
+                        w, "status", f"{w['title']} stopped. Your files are saved, so you can resume anytime."
+                    )
                 else:
                     await self.brev.delete(name)
                     await self._transition(w, Status.TERMINATED, reason)
@@ -871,9 +873,12 @@ class Supervisor:
 
     async def stop_agent(self, wid: int) -> None:
         if (t := self._agents.get(wid)) and not t.done():
-            t.cancel()
+            # Cancel once: a second cancel (a double click, or Stop racing Take over) would
+            # interrupt the run while it records its final status, leaving it "running".
+            if not t.cancelling():
+                t.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
+                await asyncio.shield(t)
 
     # ── Accounting & guard ────────────────────────────────────────────────
 
