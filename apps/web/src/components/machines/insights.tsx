@@ -5,7 +5,6 @@ import { useState, type ReactNode } from "react";
 import { ReplayDialog } from "@/components/chat/agent-replay";
 import { Button } from "@/components/ui/button";
 import { ApiError, useApi } from "@/lib/api";
-import { useNow } from "@/lib/data";
 import { ago, duration, ms } from "@/lib/format";
 import { useShared } from "@/lib/tables";
 import { clockSeconds, elapsed, useBootTimeline, useGpuTelemetry, type Boot } from "@/lib/insights";
@@ -134,8 +133,7 @@ function LiveDot() {
 /* ── Boot timeline ───────────────────────────────────────────────────────── */
 
 function BootPanel({ w }: { w: Workload }) {
-  const now = useNow(1000);
-  const boot = useBootTimeline(w.id, now);
+  const boot = useBootTimeline(w.id);
   return (
     <Panel
       title="Boot timeline"

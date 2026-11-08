@@ -166,3 +166,12 @@ async def test_timelapse_is_rendered_once_and_listed_as_an_output(app):
     again = await app.replay_gif(ALICE, 11, 7)
     assert again["url"] == first["url"] and app.storage.gets == gets  # served from the saved GIF
     assert len(app.artifacts) == 1 and app.artifacts[0][3].endswith("timelapse.gif")
+
+
+async def test_concurrent_timelapse_requests_render_it_once(app):
+    import asyncio
+
+    a, b = await asyncio.gather(app.replay_gif(ALICE, 11, 7), app.replay_gif(ALICE, 11, 7))
+    assert a["url"] == b["url"]
+    assert len(app.artifacts) == 1  # a double click doesn't build (and list) it twice
+    assert app.storage.gets == 3

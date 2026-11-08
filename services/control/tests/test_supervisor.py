@@ -514,6 +514,29 @@ async def test_only_running_machines_are_sampled(tmp_path):
     assert set(sup._sampling) == {1}
 
 
+async def test_telemetry_samples_machines_concurrently(tmp_path):
+    sup, store, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=60)
+    for i in (1, 2, 3):
+        store.add(id=i, status="running")
+    await sup.tick()
+    sup._gpu_total_sent = {1, 99}  # 99 stopped long ago
+    started: list[int] = []
+
+    async def slow_sample(w):
+        started.append(w["id"])
+        await asyncio.sleep(0.3)
+        return []
+
+    sup.sample_gpu = slow_sample
+    task = asyncio.create_task(sup._telemetry_loop())
+    await asyncio.sleep(0.1)
+    # A slow machine doesn't hold up the others: all three are being sampled at once.
+    assert sorted(started) == [1, 2, 3]
+    assert sup._gpu_total_sent == {1}
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_telemetry_can_be_turned_off(tmp_path):
     sup, _, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=0)
     sup.start_guard()
@@ -550,3 +573,64 @@ async def test_setup_failures_keep_the_last_output_on_the_machine_log(tmp_path):
     await sup._fail(w, RemoteError("desktop-setup.sh exited 22\ncurl: (22) The requested URL returned error: 403"))
     assert store.rows[1]["statusDetail"] == "desktop-setup.sh exited 22"
     assert logs and "returned error: 403" in logs[0]
+
+
+class _LocalShell:
+    """A Remote stand-in that runs commands on this host."""
+
+    def popen(self, command, *, stdin=None, stdout=None):
+        import subprocess
+
+        return subprocess.Popen(["sh", "-c", command], stdin=stdin, stdout=stdout, stderr=subprocess.DEVNULL)
+
+
+async def test_relay_does_not_hang_when_the_receiver_exits_early():
+    from anywhere.remote import RemoteError
+    from anywhere.supervisor import _relay
+
+    # The receiver reads 10 bytes and exits; the sender has ~200 MB to send.
+    with pytest.raises(RemoteError):
+        await asyncio.wait_for(
+            _relay(_LocalShell(), "yes | head -c 200000000", _LocalShell(), "head -c 10 >/dev/null; exit 3"), 20
+        )
+
+
+async def test_relay_times_out_and_kills_both_sides():
+    from anywhere.remote import RemoteError
+    from anywhere.supervisor import _relay
+
+    with pytest.raises(RemoteError, match="too long"):
+        await _relay(_LocalShell(), "sleep 30", _LocalShell(), "cat >/dev/null", timeout=0.5)
+
+
+async def test_relay_copies_between_machines(tmp_path):
+    from anywhere.supervisor import _relay
+
+    out = tmp_path / "out"
+    await _relay(_LocalShell(), "printf hello", _LocalShell(), f"cat > {out}")
+    assert out.read_text() == "hello"
+
+
+def test_housekeeping_drops_vault_records_nothing_will_read(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from anywhere import savings, sharing
+
+    sup, _, _ = make(tmp_path, FakeBrev())
+    now = datetime.now(UTC)
+    v = sup.vault
+    v.section_put(sharing.SECTION, "live", {"workload_id": 1, "expires_at": (now + timedelta(hours=1)).isoformat()})
+    v.section_put(sharing.SECTION, "old", {"workload_id": 2, "expires_at": (now - timedelta(minutes=1)).isoformat()})
+    v.section_put("notification_attachments", "1", {"key": "k", "name": "a.jpg", "at": now.isoformat()})
+    v.section_put(
+        "notification_attachments", "2", {"key": "k", "name": "a.jpg", "at": (now - timedelta(days=2)).isoformat()}
+    )
+    v.section_put("notification_attachments", "3", {"key": "k", "name": "a.jpg"})  # written before timestamps
+    v.section_put(savings.SECTION, "recent", {"stopped_at": (now - timedelta(days=3)).isoformat()})
+    v.section_put(savings.SECTION, "ancient", {"stopped_at": (now - timedelta(days=200)).isoformat()})
+
+    assert sup.housekeeping(now) == 4
+    assert [k for k, _ in v.section_items(sharing.SECTION)] == ["live"]
+    assert [k for k, _ in v.section_items("notification_attachments")] == ["1"]
+    assert [k for k, _ in v.section_items(savings.SECTION)] == ["recent"]
+    assert sup.housekeeping(now) == 0
