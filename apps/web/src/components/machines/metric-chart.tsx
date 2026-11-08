@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { compact } from "@/lib/format";
 
 type Point = { step: number; value: number };
@@ -28,6 +28,8 @@ export function MetricChart({ points, label, compare, compareLabel }: { points: 
   const wrap = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
+  // Labels like "Eval loss" contain spaces, which break url(#id); use a unique, safe id.
+  const gradientId = `area-${useId().replace(/[^\w-]/g, "")}`;
 
   useEffect(() => {
     const el = wrap.current;
@@ -40,12 +42,17 @@ export function MetricChart({ points, label, compare, compareLabel }: { points: 
   const geo = useMemo(() => {
     if (!points.length || width < 80) return null;
     const both = compare?.length ? [...points, ...compare] : points;
-    const xs = both.map((p) => p.step);
-    const ys = both.map((p) => p.value);
-    const x0 = Math.min(...xs);
-    const x1 = Math.max(...xs);
-    let y0 = Math.min(...ys);
-    let y1 = Math.max(...ys);
+    // A loop, not Math.min(...xs): spreading tens of thousands of points overflows the stack.
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    for (const p of both) {
+      if (p.step < x0) x0 = p.step;
+      if (p.step > x1) x1 = p.step;
+      if (p.value < y0) y0 = p.value;
+      if (p.value > y1) y1 = p.value;
+    }
     const padY = (y1 - y0 || Math.abs(y1) || 1) * 0.08;
     y0 -= padY;
     y1 += padY;
@@ -85,7 +92,7 @@ export function MetricChart({ points, label, compare, compareLabel }: { points: 
       {geo && (
         <svg width={width} height={HEIGHT} className="block overflow-visible" role="img" aria-label={`${label} by training step`}>
           <defs>
-            <linearGradient id={`area-${label}`} x1="0" x2="0" y1="0" y2="1">
+            <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
               <stop offset="0%" stopColor="var(--chart-1)" stopOpacity="0.18" />
               <stop offset="100%" stopColor="var(--chart-1)" stopOpacity="0" />
             </linearGradient>
@@ -103,7 +110,7 @@ export function MetricChart({ points, label, compare, compareLabel }: { points: 
               {compact(t)}
             </text>
           ))}
-          <path d={geo.area} fill={`url(#area-${label})`} />
+          <path d={geo.area} fill={`url(#${gradientId})`} />
           <path d={geo.line} fill="none" stroke="var(--chart-1)" strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
           {geo.cline && <path d={geo.cline} fill="none" stroke="var(--chart-2)" strokeWidth={1.75} strokeDasharray="4 3" strokeLinejoin="round" />}
           {latest && hover == null && (

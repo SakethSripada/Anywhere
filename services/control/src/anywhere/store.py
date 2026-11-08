@@ -66,8 +66,8 @@ class Store:
 
     async def conversation_owned(self, conversation_id: int, owner: str) -> bool:
         cid = int(conversation_id)  # interpolated into SQL: must be an integer
-        rows = await self.client.sql(f"SELECT * FROM worker_conversations WHERE id = {cid}")
-        return any(r["owner"] == owner for r in rows)
+        rows = await self._where("worker_conversations", f"id = {cid}", lambda r: r["id"] == cid)
+        return any(r["id"] == cid and r["owner"] == owner for r in rows)
 
     async def append_message(
         self, conversation_id: int, role: str, kind: str, body: str, workload_id: int = 0, channel: str = "web"
@@ -106,6 +106,15 @@ class Store:
 
     async def workloads(self) -> list[dict]:
         return await self.client.sql("SELECT * FROM worker_workloads")
+
+    async def workloads_for(self, owner: str) -> list[dict]:
+        """One owner's workloads, filtered on the server instead of scanning every user's."""
+        try:
+            clause = f"owner = {_sql_identity(owner)}"
+        except ValueError:
+            return []
+        rows = await self._where("worker_workloads", clause, lambda w: w["owner"] == owner)
+        return [w for w in rows if w["owner"] == owner]
 
     async def workload(self, id: int) -> dict | None:
         wid = int(id)  # interpolated into SQL: must be an integer
@@ -157,6 +166,17 @@ class Store:
     async def agent_steps(self, run_id: int) -> list[dict]:
         rid = int(run_id)  # interpolated into SQL: must be an integer
         rows = await self.client.sql(f"SELECT * FROM worker_agent_steps WHERE runId = {rid}")
+        return sorted(rows, key=lambda r: r["seq"])
+
+    async def agent_step_summaries(self, run_id: int) -> list[dict]:
+        """Steps of a run without their (up to 4 kB) `detail` text, for polling callers."""
+        rid = int(run_id)  # interpolated into SQL: must be an integer
+        try:
+            rows = await self.client.sql(
+                f"SELECT seq, kind, summary, screenshotKey FROM worker_agent_steps WHERE runId = {rid}"
+            )
+        except SpacetimeError:
+            return await self.agent_steps(rid)
         return sorted(rows, key=lambda r: r["seq"])
 
     # ── Files ─────────────────────────────────────────────────────────────

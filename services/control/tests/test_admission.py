@@ -70,3 +70,17 @@ async def test_approval_refuses_a_machine_brev_no_longer_lists(tmp_path):
     with pytest.raises(ActionError, match="isn't offering"):
         await app.approve(OWNER, 1)
     assert launched == []
+
+
+async def test_concurrent_price_refreshes_share_one_brev_search(tmp_path):
+    app, _, _ = make(tmp_path)
+    calls = []
+
+    async def search():
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        return "[]"
+
+    app.brev.search_gpu_json = search
+    await asyncio.gather(*(app.refresh_prices() for _ in range(5)))
+    assert len(calls) == 1

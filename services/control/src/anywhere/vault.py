@@ -11,22 +11,53 @@ import json
 import os
 import secrets
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import structlog
+
+log = structlog.get_logger()
+
+#: A grant younger than this is never treated as unused (its code may be in flight).
+GRANT_GRACE_SECONDS = 600
 
 
 class Vault:
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.Lock()
+        self._backup = path.with_suffix(path.suffix + ".bak")
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._data: dict[str, Any] = json.loads(path.read_text()) if path.exists() else {}
+        self._data: dict[str, Any] = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        """The vault, or its previous version if the current file is missing or
+        unreadable (e.g. a crash mid-write). Refusing to boot would lose more: it
+        holds sign-in grants and billing segments."""
+        for candidate in (self.path, self._backup):
+            if not candidate.exists():
+                continue
+            try:
+                return json.loads(candidate.read_text())
+            except (OSError, ValueError) as exc:
+                log.error("vault.unreadable", path=str(candidate), error=str(exc)[:200])
+        return {}
 
     def _flush(self) -> None:
+        """Durable, atomic write: compact JSON to a temp file, fsync it, keep the
+        previous version as a backup, then rename into place."""
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2))
-        os.chmod(tmp, 0o600)
-        tmp.replace(self.path)
+        data = json.dumps(self._data, separators=(",", ":")).encode()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if self.path.exists():
+            os.replace(self.path, self._backup)
+        os.replace(tmp, self.path)
 
     def get(self, workload_id: int) -> dict[str, Any]:
         with self._lock:
@@ -35,8 +66,9 @@ class Vault:
     def update(self, workload_id: int, **values: Any) -> dict[str, Any]:
         with self._lock:
             entry = self._data.setdefault("workloads", {}).setdefault(str(workload_id), {})
-            entry.update(values)
-            self._flush()
+            if any(entry.get(k, object()) != v for k, v in values.items()):
+                entry.update(values)
+                self._flush()
             return dict(entry)
 
     def agent_token(self, workload_id: int) -> str:
@@ -104,6 +136,18 @@ class Vault:
             self._data.setdefault(section, {})[key] = record
             self._flush()
 
+    def section_update(self, section: str, key: str, **values: Any) -> dict[str, Any] | None:
+        """Merge `values` into an existing record; a no-op (returns None) if the key
+        is gone, so a concurrent delete is never undone by a stale write-back."""
+        with self._lock:
+            record = self._data.get(section, {}).get(key)
+            if record is None:
+                return None
+            if any(record.get(k, object()) != v for k, v in values.items()):
+                record.update(values)
+                self._flush()
+            return dict(record)
+
     def section_pop(self, section: str, key: str) -> dict[str, Any] | None:
         with self._lock:
             record = self._data.get(section, {}).pop(key, None)
@@ -129,6 +173,42 @@ class Vault:
                     del entries[key]
             self._flush()
             return found
+
+    def purge_unused(self, now_ts: float, client_idle_seconds: float) -> None:
+        """Drop OAuth grants that nothing references any more (no pending code, no
+        live refresh or access token: the connection can never be used again), then
+        registered clients with no grants or pending sign-ins that were registered
+        more than `client_idle_seconds` ago. Without this, open registration fills
+        MAX_CLIENTS for good and dead grants pile up as "connected apps"."""
+        with self._lock:
+            changed = False
+            live = {
+                v.get("grant_id")
+                for section in ("oauth_codes", "oauth_refresh", "mcp_tokens")
+                for v in self._data.get(section, {}).values()
+            }
+            grants = self._data.get("oauth_grants", {})
+            recent = datetime.fromtimestamp(now_ts - GRANT_GRACE_SECONDS, UTC).isoformat()
+            for key in [
+                k for k, g in grants.items() if g.get("id") not in live and (g.get("created_at") or "") < recent
+            ]:
+                del grants[key]
+                changed = True
+            in_use = {g.get("client_id") for g in grants.values()} | {
+                v.get("client_id")
+                for section in ("oauth_requests", "oauth_codes")
+                for v in self._data.get(section, {}).values()
+            }
+            clients = self._data.get("oauth_clients", {})
+            for key in [
+                k
+                for k, c in clients.items()
+                if k not in in_use and now_ts - float(c.get("client_id_issued_at") or 0) > client_idle_seconds
+            ]:
+                del clients[key]
+                changed = True
+            if changed:
+                self._flush()
 
     def purge_expired(self, now_iso: str, now_ts: float) -> None:
         """Drop expired OAuth codes, requests, refresh tokens and access tokens."""
