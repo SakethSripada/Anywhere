@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from . import budget, llm, render_bench, replay
+from . import budget, llm, render_bench, replay, savings
 from .brev import BrevCLI
 from .catalog import Catalog
 from .config import Settings
@@ -87,6 +87,52 @@ class Anywhere:
         if not acct:
             raise ActionError("Create your account first")
         return acct
+
+    async def costs(self, owner: str) -> dict:
+        """Live spend (each billing segment's exact start, for a per-second meter) and
+        what auto-stopping idle desktops has saved."""
+        now = datetime.now(UTC)
+        running = []
+        for w in await self.store.workloads_for(owner):
+            if w["status"] not in BILLABLE:
+                continue
+            start, base = self.supervisor._segment(w)
+            running.append(
+                {
+                    "id": str(w["id"]),
+                    "title": w["title"],
+                    "gpu": w["gpuName"],
+                    "hourly_cents": int(w["hourlyCents"]),
+                    "segment_start": start.isoformat() if start else None,
+                    "segment_base_cents": base,
+                }
+            )
+        stops = sorted(
+            (rec for _, rec in self.vault.section_items(savings.SECTION) if rec["owner"] == owner),
+            key=lambda r: r["stopped_at"],
+            reverse=True,
+        )
+        return {
+            "now": now.isoformat(),
+            "running": running,
+            "saved_cents": round(sum(savings.saved_cents(r, now) for r in stops), 4),
+            "idle_minutes": self.settings.desktop_idle_minutes,
+            "session_hours": self.settings.max_session_hours,
+            "idle_stops": [
+                {
+                    "id": str(r["workload_id"]),
+                    "title": r["title"],
+                    "gpu": r["gpu"],
+                    "hourly_cents": r["hourly_cents"],
+                    "stopped_at": r["stopped_at"],
+                    "limit_at": r["limit_at"],
+                    "resumed_at": r.get("resumed_at"),
+                    "saved_cents": round(savings.saved_cents(r, now), 4),
+                    "counting": savings.still_counting(r, now),
+                }
+                for r in stops[:20]
+            ],
+        }
 
     async def spend_snapshot(self, owner: str) -> budget.SpendSnapshot:
         workloads = await self.store.workloads()

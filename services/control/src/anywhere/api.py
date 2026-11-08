@@ -298,6 +298,11 @@ def _routes():
 
     # Account ---------------------------------------------------------------
 
+    @r.get("/v1/costs")
+    async def costs(owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"costs:{owner}", 60)
+        return await app.costs(owner)
+
     @r.post("/v1/account/activate")
     async def activate(body: ActivateIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
         rate_limit(f"activate:{owner}", 5)
