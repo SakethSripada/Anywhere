@@ -50,12 +50,15 @@ done
 if ! $DOCKER container inspect "$NAME" >/dev/null 2>&1; then
   step "Starting the desktop"
   # 6080 is the interactive VNC bridge, 6081 the view-only one for watch links.
-  # GPU for compute only (CUDA/OptiX for Cycles, NVENC). The graphics/display
-  # capabilities inject NVIDIA's GLX into the container, and the image's Xvfb
-  # (+extension GLX) then failed to start on a live T4. The viewport renders in
-  # software on Xvfb either way.
+  # Brev's NVIDIA runtime injects the driver's GLX/EGL libraries whatever
+  # NVIDIA_DRIVER_CAPABILITIES says, and the image's Xvfb (+extension GLX) then
+  # segfaults loading NVIDIA's EGL (seen on a T4, driver 595). Pointing glvnd at
+  # Mesa keeps X and the viewport on software GL; CUDA/OptiX for Cycles still
+  # reach the GPU through libcuda.
   if ! out=$($DOCKER run -d --name "$NAME" --restart unless-stopped \
-    --gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
+    -e __GLX_VENDOR_LIBRARY_NAME=mesa \
+    -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
     -e CUA_ENV_TOKEN="{{CUA_TOKEN}}" \
     --shm-size=2g \
     -p 127.0.0.1:3211:3211 -p 127.0.0.1:6080:6080 -p 127.0.0.1:6081:6081 \
