@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -655,10 +656,20 @@ async def _relay(client: WebSocket, upstream, touch) -> None:
                 _background.add(t)
                 t.add_done_callback(_background.discard)
 
-    tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    downstream, upstream_task = asyncio.create_task(down()), asyncio.create_task(up())
+    done, pending = await asyncio.wait([downstream, upstream_task], return_when=asyncio.FIRST_COMPLETED)
     for t in pending:
         t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for t in done:
+        # The desktop going away (stop, delete, reboot) ends `down` with ConnectionClosed;
+        # that's a normal end of session. Anything else is worth a log line, not a crash.
+        if (exc := t.exception()) and not isinstance(exc, (websockets.ConnectionClosed, WebSocketDisconnect)):
+            log.warning("vnc.relay_failed", error=f"{exc.__class__.__name__}: {exc}"[:300])
+    if downstream in done:
+        # The machine side closed: tell the browser now instead of leaving its socket open.
+        with contextlib.suppress(Exception):
+            await client.close(code=1001)
 
 
 def _title(text: str) -> str:

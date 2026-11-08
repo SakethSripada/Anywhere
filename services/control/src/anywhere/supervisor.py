@@ -143,7 +143,12 @@ class Supervisor:
         w["status"] = to.value
         if to == Status.PROVISIONING:
             # Billing segment begins; remember what was already billed.
-            self.vault.update(w["id"], segment_base=int(w.get("accruedCents", 0)), segment_start=_now().isoformat())
+            self.vault.update(
+                w["id"],
+                segment_base=int(w.get("accruedCents", 0)),
+                segment_start=_now().isoformat(),
+                segment_closed=False,
+            )
 
     async def _event(self, w: dict, message: str, level: str = "info") -> None:
         try:
@@ -589,6 +594,10 @@ class Supervisor:
         v = self.vault.get(w["id"])
         if start := v.get("segment_start"):
             return datetime.fromisoformat(start), int(v.get("segment_base", 0))
+        if v.get("segment_closed"):
+            # Settled (e.g. on stop) while the row is still briefly billable, such as
+            # `stopping`. Re-opening from `startedAt` here would bill the segment twice.
+            return None, int(v.get("segment_base", 0))
         started = w.get("startedAt")
         if w["status"] in BILLABLE and isinstance(started, datetime):
             self.vault.update(w["id"], segment_start=started.isoformat(), segment_base=int(v.get("segment_base", 0)))
@@ -605,7 +614,7 @@ class Supervisor:
     async def _settle_usage(self, w: dict) -> None:
         cents = self._accrued(w)
         w["accruedCents"] = cents
-        self.vault.update(w["id"], segment_start=None, segment_base=cents)
+        self.vault.update(w["id"], segment_start=None, segment_base=cents, segment_closed=True)
         await _safe(self.store.record_usage(w["id"], cents))
 
     def start_guard(self) -> None:

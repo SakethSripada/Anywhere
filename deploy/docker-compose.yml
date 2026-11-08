@@ -67,11 +67,24 @@ services:
       TURN_TIMEOUT_MS: ${TURN_TIMEOUT_MS:-120000}
     depends_on: [control]
 
+  # A fresh named volume is owned by root, but SpacetimeDB runs as uid 1000 and
+  # would crash-loop with "Permission denied". Hand the volume over once first.
+  spacetime-init:
+    profiles: [spacetime]
+    image: clockworklabs/spacetime:v2.14.1
+    user: root
+    entrypoint: ["chown", "-R", "1000:1000", "/home/spacetime/.local/share/spacetime"]
+    volumes:
+      - spacetime_data:/home/spacetime/.local/share/spacetime
+
   spacetime:
     profiles: [spacetime]
     image: clockworklabs/spacetime:v2.14.1
     command: start
     restart: unless-stopped
+    depends_on:
+      spacetime-init:
+        condition: service_completed_successfully
     volumes:
       - spacetime_data:/home/spacetime/.local/share/spacetime
 
