@@ -409,3 +409,29 @@ async def test_batch_monitor_retries_a_failed_log_write(tmp_path):
     await sup._monitor_batch(w)
     assert [t for _, t in store.logs] == ["first\n"]
     assert sup.vault.get(1)["log_offset"] == len(b"first\n")
+
+
+async def test_a_slow_desktop_does_not_block_other_vnc_connects():
+    import contextlib as cl
+
+    from anywhere.desktop import VncTunnels
+
+    gate = asyncio.Event()
+
+    class Slow:
+        @cl.asynccontextmanager
+        async def tunnel(self, port):
+            await gate.wait()
+            yield 1
+
+    class Fast:
+        @cl.asynccontextmanager
+        async def tunnel(self, port):
+            yield 2
+
+    t = VncTunnels()
+    slow = asyncio.create_task(t.port_for(1, Slow()))
+    await asyncio.sleep(0)
+    assert await asyncio.wait_for(t.port_for(2, Fast()), 1) == 2
+    gate.set()
+    assert await slow == 1

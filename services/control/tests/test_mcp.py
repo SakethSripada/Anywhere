@@ -357,6 +357,10 @@ def _png(width=1920, height=1080) -> bytes:
     return buf.getvalue()
 
 
+async def _no_tunnel(self, workload_id, remote):
+    return 0
+
+
 async def test_screenshots_of_running_desktops(h, monkeypatch):
     h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
     h.store.add(id=12, owner=ALICE, status="stopped", conversationId=1)
@@ -367,17 +371,20 @@ async def test_screenshots_of_running_desktops(h, monkeypatch):
             return _png()
 
     @asynccontextmanager
-    async def connect(remote, token):
+    async def connect(remote, token, port=None):
         calls.append(token)
         yield Screen()
 
     monkeypatch.setattr(desktop_module, "connect_screen", connect)
+    monkeypatch.setattr(desktop_module.TunnelPool, "port_for", _no_tunnel)
     async with h.running(), h.client(h.token(scopes=("read",))) as c:
         shot = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
         assert not shot.is_error, text(shot)
         (image,) = shot.content
         assert image.mime_type == "image/jpeg"
         assert PILImage.open(io.BytesIO(base64.b64decode(image.data))).width == 1280
+        again = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
+        assert not again.is_error  # served from the short frame cache
         stopped = await c.call_tool("get_desktop_screenshot", {"workload_id": 12})
         assert stopped.is_error and "running desktop" in text(stopped)
     assert len(calls) == 1
@@ -387,11 +394,12 @@ async def test_unreachable_desktops_fail_politely(h, monkeypatch):
     h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
 
     @asynccontextmanager
-    async def connect(remote, token):
+    async def connect(remote, token, port=None):
         raise OSError("ssh: connect to host 10.0.0.7 port 22: Connection refused")
         yield
 
     monkeypatch.setattr(desktop_module, "connect_screen", connect)
+    monkeypatch.setattr(desktop_module.TunnelPool, "port_for", _no_tunnel)
     async with h.running(), h.client(h.token()) as c:
         shot = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
     assert shot.is_error and "Couldn't reach the desktop" in text(shot) and "10.0.0.7" not in text(shot)

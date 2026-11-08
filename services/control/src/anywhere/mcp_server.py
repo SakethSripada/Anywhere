@@ -36,7 +36,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
-from . import budget, desktop
+from . import budget
 from .core import ActionError, Anywhere
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
@@ -466,9 +466,11 @@ def build_server() -> MCPServer:
             if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
                 raise ActionError("Screenshots need a running desktop")
             try:
-                async with desktop.connect_screen(app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))) as sc:
-                    png = await asyncio.wait_for(sc.screenshot(), 20)
-                frame = await asyncio.to_thread(desktop.prepare_frame, png)
+                # Pooled tunnel, a few seconds of frame reuse, and one capture shared
+                # by concurrent callers (agents are told to poll this).
+                frame = await app.supervisor.shots.frame(
+                    int(w["id"]), app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))
+                )
             except TimeoutError:
                 raise
             except Exception as exc:
