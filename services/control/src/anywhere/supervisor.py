@@ -521,12 +521,29 @@ class Supervisor:
 
     # ── Accounting & guard ────────────────────────────────────────────────
 
-    def _accrued(self, w: dict) -> int:
+    def _segment(self, w: dict) -> tuple[datetime | None, int]:
+        """Start and already-billed base of the current billing segment.
+
+        The vault holds the precise values, but it is a local file. If it was lost
+        (say, a redeploy without its volume), fall back to SpacetimeDB's `startedAt`,
+        which the transition reducer sets whenever billing starts, so accrual and the
+        session limit keep working instead of silently stopping.
+        """
         v = self.vault.get(w["id"])
-        start = v.get("segment_start")
-        if not start or w["status"] not in BILLABLE:
+        if start := v.get("segment_start"):
+            return datetime.fromisoformat(start), int(v.get("segment_base", 0))
+        started = w.get("startedAt")
+        if w["status"] in BILLABLE and isinstance(started, datetime):
+            self.vault.update(w["id"], segment_start=started.isoformat(), segment_base=int(v.get("segment_base", 0)))
+            return started, int(v.get("segment_base", 0))
+        return None, 0
+
+    def _accrued(self, w: dict) -> int:
+        start, base = self._segment(w)
+        if start is None or w["status"] not in BILLABLE:
             return int(w.get("accruedCents", 0))
-        return budget.accrued_cents(datetime.fromisoformat(start), int(w["hourlyCents"]), int(v.get("segment_base", 0)))
+        # Spend is monotonic: never report less than SpacetimeDB already recorded.
+        return max(budget.accrued_cents(start, int(w["hourlyCents"]), base), int(w.get("accruedCents", 0)))
 
     async def _settle_usage(self, w: dict) -> None:
         cents = self._accrued(w)
@@ -577,8 +594,8 @@ class Supervisor:
             if self.busy(w["id"]):
                 continue
             acct = accounts.get(w["owner"], {})
-            start = self.vault.get(w["id"]).get("segment_start")
-            hours = (_now() - datetime.fromisoformat(start)).total_seconds() / 3600 if start else 0
+            start, _ = self._segment(w)
+            hours = (_now() - start).total_seconds() / 3600 if start else 0
             last = w.get("lastActiveAt")
             idle = (_now() - last).total_seconds() / 60 if last and not self.agent_running(w["id"]) else None
             action = budget.guard(
