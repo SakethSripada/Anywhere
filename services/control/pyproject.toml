@@ -19,8 +19,12 @@ dependencies = [
   "pyyaml>=6",
   "pillow>=11",
   "cua-sandbox>=0.9.1",
+  # cua-sandbox 0.9.1 calls cua.embedded(fleet_from_env=...), which cua removed in 0.6.0;
+  # with a newer cua every Sandbox.connect() raises TypeError. 0.5.0 shipped alongside it.
+  "cua>=0.5.0,<0.6",
   "langgraph-checkpoint-sqlite>=3.1",
   "aiosqlite>=0.21",
+  "mcp>=2.3,<3",
 ]
 
 [project.scripts]

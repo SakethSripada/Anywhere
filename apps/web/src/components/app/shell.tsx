@@ -1,22 +1,22 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, ViewTransition, type ReactNode } from "react";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useAccount } from "@/lib/data";
 import { useSession } from "@/lib/stdb";
-import { MobileNavProvider } from "./mobile-nav";
 import { Onboarding } from "./onboarding";
-import { Sidebar } from "./sidebar";
+import { AppSidebar } from "./sidebar";
 
 export function Shell({ children }: { children: ReactNode }) {
   const session = useSession();
   const { account, ready } = useAccount();
   const router = useRouter();
 
-  // ⌘⇧O / Ctrl+Shift+O starts a new chat, as in ChatGPT.
+  // ⌘K / Ctrl+K starts a new task from anywhere.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         router.push("/");
       }
@@ -30,13 +30,13 @@ export function Shell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <MobileNavProvider sidebar={(close) => <Sidebar onNavigate={close} />}>
-      <div className="flex h-full">
-        <aside className="hidden w-[260px] shrink-0 border-r border-sidebar-border md:block">
-          <Sidebar />
-        </aside>
-        <main className="flex min-w-0 flex-1 flex-col bg-background">{children}</main>
-      </div>
-    </MobileNavProvider>
+    <SidebarProvider className="h-full min-h-0">
+      <AppSidebar />
+      <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
+        <ViewTransition name="page">
+          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+        </ViewTransition>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }

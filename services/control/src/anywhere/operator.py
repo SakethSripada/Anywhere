@@ -182,7 +182,18 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
             log.warning("operator.action_failed", action=action.action, error=str(exc))
 
         await record(
-            "act", label, json.dumps({"thought": action.thought, **_public(action), "outcome": outcome[:500]}), None
+            "act",
+            label,
+            json.dumps(
+                {
+                    "thought": action.thought,
+                    **_public(action),
+                    "outcome": outcome[:500],
+                    # Coordinates are in screenshot space; the browser maps them onto the stream.
+                    "frame": [meta["w"], meta["h"]],
+                }
+            ),
+            None,
         )
         history = [*state.get("history", []), f"{label} → {outcome[:160]}"]
         status = "running" if step < max_steps else "failed"

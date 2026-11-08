@@ -894,6 +894,12 @@ export const workerWorkloads = spacetimedb.view(
   (ctx) => (isWorker(ctx) ? [...ctx.db.workload.iter()] : []),
 );
 
+export const workerConversations = spacetimedb.view(
+  { name: "worker_conversations", public: true },
+  t.array(conversation.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.conversation.iter()] : []),
+);
+
 export const workerAccounts = spacetimedb.view(
   { name: "worker_accounts", public: true },
   t.array(account.rowType),
@@ -942,4 +948,10 @@ export const workerAgentRuns = spacetimedb.view(
   { name: "worker_agent_runs", public: true },
   t.array(agentRun.rowType),
   (ctx) => (isWorker(ctx) ? [...ctx.db.agentRun.iter()] : []),
+);
+
+export const workerAgentSteps = spacetimedb.view(
+  { name: "worker_agent_steps", public: true },
+  t.array(agentStep.rowType),
+  (ctx) => (isWorker(ctx) ? [...ctx.db.agentStep.iter()] : []),
 );

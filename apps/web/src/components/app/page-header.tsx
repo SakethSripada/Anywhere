@@ -1,14 +1,16 @@
 import type { ReactNode } from "react";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { MobileNavTrigger } from "./mobile-nav";
 
-/** The 52px bar at the top of every screen: title on the left, actions on the right. */
+/** The 48px bar at the top of every screen. */
 export function PageHeader({ title, children, className, leading }: { title: ReactNode; children?: ReactNode; className?: string; leading?: ReactNode }) {
   return (
-    <header className={cn("flex h-13 shrink-0 items-center gap-2 px-3 sm:px-4", className)}>
+    <header className={cn("flex h-12 shrink-0 items-center gap-2 border-b px-3", className)}>
       <MobileNavTrigger />
+      <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
       {leading}
-      <div className="min-w-0 flex-1 truncate text-[15px] font-medium">{title}</div>
+      <div className="min-w-0 flex-1 truncate text-sm font-medium">{title}</div>
       <div className="flex shrink-0 items-center gap-1.5">{children}</div>
     </header>
   );

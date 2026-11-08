@@ -14,6 +14,7 @@ import { useAccount, useMonthSpend, useNow } from "@/lib/data";
 import { cents, ms } from "@/lib/format";
 import { reducers, tables, useReducer, useSession, useTable } from "@/lib/stdb";
 import { cn } from "@/lib/utils";
+import { AgentAccess } from "./agent-access";
 import { PageHeader } from "./page-header";
 
 export function SettingsView() {
@@ -24,15 +25,16 @@ export function SettingsView() {
         <Profile />
         <Spending />
         <Messaging />
+        <AgentAccess Section={Section} />
         <Integrations />
       </div>
     </div>
   );
 }
 
-function Section({ title, description, children, footer }: { title: string; description: string; children: ReactNode; footer?: ReactNode }) {
+function Section({ id, title, description, children, footer }: { id?: string; title: string; description: string; children: ReactNode; footer?: ReactNode }) {
   return (
-    <section className="overflow-hidden rounded-xl border">
+    <section id={id} className="scroll-mt-6 overflow-hidden rounded-xl border bg-card">
       <div className="p-5">
         <h2 className="text-[15px] font-semibold tracking-tight">{title}</h2>
         <p className="mt-1 text-[13px] text-muted-foreground">{description}</p>
@@ -132,6 +134,7 @@ function Spending() {
 
   return (
     <Section
+      id="spending"
       title="Compute and spending"
       description="Anywhere never spends past your monthly cap, and asks before anything that could cost more than your auto-approve limit."
       footer={

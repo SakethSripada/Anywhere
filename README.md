@@ -92,15 +92,16 @@ What the control plane does:
 | Deterministic planner, catalog, cost estimate, plan card | **Verified** | Driven with a structured intent; planner and budget have unit tests |
 | Approve → supervisor launch → cleanup on failure | **Verified** | With no Brev key: refused, cleaned up, user told why |
 | Boot progress, live cost ticker, workload/desktop pages | **Verified** | Lifecycle stepped through real reducers |
-| Budget policy, lifecycle mirror, supervisor guard and cleanup | **Tested** | 63 pytest tests |
+| Budget policy, lifecycle mirror, supervisor guard and cleanup | **Tested** | 88 pytest tests |
 | Nemotron intent extraction and agent tools | Built | Needs `NVIDIA_API_KEY` |
 | Brev provisioning, stop/resume, reconcile | Built | Needs `BREV_API_KEY` and approval before spending credits |
 | Desktop on Brev (Cua Linux image, Blender, x11vnc/websockify) | Built | Not yet run on a Brev GPU. Xvfb has no hardware GL, so viewport rendering is software and Cycles renders use the GPU via CUDA/OptiX |
-| Cua computer-use operator | **Tested** | Fakes for screen and model; not yet run on a live desktop |
+| Cua computer-use operator | **Tested** | Fakes for screen and model. The screen adapter and `desktop-start.sh` were run against the real `ghcr.io/trycua/linux:24.04` container locally (screenshots, input, shell, noVNC), without a GPU |
 | noVNC stream through the ticketed proxy | Built | Needs a running desktop |
 | S3 projects, uploads, artifacts | Built | Needs bucket credentials (R2 recommended) |
 | LoRA/QLoRA training job, metrics, artifacts | **Tested** | Config and dataset inspection tested; GPU run pending |
 | Photon iMessage bridge (inbound, outbound, linking) | Built | Typechecks; needs a Photon project |
+| MCP server for external agents: OAuth, scoped tokens, agent history, screenshots | **Verified** | 38 pytest tests over real HTTP with the SDK client; the full OAuth sign-in and tool calls were run against a local SpacetimeDB |
 | Docker images and Compose | **Verified** | Images build locally |
 
 **Not supported yet:** Windows-only apps (Roblox Studio and others), Unity/Unreal (Linux builds are untested), inference/API deployment, render farms, multi-GPU jobs, and providers other than Brev.
@@ -109,7 +110,7 @@ What the control plane does:
 
 ## Running locally
 
-Prerequisites: Node 22 with pnpm 10, Python 3.13 with [uv](https://docs.astral.sh/uv/), and Docker.
+Prerequisites: Node 22.12 or newer with pnpm 10 (older Node can't load Tailwind's dev build), Python 3.13 with [uv](https://docs.astral.sh/uv/), and Docker.
 
 ```bash
 pnpm install
@@ -148,7 +149,37 @@ cp apps/web/.env.example apps/web/.env.local && pnpm dev:web
 
 Open http://localhost:3001. In development with no `INVITE_CODE` set, any invite code works.
 
-**4. (Optional) iMessage bridge.** Fill in `services/messaging/.env`, then run:
+**4. Check the integrations.** `anywhere doctor` tests every integration with the configured environment and prints a checklist. Anything without credentials shows `--` ("not configured") instead of failing, and the command exits 1 if any check fails:
+
+```bash
+cd services/control && uv run anywhere doctor          # add --quick to skip the 1-token model calls and the storage round trip
+```
+
+```
+Anywhere doctor
+
+  [  ok] SpacetimeDB worker      http://127.0.0.1:3100/anywhere: identity 0xc200c25d29fa… is a worker; 4 workloads visible
+  [  ok] Nemotron planner model  nvidia/nemotron-3-super-120b-a12b answered a 1-token request
+  [  ok] Nemotron vision model   nvidia/nemotron-3.5-super-vl-120b-a12b answered a 1-token request
+  [FAIL] NVIDIA Brev CLI         authentication failed: brev ls failed: Your API key is invalid or has expired…
+  [  --] Object storage (S3)     set S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+  [  --] Photon Spectrum         set SPECTRUM_PROJECT_ID and SPECTRUM_PROJECT_SECRET
+  [info] Provisioning mode       disabled: plans are made but nothing is sent to Brev
+  [info] Budget limits           global $50.00, 1 concurrent instance(s), 4 h max session, desktops stop after 20 idle min
+
+3 ok, 0 warning(s), 1 failed, 2 not configured
+```
+
+What each line checks:
+- **SpacetimeDB:** the worker views are readable and the token's identity is in the `worker` table. It uses a worker-only reducer that writes nothing.
+- **Nemotron:** both model ids are in the `integrate.api.nvidia.com` catalog, and each one answers a 1-token request with your key.
+- **Brev:** the CLI is on `PATH` and `brev ls --json` succeeds with `BREV_API_KEY`.
+- **Storage:** the bucket answers a head request, and a presigned PUT/GET round trip succeeds. The test object is deleted afterwards.
+- **Photon:** `GET /projects/{id}/` succeeds with your project credentials.
+
+`GET /health` reports the same readiness, using the read-only subset of these checks refreshed every 5 minutes. `integrations[x]` is true only when `x` is configured and its latest check passed, and `checks[x]` gives the status and reason.
+
+**5. (Optional) iMessage bridge.** Fill in `services/messaging/.env`, then run:
 
 ```bash
 pnpm --filter @anywhere/messaging dev
@@ -170,6 +201,42 @@ pnpm -r typecheck && pnpm --filter web lint
 
 ---
 
+## Using Anywhere from Claude and other agents (MCP)
+
+The control plane is also an [MCP](https://modelcontextprotocol.io) server at `/mcp` (`https://$DOMAIN/api/mcp` behind Caddy, `http://localhost:8000/mcp` locally). Any MCP client that speaks Streamable HTTP can plan, run and operate machines with it. There are two ways to connect:
+
+- **OAuth (claude.ai connectors, Claude Code, anything that supports MCP auth).** Give the client just the server URL. It discovers the sign-in endpoints, registers itself, and opens Anywhere's `/connect` page, where you choose what it may do. Spend starts unticked. For example:
+  ```bash
+  claude mcp add --transport http anywhere http://localhost:8000/mcp   # then /mcp → Authenticate
+  ```
+- **Personal token (any client that can send a header).** In **Settings → Agents**, create a token and choose its permissions. It's shown once.
+  ```bash
+  claude mcp add --transport http anywhere https://$DOMAIN/api/mcp \
+    --header "Authorization: Bearer awmcp_…"
+  ```
+
+| Permission | Tools |
+|---|---|
+| `read` | `get_account`, `get_catalog`, `list_workloads`, `get_workload` (status, spend and the desktop agent's latest steps), `get_desktop_screenshot` |
+| `plan` | `propose_workload`, `cancel_plan` |
+| `control` | `stop_workload`, `save_project`, `delete_workload` (needs `confirm: true`), `operate_desktop`, `stop_desktop_agent` |
+| `spend` | `approve_workload`, `resume_desktop` |
+
+New tokens get `read`, `plan` and `control`. **Without `spend`, an agent can't start anything that bills:** its plans skip your auto-approve threshold and wait for you to approve them in the web app. Every plan and action an agent takes shows up in an "Agent: <name>" conversation. Connected OAuth apps and tokens are listed in Settings → Agents and can be revoked there.
+
+How it's secured:
+- Personal tokens are bound to one account and stored only as SHA-256 hashes in the control plane's vault. They expire (90 days by default, at most `MCP_MAX_TOKEN_DAYS`). Revoking one takes effect on the next request, and so does deactivating the account.
+- OAuth follows the MCP authorization spec: protected-resource metadata (RFC 9728), authorization-server metadata (RFC 8414), dynamic client registration, and PKCE (S256 only). Redirect URIs must be HTTPS or loopback HTTP. Codes are single use and last 5 minutes. Access tokens last 1 hour. Refresh tokens last 30 days and rotate on every use. Codes and tokens are stored only as hashes. Users can narrow the requested permissions but never widen them. Disconnecting an app ends all of its tokens at once.
+- The `/connect` consent page refuses to be framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), and approving needs the browser's SpacetimeDB identity, so there is no cookie to forge.
+- Tokens can only be created, listed or revoked with a browser identity, so an MCP token can't mint more tokens.
+- The server runs stateless, so every request is authenticated on its own. Requests with a foreign `Origin` are refused (DNS rebinding and CSRF), bodies are capped at 256 KB, and each token is rate-limited per permission.
+- Tool calls go through the same `Anywhere` methods as the web app, so ownership, lifecycle and budget rules apply unchanged. Calls are capped at 45 s, and errors come back as short messages without internals. Details go to the server log.
+- `MCP_ENABLED=false` turns the endpoint off, and `MCP_OAUTH_ENABLED=false` turns off OAuth only. An unusable `PUBLIC_API_URL` (plain HTTP on a non-loopback host) turns OAuth off with a warning, and tokens keep working.
+
+MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a current frame instead, and `web_url` links to the live view.
+
+---
+
 ## Environment variables
 
 `deploy/.env.example` lists every option. The main ones:
@@ -183,11 +250,13 @@ pnpm -r typecheck && pnpm --filter web lint
 | `PROVISIONING_MODE` | control | `disabled` (default), `dry_run`, or `live` |
 | `GLOBAL_BUDGET_CENTS`, `MAX_CONCURRENT_INSTANCES`, `MAX_SESSION_HOURS`, `DESKTOP_IDLE_MINUTES` | control | Platform guardrails |
 | `INVITE_CODE` | control | Required to activate accounts outside development |
-| `NVIDIA_API_KEY`, `PLANNER_MODEL`, `VISION_MODEL` | control | Nemotron on build.nvidia.com |
-| `BREV_API_KEY` | control | Brev CLI authentication |
-| `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | control | Durable storage for projects, datasets and outputs |
+| `NVIDIA_API_KEY`, `PLANNER_MODEL`, `VISION_MODEL` | control | Nemotron on build.nvidia.com. Defaults: `nvidia/nemotron-3-super-120b-a12b` (agent, tool calling) and `nvidia/nemotron-3.5-super-vl-120b-a12b` (desktop operator, image input) |
+| `BREV_API_KEY` | control | Brev org API key (`bak-…`). The CLI reads it from the environment, so no `brev login` is needed |
+| `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | control | Durable storage for projects, datasets and outputs. For R2, use `https://<account>.r2.cloudflarestorage.com` with region `auto`. For AWS, leave the endpoint empty and set the real region. Browser uploads need a bucket CORS rule that allows `PUT` from the web origin |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | control, bridge | Photon project |
 | `MESSAGING_BRIDGE_SECRET` | control, bridge | Shared secret for `/v1/bridge/inbound` |
+| `MCP_ENABLED`, `MCP_OAUTH_ENABLED`, `MCP_MAX_TOKENS_PER_ACCOUNT`, `MCP_MAX_TOKEN_DAYS` | control | MCP server and OAuth switches, token limits |
+| `PUBLIC_API_URL` | control | Where clients reach the control plane; the OAuth issuer (`https://$DOMAIN/api` in Compose) |
 
 ---
 
@@ -210,9 +279,9 @@ pnpm -r typecheck && pnpm --filter web lint
    docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
    # add --profile messaging once Photon is configured
    ```
-5. Authenticate Brev inside the control container once. Its state persists in the `brev_home` volume:
+5. Check the deployment from inside the control container. Brev needs no login step, because the CLI reads `BREV_API_KEY` from the environment:
    ```bash
-   docker compose -f deploy/docker-compose.yml exec control brev login --token "$BREV_API_KEY"
+   docker compose -f deploy/docker-compose.yml exec control anywhere doctor
    ```
 
 ### Object storage (R2)

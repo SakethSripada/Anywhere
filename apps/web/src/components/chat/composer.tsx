@@ -108,7 +108,7 @@ export const Composer = forwardRef<
 
   return (
     <div
-      className="w-full rounded-[26px] border bg-background shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_16px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-foreground/20 focus-within:shadow-[0_1px_2px_rgba(0,0,0,0.05),0_8px_24px_rgba(0,0,0,0.06)] dark:bg-card dark:shadow-none"
+      className="w-full rounded-2xl border bg-card transition-[border-color,box-shadow] focus-within:border-foreground/25"
       onDragOver={(e) => allowAttachments && e.preventDefault()}
       onDrop={(e) => {
         if (!allowAttachments) return;
@@ -134,7 +134,7 @@ export const Composer = forwardRef<
         placeholder={placeholder}
         aria-label="Message"
         className={cn(
-          "block w-full resize-none bg-transparent px-5 text-[15px] leading-6 outline-none placeholder:text-muted-foreground",
+          "block w-full resize-none bg-transparent px-4 text-[15px] leading-6 outline-none placeholder:text-muted-foreground",
           compact ? "min-h-11 pt-3" : "min-h-14 pt-4",
         )}
       />
@@ -170,7 +170,7 @@ export const Composer = forwardRef<
           onClick={() => void send()}
           disabled={!canSend && !busy}
           aria-label={busy && !text ? "Agent is working" : "Send"}
-          className="ml-auto size-8 rounded-full"
+          className="ml-auto size-8 rounded-lg"
         >
           {busy && !text.trim() ? <Square className="size-3 fill-current" /> : <ArrowUp className="size-4" />}
         </Button>

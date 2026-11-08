@@ -17,6 +17,7 @@ from .brev import BrevCLI
 from .catalog import Catalog
 from .config import Settings
 from .desktop import connect_screen
+from .doctor import Readiness
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
 from .operator import build_operator
@@ -46,7 +47,9 @@ class Anywhere:
     catalog: Catalog = field(default_factory=Catalog)
 
     def __post_init__(self) -> None:
+        self.readiness = Readiness(self.settings)
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
+        self.supervisor.integrations = self.readiness.integrations
         #: Serialises "check the budget and concurrency cap, then start a machine" so
         #: two approvals (or an auto-approve racing a manual one) can't both pass.
         self._admission = asyncio.Lock()
@@ -114,9 +117,18 @@ class Anywhere:
                 self.catalog.mark_checked()
 
     async def propose(
-        self, owner: str, conversation_id: int, intent: Intent, dataset_upload_id: int | None = None
+        self,
+        owner: str,
+        conversation_id: int,
+        intent: Intent,
+        dataset_upload_id: int | None = None,
+        *,
+        auto_approve: bool = True,
     ) -> dict:
-        """Validate an intent into a plan, check policy, and record it as a workload awaiting approval."""
+        """Validate an intent into a plan, check policy, and record it as a workload awaiting approval.
+
+        `auto_approve=False` keeps the plan waiting even under the user's auto-approve threshold
+        (used for callers, like MCP tokens, that aren't trusted to spend on their own)."""
         acct = await self.account(owner)
         await self.refresh_prices()
 
@@ -190,7 +202,7 @@ class Anywhere:
         )
         await self.store.append_message(conversation_id, "assistant", "plan", result.title, wid, "system")
 
-        auto = decision.allowed and not decision.requires_approval
+        auto = auto_approve and decision.allowed and not decision.requires_approval
         if auto:
             await self.approve(owner, wid)
         return {
@@ -200,6 +212,45 @@ class Anywhere:
             "allowed": decision.allowed,
             "blockers": decision.blockers,
             "auto_approved": auto,
+        }
+
+    async def plan_direct(
+        self, owner: str, intent: Intent, *, conversation_id: int | None, upload_id: int | None, note: str | None = None
+    ) -> dict:
+        """Plan without the language model (template launcher). Same `propose`
+        path as the agent's tool, so validation and budget policy are identical,
+        and the exchange is written into the conversation like a chat turn."""
+        await self.account(owner)
+        cid = conversation_id
+        if cid:
+            if not await self.store.conversation_owned(cid, owner):
+                raise ActionError("Conversation not found")
+        else:
+            cid = new_id()
+            await self.store.upsert_conversation(cid, owner, _title(intent.summary), "web")
+        await self.store.append_message(cid, "user", "text", describe_intent(intent, upload_id, note), 0, "web")
+        try:
+            result = await self.propose(owner, cid, intent, upload_id)
+        except ActionError as exc:
+            result = {"ok": False, "message": str(exc)}
+        if result.get("ok"):
+            message = result["summary"]
+            if result.get("auto_approved"):
+                message += " It's within your auto-approve limit, so I've started it."
+            elif not result.get("allowed", True):
+                message += " It can't start yet: " + " ".join(result.get("blockers") or [])
+            else:
+                message += " Approve the plan to start it."
+        else:
+            message = result.get("message") or "I couldn't plan that."
+            if result.get("suggestion"):
+                message += " " + result["suggestion"]
+        await self.store.append_message(cid, "assistant", "text", message, int(result.get("workload_id") or 0), "web")
+        return {
+            "conversation_id": cid,
+            "workload_id": result.get("workload_id"),
+            "ok": bool(result.get("ok")),
+            "message": message,
         }
 
     async def approve(self, owner: str, workload_id: int) -> dict:
@@ -363,6 +414,33 @@ class Anywhere:
             upload_id,
             {"owner": owner, "key": key, "name": name, "size": size, "profile": profile.model_dump(by_alias=True)},
         )
+
+
+def describe_intent(intent: Intent, upload_id: int | None = None, note: str | None = None) -> str:
+    """The user-side line recorded for a template launch."""
+    if intent.kind == "desktop":
+        app = intent.application or "terminal"
+        text = f"Set up a {app.title() if app != 'vscode' else 'VS Code'} desktop"
+        if intent.session_hours:
+            text += f" for about {intent.session_hours:g} hours"
+    else:
+        size = f"{intent.model_params_billions:g}B " if intent.model_params_billions else ""
+        text = f"Fine-tune a {size}model"
+        if intent.epochs:
+            text += f" for {intent.epochs} epoch{'s' if intent.epochs != 1 else ''}"
+        if upload_id:
+            text += f" on dataset upload {upload_id}"
+    if intent.preference and intent.preference != "balanced":
+        text += f" ({intent.preference})"
+    text += "."
+    if note and note.strip():
+        text += f" {note.strip()}"
+    return text
+
+
+def _title(text: str) -> str:
+    line = (text.strip().splitlines() or ["New chat"])[0]
+    return line[:60] + ("…" if len(line) > 60 else "")
 
 
 def _plan_summary(p: Plan) -> str:

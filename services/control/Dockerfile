@@ -23,15 +23,11 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
-# ~/.brev is a named volume in deploy/docker-compose.yml. Docker initialises a new
-# named volume from the image's directory (contents and ownership), so it must exist
-# here and belong to `anywhere`; otherwise the volume is root-owned and the Brev CLI
-# can't write its login or SSH config. ~/.ssh gets the Include that `brev refresh` adds.
+# Pre-create the mount points so the named volumes inherit this ownership
+# (otherwise Docker creates ~/.brev root-owned and `brev refresh` can't write it).
 RUN useradd --create-home --uid 10001 anywhere \
  && mkdir -p /data /home/anywhere/.brev /home/anywhere/.ssh \
- && chown anywhere /data \
- && chown anywhere:anywhere /home/anywhere/.brev /home/anywhere/.ssh \
- && chmod 700 /home/anywhere/.ssh
+ && chown anywhere /data /home/anywhere/.brev /home/anywhere/.ssh && chmod 700 /home/anywhere/.ssh
 USER anywhere
 ENV PATH="/app/.venv/bin:$PATH" DATA_DIR=/data ENVIRONMENT=production
 EXPOSE 8000

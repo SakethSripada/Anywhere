@@ -38,7 +38,8 @@ if ! $DOCKER container inspect "$NAME" >/dev/null 2>&1; then
     --shm-size=2g \
     -p 127.0.0.1:3211:3211 -p 127.0.0.1:6080:6080 \
     -v "$ROOT/projects:/projects" \
-    "$IMAGE"
+    "$IMAGE" >/dev/null \
+    || { echo "::error:: Docker could not start the desktop with GPU access (is the NVIDIA Container Toolkit installed?)"; exit 1; }
 fi
 
 if ! $DOCKER exec "$NAME" test -f /opt/.anywhere-ready; then
@@ -56,6 +57,7 @@ if ! $DOCKER exec "$NAME" test -f /opt/.anywhere-ready; then
   "
 fi
 
-$DOCKER exec "$NAME" sh -lc 'ln -sfn /projects "$HOME/Projects"' || true
+# ~/Projects for root and for the image's desktop user (Cua's shell runs as that user).
+$DOCKER exec -u root "$NAME" sh -c 'for h in /root /home/*; do [ -d "$h" ] && ln -sfn /projects "$h/Projects"; done' || true
 touch "$ROOT/state/setup-complete"
 step "Desktop environment installed"

@@ -18,8 +18,8 @@ export type Status =
 export type Tone = "ok" | "busy" | "wait" | "bad" | "idle" | "accent";
 
 export const STATUS: Record<Status, { label: string; tone: Tone; live?: boolean }> = {
-  planned: { label: "Awaiting approval", tone: "wait" },
-  approved: { label: "Queued", tone: "busy", live: true },
+  planned: { label: "Needs approval", tone: "wait" },
+  approved: { label: "Starting", tone: "busy", live: true },
   provisioning: { label: "Provisioning", tone: "busy", live: true },
   configuring: { label: "Setting up", tone: "busy", live: true },
   running: { label: "Running", tone: "ok", live: true },

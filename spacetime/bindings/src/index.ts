@@ -247,6 +247,7 @@ const tablesSchema = __schema({
 
   workerWorkloads: __table({ name: "worker_workloads", indexes: [], constraints: [] }, WorkloadRow),
   workerAccounts: __table({ name: "worker_accounts", indexes: [], constraints: [] }, AccountRow),
+  workerConversations: __table({ name: "worker_conversations", indexes: [], constraints: [] }, ConversationRow),
   workerHandles: __table({ name: "worker_handles", indexes: [], constraints: [] }, LinkedHandleRow),
   workerOutbox: __table({ name: "worker_outbox", indexes: [], constraints: [] }, NotificationRow),
   workerEvents: __table({ name: "worker_events", indexes: [], constraints: [] }, WorkloadEventRow),
@@ -254,6 +255,7 @@ const tablesSchema = __schema({
   workerMetrics: __table({ name: "worker_metrics", indexes: [], constraints: [] }, MetricPointRow),
   workerArtifacts: __table({ name: "worker_artifacts", indexes: [], constraints: [] }, ArtifactRow),
   workerAgentRuns: __table({ name: "worker_agent_runs", indexes: [], constraints: [] }, AgentRunRow),
+  workerAgentSteps: __table({ name: "worker_agent_steps", indexes: [], constraints: [] }, AgentStepRow),
 });
 
 /* ── Reducers ──────────────────────────────────────────────────────────── */
