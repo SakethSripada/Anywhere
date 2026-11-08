@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,17 @@ class Vault:
     def section_size(self, section: str) -> int:
         with self._lock:
             return len(self._data.get(section, {}))
+
+    def purge_records(self, section: str, stale: Callable[[dict[str, Any]], bool]) -> int:
+        """Delete every record in `section` that `stale` says is done with, in one write."""
+        with self._lock:
+            entries = self._data.get(section, {})
+            gone = [k for k, v in entries.items() if stale(v)]
+            for key in gone:
+                del entries[key]
+            if gone:
+                self._flush()
+            return len(gone)
 
     def drop_grant(self, grant_id: int) -> bool:
         """Remove an OAuth grant and every token issued under it."""

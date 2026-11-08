@@ -35,6 +35,9 @@ log = structlog.get_logger()
 
 
 #: A .blend path relative to ~/Projects: plain names and folders only (no quotes, no `..`).
+#: How long the public watch page's database reads are shared between viewers.
+WATCH_CACHE_SECONDS = 2.0
+
 SAFE_PATH = re.compile(r"^[\w .@+-]+(/[\w .@+-]+)*\.blend$")
 
 
@@ -76,7 +79,11 @@ class Anywhere:
                 if attachment:
                     # The outbox row only carries text; the bridge asks for the picture by id.
                     name = attachment.rsplit("/", 1)[-1]
-                    self.vault.section_put("notification_attachments", str(nid), {"key": attachment, "name": name})
+                    self.vault.section_put(
+                        "notification_attachments",
+                        str(nid),
+                        {"key": attachment, "name": name, "at": datetime.now(UTC).isoformat()},
+                    )
                 await self.store.enqueue_notification(nid, w["owner"], "imessage", handle, body)
         except Exception as exc:
             log.warning("notify.imessage_failed", error=str(exc))
@@ -676,13 +683,28 @@ class Anywhere:
         if not frames:
             raise ActionError("This run has no screenshots to make a timelapse from")
         key = Storage.artifact_key(owner, workload_id, f"agent-{run_id}-timelapse.gif")
-        if not await self.storage.head(key):
-            images = [await self.storage.get_bytes(f["key"]) for f in frames]
-            gif = await asyncio.to_thread(replay.timelapse_gif, images, frames, run["goal"])
-            await self.storage.put_bytes(key, gif, "image/gif")
-            await self.store.add_artifact(
-                new_id(), workload_id, f"Agent timelapse: {run['goal'][:60]}", key, "image/gif", len(gif)
-            )
+        # One render per GIF: a double click used to build (and list) it twice.
+        locks: dict[str, asyncio.Lock] = self.__dict__.setdefault("_gif_locks", {})
+        lock = locks.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                if not await self.storage.head(key):
+                    # Download the screenshots in parallel (a few at a time), not one by one.
+                    gate = asyncio.Semaphore(8)
+
+                    async def fetch(k: str) -> bytes:
+                        async with gate:
+                            return await self.storage.get_bytes(k)
+
+                    images = list(await asyncio.gather(*(fetch(f["key"]) for f in frames)))
+                    gif = await asyncio.to_thread(replay.timelapse_gif, images, frames, run["goal"])
+                    await self.storage.put_bytes(key, gif, "image/gif")
+                    await self.store.add_artifact(
+                        new_id(), workload_id, f"Agent timelapse: {run['goal'][:60]}", key, "image/gif", len(gif)
+                    )
+        finally:
+            if not lock.locked() and locks.get(key) is lock:
+                locks.pop(key, None)
         return {
             "url": self.storage.presign_get(key, expires=3600, filename=f"anywhere-agent-{run_id}.gif"),
             "frames": len(frames),
@@ -745,7 +767,26 @@ class Anywhere:
         return rec, w
 
     async def watch_view(self, token: str) -> dict:
-        """What someone with a watch link may see: the desktop's state and the agent's steps."""
+        """What someone with a watch link may see: the desktop's state and the agent's steps.
+
+        Every viewer polls this every couple of seconds; the link is checked on each call
+        (in memory), but the database reads behind it are shared for WATCH_CACHE_SECONDS."""
+        digest = sharing.digest(token)
+        rec = self.vault.section_get(sharing.SECTION, digest)
+        if not sharing.live(rec):
+            raise ActionError("This watch link has expired or was turned off")
+        cache: dict[str, tuple[float, dict]] = self.__dict__.setdefault("_watch_cache", {})
+        now = asyncio.get_running_loop().time()
+        hit = cache.get(digest)
+        if hit and now - hit[0] < WATCH_CACHE_SECONDS:
+            return hit[1]
+        for key in [k for k, (at, _) in cache.items() if now - at >= WATCH_CACHE_SECONDS]:
+            del cache[key]
+        view = await self._watch_view(token)
+        cache[digest] = (now, view)
+        return view
+
+    async def _watch_view(self, token: str) -> dict:
         rec, w = await self.watched(token)
         agent = None
         runs = await self.store.agent_runs(int(w["id"]))

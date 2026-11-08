@@ -23,20 +23,20 @@ import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from . import budget, savings
+from . import budget, savings, sharing
 from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
 from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
-from .remote import Remote, RemoteError
+from .remote import Remote, RemoteError, end_process
 from .stdb import ReducerRejected
 from .storage import Storage, StorageUnavailable
 from .store import Store
@@ -49,6 +49,8 @@ JOB_DIR = "~/workspace/anywhere/job"
 #: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
 STARTING_POLL_LIMIT = 6
 #: How often the guard looks for orphaned Brev instances.
+#: Idle-stop savings older than this stop counting toward the total and are dropped.
+IDLE_STOP_RETENTION_DAYS = 90
 RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
 PROJECTS_DIR = "~/workspace/anywhere/projects"
@@ -741,7 +743,7 @@ class Supervisor:
             await self.notify(w, "status", f"{w['title']} finished. {where}", attachment=self._preview(w))
             return
         # A split render reports once: when its last part is done.
-        parts = await self._farm_parts(int(chunk["farm_id"]))
+        parts = await self._farm_parts(w["owner"], int(chunk["farm_id"]))
         if parts and all(p["status"] == Status.SUCCEEDED for p in parts):
             first = next((p for p in parts if not _chunk(p).get("offset")), None)
             await self.notify(
@@ -767,9 +769,11 @@ class Supervisor:
     def _preview(self, w: dict) -> str | None:
         return self.vault.get(w["id"]).get("preview")
 
-    async def _farm_parts(self, farm_id: int) -> list[dict]:
+    async def _farm_parts(self, owner: str, farm_id: int) -> list[dict]:
+        """Every part of one split render. All parts share the owner, so read only
+        that owner's workloads instead of every user's."""
         parts = []
-        for w in await _quiet(self.store.workloads()) or []:
+        for w in await _quiet(self.store.workloads_for(owner)) or []:
             try:
                 chunk = json.loads(w["planJson"]).get("inputs", {}).get("chunk") or {}
             except (ValueError, TypeError):
@@ -853,12 +857,21 @@ class Supervisor:
 
     async def _telemetry_loop(self) -> None:
         while True:
-            for w in list(self._sampling.values()):
-                try:
-                    await self.sample_gpu(w)
-                except Exception as exc:  # telemetry must never break anything else
-                    log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
-            await asyncio.sleep(self.settings.gpu_telemetry_seconds)
+            started = asyncio.get_running_loop().time()
+            sampling = [w for w in self._sampling.values() if not self.busy(w["id"])]
+            # Forget machines that stopped, so a resumed one re-sends its VRAM total.
+            self._gpu_total_sent &= set(self._sampling)
+            # All machines at once: one slow or unreachable machine (8 s timeout)
+            # used to delay every other machine's reading by that much.
+            await asyncio.gather(*(self._sample_quietly(w) for w in sampling))
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(max(1.0, self.settings.gpu_telemetry_seconds - elapsed))
+
+    async def _sample_quietly(self, w: dict) -> None:
+        try:
+            await self.sample_gpu(w)
+        except Exception as exc:  # telemetry must never break anything else
+            log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
 
     async def sample_gpu(self, w: dict) -> list[dict]:
         """One `nvidia-smi` reading from a running machine, stored as `gpu.*` metric points.
@@ -960,7 +973,20 @@ class Supervisor:
         loop_now = asyncio.get_running_loop().time()
         if loop_now - self._last_reconcile >= RECONCILE_SECONDS:
             self._last_reconcile = loop_now
+            self.housekeeping()
             await self.reconcile(workloads)
+
+    def housekeeping(self, now: datetime | None = None) -> int:
+        """Drop vault records nothing will read again. Every vault write rewrites (and
+        fsyncs) the whole file, so these used to make every later write slower."""
+        now = now or _now()
+        dropped = self.vault.purge_records(sharing.SECTION, lambda r: not sharing.live(r, now))
+        # The bridge fetches a text's picture seconds after sending the text.
+        day_ago = (now - timedelta(days=1)).isoformat()
+        dropped += self.vault.purge_records("notification_attachments", lambda r: (r.get("at") or "") < day_ago)
+        kept = (now - timedelta(days=IDLE_STOP_RETENTION_DAYS)).isoformat()
+        dropped += self.vault.purge_records(savings.SECTION, lambda r: r["stopped_at"] < kept)
+        return dropped
 
     async def reconcile(self, workloads: list[dict]) -> None:
         """Delete Anywhere instances that no billable workload owns."""
@@ -1205,19 +1231,38 @@ async def _until(check: Callable[[], Awaitable[bool]], *, timeout: float, what: 
     raise TimeoutError(f"Timed out waiting for {what}")
 
 
-async def _relay(src: Remote, src_cmd: str, dst: Remote, dst_cmd: str) -> None:
-    """Stream one machine's command output into another machine's command (via this host)."""
+#: Upper bound for copying a project between two machines.
+RELAY_TIMEOUT = 60 * 60
+
+
+async def _relay(src: Remote, src_cmd: str, dst: Remote, dst_cmd: str, *, timeout: float = RELAY_TIMEOUT) -> None:
+    """Stream one machine's command output into another machine's command (via this host).
+
+    If either side dies, or the copy runs past `timeout`, both processes are killed:
+    a receiver that exits mid-copy used to leave the sender blocked on a full pipe
+    (and the copy waiting on it) forever."""
+    a = src.popen(src_cmd, stdout=subprocess.PIPE)
+    b = dst.popen(dst_cmd, stdin=subprocess.PIPE)
 
     def run() -> tuple[int, int]:
-        a = src.popen(src_cmd, stdout=subprocess.PIPE)
-        b = dst.popen(dst_cmd, stdin=subprocess.PIPE)
         try:
             shutil.copyfileobj(a.stdout, b.stdin, 1 << 20)  # type: ignore[arg-type]
+        except (BrokenPipeError, OSError, ValueError):
+            a.kill()  # the receiver is gone: stop the sender instead of letting it block
         finally:
-            b.stdin.close()  # type: ignore[union-attr]
+            with contextlib.suppress(Exception):
+                b.stdin.close()  # type: ignore[union-attr]
         return a.wait(), b.wait()
 
-    ra, rb = await asyncio.to_thread(run)
+    try:
+        ra, rb = await asyncio.wait_for(asyncio.to_thread(run), timeout)
+    except TimeoutError as exc:
+        raise RemoteError("Copying between machines took too long") from exc
+    finally:
+        # Kills anything still running (on timeout this also unblocks the copy thread),
+        # reaps both processes and closes their pipes and stderr files.
+        for proc in (a, b):
+            end_process(proc)
     if ra or rb:
         raise RemoteError(f"Copying between machines failed (exit {ra}/{rb})")
 

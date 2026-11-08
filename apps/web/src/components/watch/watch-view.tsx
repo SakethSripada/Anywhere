@@ -24,30 +24,64 @@ type View = {
   agent: { goal: string; status: string; result: string; steps: Step[] } | null;
 };
 
+const POLL_MS = 2000;
+const MAX_BACKOFF_MS = 30_000;
+const GONE = "This watch link has expired or was turned off";
+
+/**
+ * Poll the link every 2 s while the tab is visible. Errors back off (up to 30 s) so
+ * an outage or a rate limit doesn't have every viewer hammering the server, a link
+ * that's gone (or past its expiry) stops polling, and a hidden tab pauses.
+ */
 function useWatch(token: string) {
   const [view, setView] = useState<View | null>(null);
   const [gone, setGone] = useState<string | null>(null);
   useEffect(() => {
     let stop = false;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = POLL_MS;
+    let expiresAt = Infinity;
+    const finish = (message: string) => {
+      stop = true;
+      setGone(message);
+    };
+    const schedule = (ms: number) => {
+      clearTimeout(timer);
+      if (!stop && document.visibilityState === "visible") timer = setTimeout(load, ms);
+    };
     const load = async () => {
+      if (Date.now() >= expiresAt) return finish(GONE);
       try {
         const res = await fetch(`${config.apiUrl}/v1/watch/${encodeURIComponent(token)}`, { cache: "no-store" });
-        if (res.status === 404) {
+        if (stop) return;
+        if ([401, 403, 404, 410].includes(res.status)) {
           const body = await res.json().catch(() => ({}));
-          if (!stop) setGone(typeof body.detail === "string" ? body.detail : "This watch link has expired or was turned off");
-          return;
+          return finish(typeof body.detail === "string" ? body.detail : GONE);
         }
-        if (res.ok && !stop) setView((await res.json()) as View);
+        if (!res.ok) throw new Error(String(res.status));
+        const next = (await res.json()) as View;
+        if (stop) return;
+        expiresAt = Date.parse(next.expires_at) || Infinity;
+        setView(next);
+        delay = POLL_MS;
       } catch {
-        /* offline for a moment: keep the last view and try again */
+        // Offline, rate limited or the server is down: keep the last view, back off.
+        delay = Math.min(delay * 2, MAX_BACKOFF_MS);
       }
-      if (!stop) timer = setTimeout(load, 2000);
+      schedule(delay);
     };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        delay = POLL_MS;
+        schedule(0);
+      } else clearTimeout(timer);
+    };
+    document.addEventListener("visibilitychange", onVisible);
     void load();
     return () => {
       stop = true;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [token]);
   return { view, gone };
