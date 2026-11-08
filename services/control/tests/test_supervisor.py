@@ -187,3 +187,17 @@ async def test_brev_list_is_shared_and_invalidated_by_mutations(monkeypatch):
     await cli.delete("anywhere-1")
     await cli.list()
     assert [c[0] for c in calls] == ["ls", "delete", "ls"]
+
+
+async def test_platform_row_is_only_written_when_it_changes(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    writes = []
+
+    async def update_platform(*args):
+        writes.append(args)
+
+    store.update_platform = update_platform
+    await sup.tick()
+    await sup.tick()
+    assert len(writes) == 1

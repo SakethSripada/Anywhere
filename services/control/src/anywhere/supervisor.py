@@ -93,6 +93,7 @@ class Supervisor:
         #: deleted after it is unowned on two passes in a row.
         self._orphan_candidates: set[str] = set()
         self._last_reconcile = 0.0
+        self._last_platform: tuple | None = None
 
     # ── Task plumbing ─────────────────────────────────────────────────────
 
@@ -624,16 +625,22 @@ class Supervisor:
                 else:
                     self.terminate(w, action.reason)
 
-        await _safe(
-            self.store.update_platform(
-                self.settings.provisioning_mode.value,
-                self.settings.global_budget_cents,
-                platform_cents,
-                len(live),
-                self.settings.max_concurrent_instances,
-                json.dumps(self.settings.integrations()),
-            )
+        platform = (
+            self.settings.provisioning_mode.value,
+            self.settings.global_budget_cents,
+            platform_cents,
+            len(live),
+            self.settings.max_concurrent_instances,
+            json.dumps(self.settings.integrations(), sort_keys=True),
         )
+        # The platform row is public: every write fans out to every connected
+        # browser, so only write when something actually changed.
+        if platform != self._last_platform:
+            try:
+                await self.store.update_platform(*platform)
+                self._last_platform = platform
+            except Exception as exc:
+                log.warning("supervisor.write_failed", error=str(exc))
         # Orphans are rare and the reconcile pass shells out to `brev ls`, so run it
         # every RECONCILE_SECONDS rather than on every 30 s budget tick.
         loop_now = asyncio.get_running_loop().time()
