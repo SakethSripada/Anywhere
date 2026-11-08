@@ -67,7 +67,9 @@ def generate(prompt: str, seed: int = 0) -> tuple[bytes, dict]:
     fg = Image.fromarray((arr * 255.0).astype(np.uint8))
     with torch.no_grad():
         codes = model([fg], device=DEVICE)
-        mesh = model.extract_mesh(codes, True, resolution=256)[0]
+        mesh = model.extract_mesh(codes, True, resolution=320)[
+            0
+        ]  # 320: ~60% more triangles than 256 for ~2.5 s; edges stop looking lumpy
     if mesh.is_watertight and mesh.volume < 0:
         mesh.invert()  # inward-facing triangles render black in browsers that cull back faces
     mesh = to_gradio_3d_orientation(mesh)  # standard Y-up GLB: upright in Blender and in browsers

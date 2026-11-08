@@ -728,6 +728,15 @@ def _water(size=400.0, color=(0.01, 0.05, 0.1), z=0.0):
     return _mesh_object("Water", bm, (0, 0, z), m)
 
 
+def _is_daylight(world):
+    """A world lit by the physical sky with the sun up (kit.sky day/noon/golden)."""
+    try:
+        sky = next(n for n in world.node_tree.nodes if n.type == "TEX_SKY")
+        return sky.sun_elevation > 0.15
+    except (StopIteration, AttributeError):
+        return False
+
+
 @_lenient
 def _render_still(path="/tmp/anywhere-render.jpg", samples=24, width=960, height=540):
     """Render the camera view on the GPU with Cycles to a JPEG; returns the path."""
@@ -735,13 +744,36 @@ def _render_still(path="/tmp/anywhere-render.jpg", samples=24, width=960, height
     before = scene.render.engine
     try:
         _gpu(scene)
-        scene.cycles.samples = int(samples)
-        scene.cycles.use_denoising = True
+        # Crisp, not smeared: more samples where the image needs them (adaptive), a narrow
+        # pixel filter, and OpenImageDenoise guided by albedo and normals, which keeps edges
+        # and surface detail that the plain denoiser blurred away at low sample counts.
+        c = scene.cycles
+        c.samples = max(int(samples), 48)
+        c.use_adaptive_sampling = True
+        c.adaptive_threshold = 0.02
+        c.filter_width = 1.0
+        c.use_denoising = True
+        try:
+            c.denoiser = "OPENIMAGEDENOISE"
+            c.denoising_input_passes = "RGB_ALBEDO_NORMAL"
+            c.denoising_prefilter = "ACCURATE"
+            c.denoising_use_gpu = True
+        except (AttributeError, TypeError):
+            pass
         scene.render.resolution_x, scene.render.resolution_y = int(width), int(height)
         scene.render.resolution_percentage = 100
         scene.render.image_settings.file_format = "JPEG"
-        scene.render.image_settings.quality = 88
+        scene.render.image_settings.quality = 93
         scene.render.filepath = path
+        # Filmic colour with real contrast: daylight on pale subjects blew out to white
+        # under the default transform (seen on a white airplane over green hills).
+        vs = scene.view_settings
+        try:
+            vs.view_transform = "AgX"
+            vs.look = "AgX - Medium High Contrast"
+        except TypeError:
+            pass
+        vs.exposure = -0.45 if (scene.world and _is_daylight(scene.world)) else 0.0
         scene.frame_set(scene.frame_start)  # the orbit's opening view, which text faces
         bpy.ops.render.render(write_still=True)
     finally:
