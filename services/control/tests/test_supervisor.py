@@ -270,3 +270,18 @@ async def test_vnc_tunnel_is_reopened_when_it_dies():
     p2 = await t.port_for(1, R())
     assert len(opened) == 2 and p2 != p1
     await t.close_all()
+
+
+async def test_recover_refreshes_ssh_before_reattaching(tmp_path):
+    brev = FakeBrev()
+    refreshed = []
+
+    async def refresh_ssh():
+        refreshed.append(True)
+
+    brev.refresh_ssh = refresh_ssh
+    sup, store, _ = make(tmp_path, brev)
+    store.add(kind="batch", status="running")
+    await sup.recover()
+    assert refreshed == [True] and 1 in sup._monitors
+    await sup.shutdown()
