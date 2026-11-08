@@ -46,3 +46,16 @@ def test_health_includes_per_integration_checks(tmp_path):
         body = c.get("/health").json()
     assert set(body["checks"]) == set(body["integrations"])
     assert all(v["configured"] is False for v in body["checks"].values())
+
+
+def test_a_failing_real_model_call_marks_nemotron_unready():
+    from anywhere.config import Settings
+    from anywhere.doctor import Readiness
+
+    r = Readiness(Settings(_env_file=None, nvidia_api_key="nvapi-x"))
+    assert r.integrations()["nemotron"] is True
+    r.record_call("nemotron", "Nemotron planner model", RuntimeError("[404] Not Found for model"))
+    assert r.integrations()["nemotron"] is False
+    assert "404" in r.details()["nemotron"]["detail"]
+    r.record_call("nemotron", "Nemotron planner model", None)
+    assert r.integrations()["nemotron"] is True
