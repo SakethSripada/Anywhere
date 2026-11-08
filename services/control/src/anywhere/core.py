@@ -109,12 +109,22 @@ class Anywhere:
     # ── Planning ──────────────────────────────────────────────────────────
 
     async def refresh_prices(self) -> None:
-        if self.catalog.stale:
-            try:
-                self.catalog.apply_live(await self.brev.search_gpu_json())
-            except Exception as exc:
-                log.info("catalog.live_unavailable", error=str(exc))
-                self.catalog.mark_checked()
+        """Refresh live Brev prices when stale. Concurrent callers share one
+        `brev search` (it can take up to 45 s) instead of each spawning one."""
+        if not self.catalog.stale:
+            return
+        task = self.__dict__.get("_price_refresh")
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_prices())
+            self.__dict__["_price_refresh"] = task
+        await asyncio.shield(task)
+
+    async def _refresh_prices(self) -> None:
+        try:
+            self.catalog.apply_live(await self.brev.search_gpu_json())
+        except Exception as exc:
+            log.info("catalog.live_unavailable", error=str(exc))
+            self.catalog.mark_checked()
 
     async def propose(
         self,
@@ -254,6 +264,9 @@ class Anywhere:
         }
 
     async def approve(self, owner: str, workload_id: int) -> dict:
+        # Refresh outside the admission lock so a slow `brev search` never makes
+        # every other approve/resume wait behind it.
+        await self.refresh_prices()
         async with self._admission:
             return await self._approve(owner, workload_id)
 
@@ -263,7 +276,7 @@ class Anywhere:
             raise ActionError(f"This plan is already {w['status']}")
         # A plan can sit for a while before it's approved; make sure Brev still
         # lists its machine type so `brev create` isn't asked for one it can't make.
-        await self.refresh_prices()
+        # (Prices were refreshed by `approve` before taking the admission lock.)
         if not self.catalog.available(w["instanceType"]):
             raise ActionError(
                 f"Brev isn't offering {w['instanceType']} right now. Ask me for a new plan and I'll pick another machine."
