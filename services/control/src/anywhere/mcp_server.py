@@ -199,6 +199,24 @@ class McpEndpoint:
         await server.session_manager.handle_request(scope, receive, send)
 
 
+#: owner -> (checked_at, activated). Every tool call needs this check, and agents
+#: poll; a short cache spares an account read per call.
+_ACTIVE_TTL = 20.0
+
+
+async def _active(app: Anywhere, owner: str) -> bool:
+    cache: dict[str, tuple[float, bool]] = app.__dict__.setdefault("_mcp_activation", {})
+    now = time.monotonic()
+    if (hit := cache.get(owner)) and now - hit[0] < _ACTIVE_TTL:
+        return hit[1]
+    acct = await app.store.account(owner)
+    active = bool(acct and acct["activated"])
+    if len(cache) > 10_000:
+        cache.clear()
+    cache[owner] = (now, active)
+    return active
+
+
 def _rate(key: str, limit: int) -> None:
     from .api import rate_limit  # api imports this module; keep the import lazy.
 
@@ -239,8 +257,7 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
     try:
         if not app.settings.stdb_ready:
             raise ToolError("Anywhere isn't connected to its database yet. Try again later.")
-        acct = await app.store.account(p.owner)
-        if not acct or not acct["activated"]:
+        if not await _active(app, p.owner):
             raise ToolError("This Anywhere account isn't active, so its agent tokens are paused.")
         result = await asyncio.wait_for(fn(app, p), CALL_TIMEOUT)
     except ToolError:
@@ -328,7 +345,7 @@ async def _agent_history(app: Anywhere, workload_id: int, steps: int = 15) -> di
         if not runs:
             return None
         latest = runs[0]
-        rows = await app.store.agent_steps(int(latest["id"]))
+        rows = await app.store.agent_step_summaries(int(latest["id"]))
     except (SpacetimeError, httpx.HTTPError) as exc:
         log.info("mcp.agent_history_unavailable", error=str(exc)[:200])
         return None
@@ -432,7 +449,7 @@ def build_server() -> MCPServer:
 
         async def run(app: Anywhere, p: Principal):
             done = {Status.TERMINATED, Status.CANCELLED, Status.SUCCEEDED, Status.FAILED}
-            rows = [w for w in await app.store.workloads() if w["owner"] == p.owner]
+            rows = await app.store.workloads_for(p.owner)
             if not include_finished:
                 rows = [w for w in rows if w["status"] not in done]
             rows.sort(key=lambda w: w["createdAt"], reverse=True)
