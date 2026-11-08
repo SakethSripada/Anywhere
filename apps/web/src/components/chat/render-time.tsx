@@ -22,14 +22,16 @@ export function RenderTimeTable({ data, chosen }: { data: RenderTime; chosen?: s
     <div className="space-y-3">
       <p className="text-[13px] text-muted-foreground">
         Per frame for {LABEL[data.complexity]} at {data.width}×{data.height}, {data.samples} samples
-        {data.frames > 1 ? `, ${data.frames} frames` : ""}.
+        {data.frames > 1 ? `, ${data.frames} frames` : ""}
+        {(data.machines ?? 1) > 1 ? `, split across ${data.machines} GPUs (totals are per GPU, at the same time)` : ""}.
       </p>
       <ol className="flex flex-col gap-2.5">
         {rows.map((r) => {
           const lo = (r.minutes_low / top) * 100;
           const hi = (r.minutes_high / top) * 100;
           const isChosen = r.gpu === pick;
-          const total = data.frames > 1 ? ` · ${frameTime(r.minutes_low * data.frames)}–${frameTime(r.minutes_high * data.frames)} total` : "";
+          const each = Math.ceil(data.frames / (data.machines ?? 1));
+          const total = data.frames > 1 ? ` · ${frameTime(r.minutes_low * each)}–${frameTime(r.minutes_high * each)} total` : "";
           return (
             <li
               key={r.gpu}
