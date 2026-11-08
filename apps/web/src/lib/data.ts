@@ -68,18 +68,19 @@ export function useMonthSpend() {
 
 /**
  * A ticking clock that starts at 0 on the server (prerender must stay
- * deterministic) and begins counting once mounted.
+ * deterministic) and begins counting once mounted. With `live` false it reads
+ * the time once (and again whenever `live` changes) but doesn't keep ticking.
  */
-export function useNow(intervalMs = 1000): number {
+export function useNow(intervalMs = 1000, live = true): number {
   const [now, setNow] = useState(0);
   useEffect(() => {
     const tick = () => setNow(Date.now());
     const first = setTimeout(tick, 0);
-    const id = setInterval(tick, intervalMs);
+    const id = live ? setInterval(tick, intervalMs) : undefined;
     return () => {
       clearTimeout(first);
       clearInterval(id);
     };
-  }, [intervalMs]);
+  }, [intervalMs, live]);
   return now;
 }

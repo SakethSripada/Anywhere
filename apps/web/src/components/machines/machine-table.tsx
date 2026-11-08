@@ -13,7 +13,7 @@ import { StatusChip } from "./status";
 /** Dense machine listing, console-style: one row per machine, click to open. */
 export function MachineTable({ rows, showUpdated = false }: { rows: Workload[]; showUpdated?: boolean }) {
   const router = useRouter();
-  const now = useNow(2000);
+  const now = useNow(2000, rows.some((w) => BILLABLE.has(w.status)));
   return (
     <div className="overflow-hidden rounded-card bg-card shadow-hairline">
       <Table>
