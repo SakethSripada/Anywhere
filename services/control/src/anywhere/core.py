@@ -16,7 +16,7 @@ from pathlib import Path
 import structlog
 
 from . import budget, llm, render_bench, replay, sharing
-from .brev import BrevCLI
+from .brev import BrevCLI, site_prefix
 from .catalog import Catalog
 from .config import Settings
 from .desktop import connect_screen
@@ -64,6 +64,7 @@ class Anywhere:
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
         self.supervisor.catalog = self.catalog
         self.catalog.persist_to(Path(self.settings.data_dir) / "benched-machines.json")
+        self.supervisor.instance_prefix = site_prefix(Path(self.settings.data_dir))
         self.supervisor.integrations = self.readiness.integrations
         #: Serialises "check the budget and concurrency cap, then start a machine" so
         #: two approvals (or an auto-approve racing a manual one) can't both pass.

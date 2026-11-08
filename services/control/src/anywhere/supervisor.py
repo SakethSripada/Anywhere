@@ -8,7 +8,7 @@ anything that was interrupted mid-provisioning, cleaning up its instance.
 Every path that can create compute has a matching cleanup path:
   * provisioning/configuration errors → save what we can → delete the instance
   * the budget guard → save → stop (desktops) or delete (batch)
-  * reconciliation → delete `anywhere-*` instances no workload owns
+  * reconciliation → delete this deployment's instances (`<instance_prefix>-*`) no workload owns
 """
 
 from __future__ import annotations
@@ -96,6 +96,10 @@ class Supervisor:
     #: Where a launch looks for a same-GPU machine from another provider when Brev
     #: can't deliver the planned one. None disables the fallback.
     catalog: Catalog | None = None
+    #: Brev instance names start with `<instance_prefix>-`. Each deployment gets its own
+    #: (see `site_prefix`), because the reconciler deletes unowned machines under its
+    #: prefix: two control planes sharing a Brev org and a prefix delete each other's.
+    instance_prefix: str = "anywhere"
 
     def __post_init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
@@ -231,7 +235,7 @@ class Supervisor:
 
     async def _launch(self, w: dict) -> None:
         async with self._lock(w["id"]):
-            name = instance_name(w["id"])
+            name = instance_name(w["id"], self.instance_prefix)
             self.vault.update(w["id"], instance=name, owner=w["owner"])
             plan = json.loads(w["planJson"])
             try:
@@ -270,7 +274,7 @@ class Supervisor:
                             raise
                         with contextlib.suppress(Exception):
                             await self.brev.delete(name)
-                        name = f"{instance_name(w['id'])}-{len(tried)}"
+                        name = f"{instance_name(w['id'], self.instance_prefix)}-{len(tried)}"
                         self.vault.update(w["id"], instance=name)
                         await self._event(
                             w,
@@ -1097,7 +1101,7 @@ class Supervisor:
         candidates = {
             inst.name
             for inst in instances
-            if inst.name.startswith("anywhere-") and inst.name not in owned and inst.status != "DELETING"
+            if inst.name.startswith(f"{self.instance_prefix}-") and inst.name not in owned and inst.status != "DELETING"
         }
         confirmed = candidates & self._orphan_candidates
         self._orphan_candidates = candidates - confirmed

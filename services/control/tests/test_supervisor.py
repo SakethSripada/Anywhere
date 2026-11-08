@@ -747,3 +747,24 @@ def test_benched_machine_types_survive_a_restart(tmp_path):
     second.persist_to(path)
     assert second.recently_failed("g4dn.xlarge")
     assert not second.recently_failed("g5.xlarge")
+
+
+async def test_reconcile_leaves_other_deployments_machines_alone(tmp_path):
+    # Seen live: another control plane on the same Brev org deleted our booting
+    # machines. Each deployment now owns only its own prefix.
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.instance_prefix = "awmine"
+    brev.instances = {"anywhere-1": "RUNNING", "awtheirs-2": "RUNNING", "awmine-dead": "RUNNING"}
+    await sup.reconcile(await store.workloads())
+    await sup.reconcile(await store.workloads())
+    assert set(brev.instances) == {"anywhere-1", "awtheirs-2"}
+
+
+def test_site_prefix_is_stable_and_valid(tmp_path):
+    from anywhere.brev import NAME_RE, site_prefix
+
+    first = site_prefix(tmp_path)
+    assert first == site_prefix(tmp_path)
+    assert not first.startswith("anywhere")
+    assert NAME_RE.match(instance_name(0xFFFFFFFFFFFF, first) + "-1")

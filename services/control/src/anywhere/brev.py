@@ -26,9 +26,11 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import structlog
 
@@ -305,5 +307,22 @@ def parse_ls(out: str) -> list[dict]:
     return [r for r in data if isinstance(r, dict)]
 
 
-def instance_name(workload_id: int) -> str:
-    return f"anywhere-{workload_id:x}"
+def instance_name(workload_id: int, prefix: str = "anywhere") -> str:
+    return f"{prefix}-{workload_id:x}"
+
+
+def site_prefix(data_dir: Path) -> str:
+    """This deployment's instance-name prefix, e.g. `aw7k2q`. Stable across restarts
+    (kept in DATA_DIR) and distinct per deployment, so teammates or a hosted server
+    sharing one Brev org never reconcile away each other's machines. It deliberately
+    doesn't start with `anywhere-`, which older control planes treat as theirs."""
+    path = Path(data_dir) / "site-id"
+    try:
+        site = path.read_text().strip()
+    except OSError:
+        site = ""
+    if not re.fullmatch(r"[a-z0-9]{4,8}", site):
+        site = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(5))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(site + "\n")
+    return f"aw{site}"
