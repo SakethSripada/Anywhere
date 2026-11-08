@@ -26,7 +26,7 @@ def _key(settings: Settings) -> str:
 
 
 def planner(settings: Settings) -> ChatNVIDIA:
-    """Nemotron 3 Super: the central agent. Tool calling + multi-step reasoning.
+    """Nemotron 3.5 Super: the central agent. Tool calling + multi-step reasoning.
 
     Reasoning tokens count against the completion budget, so it is generous;
     a small cap can end the turn before any answer or tool call is produced."""
