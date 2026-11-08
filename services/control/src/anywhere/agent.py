@@ -36,8 +36,9 @@ Users describe outcomes; you figure out the compute, set it up, and do the work.
 What you can do today:
 - Interactive GPU desktops in the browser (Blender, VS Code, JupyterLab, or a plain Linux desktop).
 - Fine-tune language models (LoRA/QLoRA) on an uploaded .jsonl or .csv dataset.
-- Render Blender scenes on a fast GPU (kind "render"): the scene is copied from a running desktop's
-  ~/Projects, rendered, and the frames come back; the render machine shuts down when done.
+- Render Blender scenes on a fast GPU (kind "render"): the scene is copied from a desktop's ~/Projects
+  (live if it's running, else its last saved copy), rendered, and the frames come back; the render
+  machine shuts down when done and the user gets a message with the first frame attached.
 - Measure render time on a running desktop with estimate_render (a quick test render, ~1 minute).
 - Split a long animation across several GPUs at once (render_machines, up to 8): about that many
   times faster for about the same total cost. Offer it when an animation would take a while.
@@ -68,15 +69,22 @@ Current state:
 {state}"""
 
 IMESSAGE_RULES = """- This conversation is over iMessage: plain text only, no markdown, at most ~3 short sentences.
-- For approvals over iMessage, the user replying "yes" or "approve" counts as approval of the latest plan."""
+- For approvals over iMessage, the user replying "yes" or "approve" counts as approval of the latest plan.
+- "Render my alley scene": propose kind "render" with scene="alley". Leave render_from_workload_id out
+  unless they named a desktop; the desktop holding their files is found for you. Say you'll text them
+  when it's done, with the first frame."""
 
 
 class ProposeArgs(Intent):
     dataset_upload_id: int | None = Field(None, description="Upload id of an attached dataset, if any.")
     render_from_workload_id: int | None = Field(
-        None, description="Render jobs: the running desktop whose ~/Projects holds the scene."
+        None,
+        description="Render jobs: the desktop whose ~/Projects holds the scene (running, or stopped with saved files).",
     )
     blend_path: str | None = Field(None, description="Render jobs: the .blend inside ~/Projects; default newest.")
+    scene: str | None = Field(
+        None, description='Render jobs: the scene\'s name as the user said it ("alley"), when no exact path is known.'
+    )
 
 
 class EstimateRenderArgs(BaseModel):
@@ -197,10 +205,13 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
         upload = kwargs.pop("dataset_upload_id", None)
         source = kwargs.pop("render_from_workload_id", None)
         blend = kwargs.pop("blend_path", None)
+        scene = kwargs.pop("scene", None)
         try:
             intent = Intent.model_validate(kwargs)
             return json.dumps(
-                await app.propose(ctx.owner, ctx.conversation_id, intent, upload, render_from=source, blend_path=blend)
+                await app.propose(
+                    ctx.owner, ctx.conversation_id, intent, upload, render_from=source, blend_path=blend, scene=scene
+                )
             )
         except (ActionError, ValueError) as exc:
             return json.dumps({"ok": False, "message": str(exc)})

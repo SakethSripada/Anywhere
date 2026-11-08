@@ -588,6 +588,14 @@ def _routes():
             "deep_link_base": f"{app.settings.spectrum_api_base}/users/{assignment.user_id}/redirect",
         }
 
+    @r.get("/v1/bridge/notifications/{notification_id}/attachment", dependencies=[Depends(require_bridge)])
+    async def notification_attachment(notification_id: int, app: Anywhere = Depends(anywhere)):
+        """A picture to send after a notification's text (e.g. a render's first frame)."""
+        att = app.vault.section_get("notification_attachments", str(notification_id))
+        if not att or not app.settings.storage_ready:
+            raise HTTPException(404, "No attachment")
+        return {"url": app.storage.presign_get(att["key"], 900), "name": att["name"], "mime_type": "image/jpeg"}
+
     @r.post("/v1/bridge/inbound", dependencies=[Depends(require_bridge)])
     async def inbound(body: InboundIn, request: Request, app: Anywhere = Depends(anywhere)):
         if body.message_id in _seen_inbound:

@@ -42,6 +42,20 @@ if device == "CPU":
 if cfg.get("samples"):
     scene.cycles.samples = int(cfg["samples"])
 
+
+def save_preview(path: Path) -> None:
+    """A small JPEG of the first frame, whatever format the scene writes (EXR, PNG...)."""
+    settings = scene.render.image_settings
+    keep = (settings.file_format, settings.color_mode, settings.quality)
+    try:
+        settings.file_format, settings.color_mode, settings.quality = "JPEG", "RGB", 88
+        bpy.data.images["Render Result"].save_render(filepath=str(path), scene=scene)
+    except Exception as exc:  # a preview is a nicety; never fail the render over it
+        print(f"preview skipped: {exc}", flush=True)
+    finally:
+        settings.file_format, settings.color_mode, settings.quality = keep
+
+
 total = max(1, int(cfg.get("frames") or 1))
 offset = max(0, int(cfg.get("offset") or 0))  # a split render's part starts this many frames in
 out = job / "renders"
@@ -55,5 +69,7 @@ with (job / "metrics.jsonl").open("a") as metrics:
         bpy.ops.render.render(write_still=True)
         seconds = time.perf_counter() - start
         metrics.write(json.dumps({"frame": frame, "done": done, "total": total, "seconds": round(seconds, 2)}) + "\n")
+        if done == 1:
+            save_preview(job / "preview.jpg")
         metrics.flush()
         print(f"::step:: Rendered frame {done} of {total} ({seconds:.0f}s)", flush=True)
