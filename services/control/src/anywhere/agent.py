@@ -56,6 +56,9 @@ Rules:
 - Never use em dashes. Use commas, periods or parentheses instead. No marketing language.
 - When the user asks for something to be done inside a running desktop, use operate_desktop with a
   precise, self-contained goal. Don't narrate each click; the user can watch.
+- While the desktop agent is working, a message that changes or adds to the task means calling
+  operate_desktop again with the complete updated goal (it replaces the current task). "Stop" or
+  "cancel" about the task means stop_desktop_agent, never stop_workload, which turns the machine off.
 - Ask a clarifying question only when you truly can't proceed.
 - Desktop time is not render time. A desktop plan prices time at the machine; users are billed only
   while it runs and can stop any time. Only set session_hours (with session_hours_stated=true) when
@@ -262,7 +265,8 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
 
     async def operate_desktop(workload_id: int, goal: str) -> str:
         try:
-            run_id = await app.operate(ctx.owner, workload_id, goal)
+            # A new goal while it works is the user steering: it replaces the current task.
+            run_id = await app.operate(ctx.owner, workload_id, goal, replace=True)
             return json.dumps(
                 {
                     "ok": True,
@@ -273,6 +277,19 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             )
         except (ActionError, RuntimeError) as exc:
             return json.dumps({"ok": False, "message": f"Could not start the desktop agent: {exc}"})
+
+    async def stop_desktop_agent(workload_id: int) -> str:
+        try:
+            await app.halt_agent(ctx.owner, workload_id)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "workload_id": workload_id,
+                    "message": "Stopped the desktop agent. The machine is still on.",
+                }
+            )
+        except ActionError as exc:
+            return json.dumps({"ok": False, "message": f"Could not stop the desktop agent: {exc}"})
 
     async def inspect_workload(workload_id: int) -> str:
         try:
@@ -357,8 +374,20 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
         StructuredTool.from_function(
             coroutine=operate_desktop,
             name="operate_desktop",
-            description="Have the desktop agent perform a task in a running desktop (GUI and terminal).",
+            description=(
+                "Have the desktop agent perform a task in a running desktop (GUI and terminal). "
+                "If it is already working, this replaces its current task with the new goal."
+            ),
             args_schema=OperateArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=stop_desktop_agent,
+            name="stop_desktop_agent",
+            description=(
+                "Stop the desktop agent's current task and give the user the controls. "
+                "The machine keeps running; use stop_workload only to turn the machine off."
+            ),
+            args_schema=WorkloadArg,
         ),
         StructuredTool.from_function(
             coroutine=inspect_workload,
@@ -389,11 +418,17 @@ class Agent:
     async def _state_summary(self, owner: str) -> str:
         active = await self.app.store.workloads_for(owner)
         live = [
-            f"- #{w['id']} {w['title']} ({w['kind']}): {w['status']}"
+            f"- #{w['id']} {w['title']} ({w['kind']}): {w['status']}{self._agent_note(w)}"
             for w in active
             if w["status"] in BILLABLE | {"stopped", "planned"}
         ]
         return "\n".join(live) or "- No active machines."
+
+    def _agent_note(self, w: dict) -> str:
+        if not self.app.supervisor.agent_running(int(w["id"])):
+            return ""
+        goal = str(self.app.vault.get(int(w["id"])).get("last_goal") or "")[:200]
+        return f'; the desktop agent is working on "{goal}"'
 
     async def respond(self, ctx: TurnContext, text: str) -> str:
         if self.checkpointer is None:

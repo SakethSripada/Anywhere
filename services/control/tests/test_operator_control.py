@@ -107,3 +107,23 @@ async def test_a_run_cancelled_by_the_machine_stopping_is_not_reported_as_a_fail
     run = next(r for r in store.runs if r["id"] == run_id)
     assert run["status"] == "stopped" and run["result"] == ""
     assert not [m for m in store.messages if m["kind"] == "agent"]
+
+
+async def test_steering_from_chat_replaces_the_task_and_stop_keeps_the_machine_on(app):
+    from anywhere.agent import TurnContext, _tools
+
+    store = app.store
+    store.conversations[1] = {"owner": ALICE}
+    tools = {t.name: t for t in _tools(app, TurnContext(owner=ALICE, conversation_id=1, channel="web"))}
+
+    first = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a cube"}))
+    await until(lambda: any(r["id"] == first["run_id"] for r in store.runs))
+    second = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a red cube"}))
+    assert second["ok"] and second["run_id"] != first["run_id"]
+    assert next(r for r in store.runs if r["id"] == first["run_id"])["status"] == "stopped"
+    assert not [m for m in store.messages if m["kind"] == "agent"]  # replacing isn't news
+
+    await until(lambda: any(r["id"] == second["run_id"] for r in store.runs))
+    stopped = json.loads(await tools["stop_desktop_agent"].ainvoke({"workload_id": 11}))
+    assert stopped["ok"] and not app.supervisor.agent_running(11)
+    assert store.rows[11]["status"] == "running" and store.rows[11]["controller"] == "user"
