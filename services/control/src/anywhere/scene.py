@@ -201,9 +201,12 @@ async def write_script(
         messages.append(
             HumanMessage(
                 f"A detailed, textured 3D model of '{hero[0]}' is being generated for you. Place it with "
-                f"hero = kit.hero(height={hero[1]:g}, location=(0, 0, 0)) and build only the setting around it "
-                "(sky, ground or water, a few props, lighting). Do NOT build the subject from primitives. "
-                "Pass subject=hero to kit.orbit_camera."
+                f"hero = kit.hero(height={hero[1]:g}, location=(0, 0, 0)) and build only the setting around it. "
+                "Do NOT build the subject from primitives. The setting: kit.sky for the time of day, then ONE "
+                "ground (kit.terrain for hills/mountains/peaks, kit.water for sea/lakes, kit.ground otherwise), "
+                "then at most 6 small props. Every prop must be shorter than half the subject and at least "
+                f"{hero[1] * 2:g} m from the origin, never on the +X side (where the camera starts). Never build "
+                "mountains, rocks or buildings out of boxes. End with kit.orbit_camera(subject=hero)."
             )
         )
     if error:
@@ -237,10 +240,13 @@ print("exported", len(keep))
 """
 
 
-async def _render(screen, samples: int = 32) -> bytes:
-    """A GPU still of the scene camera, as JPEG bytes."""
+async def _render(screen, samples: int = 32, reframe: bool = False) -> bytes:
+    """A GPU still of the scene camera, as JPEG bytes. reframe=True first re-aims the camera
+    at the finished scene (scripts sometimes place the camera before the subject)."""
+    prefix = "kit.reframe()\n" if reframe else ""
     out = await run_in_blender(
-        screen, f"kit.render_still(path={RENDER_PATH!r}, samples={samples}, width=1280, height=720)\nkit.show()"
+        screen,
+        f"{prefix}kit.render_still(path={RENDER_PATH!r}, samples={samples}, width=1280, height=720)\nkit.show()",
     )
     if not out.startswith("ok"):
         raise RuntimeError(out.splitlines()[-1][:200] if out else "render failed")
@@ -320,7 +326,7 @@ async def build(
                 return
             built = time.monotonic() - started
             await post("status", f"Built {title} live in {built:.0f}s. Rendering on the GPU…")
-            jpeg = await _render(screen)
+            jpeg = await _render(screen, reframe=True)
             glb = b""
             if model:
                 glb = model  # the generated subject itself: textured, and frames well on a phone

@@ -434,8 +434,12 @@ def _subject_objects():
 def _orbit(target=(0, 0, 0), radius=30.0, height=15.0, frames=240, lens=35.0, subject=None):
     """Frames everything that isn't backdrop, plus `subject` if given. (Models pass a single part
     as the subject, and the camera then sat inside the rest of the scene.)"""
-    named = subject if isinstance(subject, (list, tuple)) else ([subject] if subject is not None else [])
-    subject = list(dict.fromkeys([*_subject_objects(), *[o for o in named if hasattr(o, "matrix_world")]]))
+    hero = bpy.context.scene.objects.get("Hero")
+    if hero is not None:
+        subject = [hero]  # a generated subject is what the picture is of; frame it, not the props
+    else:
+        named = subject if isinstance(subject, (list, tuple)) else ([subject] if subject is not None else [])
+        subject = list(dict.fromkeys([*_subject_objects(), *[o for o in named if hasattr(o, "matrix_world")]]))
     if subject is not None:
         objs = subject if isinstance(subject, (list, tuple)) else [subject]
         pts = []
@@ -452,10 +456,35 @@ def _orbit(target=(0, 0, 0), radius=30.0, height=15.0, frames=240, lens=35.0, su
             # Fit both ways for a 16:9 frame at 35 mm (about 54 deg wide, 32 deg tall), with margin.
             radius = max(w * 1.45, h * 2.6, span * 1.6)
             height = target[2] + radius * 0.22
-    return _base_orbit(_vec(target), float(radius), float(height), int(frames), float(lens))
+    cam = _base_orbit(_vec(target), float(radius), float(height), int(frames), float(lens))
+    if hero is not None:
+        # Nothing may stand between the opening camera position (+X) and the subject.
+        hx = hero.matrix_world.translation.x
+        for o in bpy.context.scene.objects:
+            if o is hero or o.type not in ("MESH", "CURVE", "FONT") or any(k in o.name.lower() for k in _BACKDROP):
+                continue
+            pts = [o.matrix_world @ mathutils_Vector(c) for c in o.bound_box]
+            ahead = min(p.x for p in pts) > hx and min(abs(p.y - target[1]) for p in pts) < radius * 0.25
+            if ahead and max(p.z for p in pts) > target[2] * 0.6:
+                o.hide_render = True
+                o.hide_viewport = True
+    return cam
 
 
 kit.orbit_camera = _lenient(_orbit)
+
+
+def _reframe():
+    """Replace the camera with one framed on the finished scene (the generated subject if there
+    is one). Scripts sometimes set the camera up before placing the subject."""
+    scene = bpy.context.scene
+    for o in list(scene.objects):
+        if o.name.startswith(("CameraOrbit", "CameraTarget")) or o.type == "CAMERA":
+            bpy.data.objects.remove(o, do_unlink=True)
+    return _orbit()
+
+
+kit.reframe = staticmethod(_reframe)
 for _n in ("windows", "glow", "show", "play", "save", "clear"):
     setattr(kit, _n, _lenient(getattr(kit, _n)))
 
