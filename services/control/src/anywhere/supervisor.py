@@ -32,7 +32,7 @@ import structlog
 from . import budget
 from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
 from .config import ProvisioningMode, Settings
-from .desktop import VncTunnels, connect_screen
+from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
 from .remote import Remote, RemoteError
@@ -95,6 +95,7 @@ class Supervisor:
         self._monitors: dict[int, asyncio.Task] = {}
         self._locks: dict[int, asyncio.Lock] = {}
         self.vnc = VncTunnels()
+        self.shots = Screenshots()
         self._guard_task: asyncio.Task | None = None
         #: Unowned instances seen on the previous reconcile pass. An instance is only
         #: deleted after it is unowned on two passes in a row.
@@ -339,6 +340,7 @@ class Supervisor:
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
+            await self.shots.close(w["id"])
             remote = self.remote(w)
             if w["kind"] == "desktop" and w["status"] == Status.RUNNING:
                 await self._transition(w, Status.SAVING, "Saving before stopping")
@@ -387,6 +389,7 @@ class Supervisor:
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
+            await self.shots.close(w["id"])
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             if w["status"] == Status.RUNNING and w["kind"] == "desktop":
                 await self._transition(w, Status.SAVING, "Saving before deleting")
@@ -429,6 +432,7 @@ class Supervisor:
         if asyncio.current_task() is not self._agents.get(w["id"]):
             await self.stop_agent(w["id"])
         await self.vnc.close(w["id"])
+        await self.shots.close(w["id"])
         name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
         await self._settle_usage(w)
         with contextlib.suppress(ReducerRejected):
@@ -614,6 +618,7 @@ class Supervisor:
         for t in self._monitors.values():
             t.cancel()
         await self.vnc.close_all()
+        await self.shots.close_all()
 
     async def _guard_loop(self) -> None:
         while True:
