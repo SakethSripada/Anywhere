@@ -347,7 +347,13 @@ class Agent:
         )
 
         async def call_model(state: MessagesState) -> dict:
-            return {"messages": [await bound.ainvoke([system, *trim_history(state["messages"])])]}
+            try:
+                reply = await bound.ainvoke([system, *trim_history(state["messages"])])
+            except Exception as exc:
+                self.app.readiness.record_call("nemotron", "Nemotron planner model", exc)
+                raise
+            self.app.readiness.record_call("nemotron", "Nemotron planner model", None)
+            return {"messages": [reply]}
 
         g = StateGraph(MessagesState)
         g.add_node("agent", call_model)

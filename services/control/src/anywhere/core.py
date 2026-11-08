@@ -47,7 +47,7 @@ class Anywhere:
     catalog: Catalog = field(default_factory=Catalog)
 
     def __post_init__(self) -> None:
-        self.readiness = Readiness(self.settings)
+        self.readiness = Readiness(self.settings, brev=self.brev, storage=self.storage)
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
         self.supervisor.integrations = self.readiness.integrations
         #: Serialises "check the budget and concurrency cap, then start a machine" so
