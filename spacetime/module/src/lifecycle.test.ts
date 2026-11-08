@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BILLABLE,
   canTransition,
+  newestTelemetry,
   PLATFORM_MAX_MONTHLY_CAP_CENTS,
   shouldBumpConversation,
   TRANSITIONS,
@@ -80,5 +81,22 @@ describe("write coalescing", () => {
   it("bumps a conversation at most every ten seconds", () => {
     expect(shouldBumpConversation(100n * S, 105n * S)).toBe(false);
     expect(shouldBumpConversation(100n * S, 110n * S)).toBe(true);
+  });
+});
+
+describe("GPU telemetry in the browser's view", () => {
+  const row = (id: number, workloadId: number, name: string) => ({ id: BigInt(id), workloadId: BigInt(workloadId), name });
+
+  it("keeps the newest readings per machine and series, and training metrics whole", () => {
+    const rows = [
+      row(1, 1, "gpu.util_pct"),
+      row(2, 1, "loss"),
+      row(3, 1, "gpu.util_pct"),
+      row(4, 2, "gpu.util_pct"),
+      row(5, 1, "gpu.util_pct"),
+      row(6, 1, "gpu.mem_total_gb"),
+      row(7, 1, "loss"),
+    ];
+    expect(newestTelemetry(rows, 2).map((r) => Number(r.id))).toEqual([2, 3, 4, 5, 6, 7]);
   });
 });
