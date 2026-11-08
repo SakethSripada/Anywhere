@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import structlog
 
-from . import budget, llm
+from . import budget, llm, render_bench
 from .brev import BrevCLI
 from .catalog import Catalog
 from .config import Settings
@@ -25,11 +27,15 @@ from .planner import Intent, Plan, Unsupported, plan
 from .stdb import SpacetimeClient
 from .storage import Storage
 from .store import Store
-from .supervisor import Supervisor
+from .supervisor import PROJECTS_DIR, Supervisor, _env
 from .training import DatasetError, DatasetProfile, build_config
 from .vault import Vault
 
 log = structlog.get_logger()
+
+
+#: A .blend path relative to ~/Projects: plain names and folders only (no quotes, no `..`).
+SAFE_PATH = re.compile(r"^[\w .@+-]+(/[\w .@+-]+)*\.blend$")
 
 
 class ActionError(Exception):
@@ -134,6 +140,8 @@ class Anywhere:
         dataset_upload_id: int | None = None,
         *,
         auto_approve: bool = True,
+        render_from: int | None = None,
+        blend_path: str | None = None,
     ) -> dict:
         """Validate an intent into a plan, check policy, and record it as a workload awaiting approval.
 
@@ -150,11 +158,31 @@ class Anywhere:
             intent = intent.model_copy(update={"dataset_size_mb": round(upload["size"] / 1e6, 2)})
         if intent.kind in ("fine_tune", "training") and not upload:
             return {"ok": False, "needs": "dataset", "message": "Attach a .jsonl or .csv dataset to fine-tune on."}
-        if intent.kind in ("inference", "render"):
+        if intent.kind == "inference":
             return {
                 "ok": False,
-                "message": f"{intent.kind.title()} jobs aren't available yet. Desktops and fine-tuning are.",
+                "message": "Inference jobs aren't available yet. Desktops, fine-tuning and renders are.",
             }
+        source = None
+        if intent.kind == "render":
+            # Renders take the project from a running desktop's ~/Projects (no storage needed).
+            if not render_from:
+                return {
+                    "ok": False,
+                    "needs": "source",
+                    "message": "Renders copy the scene from one of your desktops. Save it in ~/Projects on a "
+                    "running desktop, then say which desktop.",
+                }
+            source = await self.owned(owner, render_from)
+            if source["kind"] != "desktop" or source["status"] != Status.RUNNING:
+                return {
+                    "ok": False,
+                    "message": f"{source['title']} needs to be running so the scene can be copied from it.",
+                }
+            if blend_path is not None:
+                blend_path = blend_path.strip().lstrip("/").removeprefix("Projects/")
+                if not SAFE_PATH.match(blend_path) or ".." in blend_path.split("/"):
+                    return {"ok": False, "message": "Give a .blend file inside ~/Projects, like scenes/alley.blend."}
 
         result = plan(intent, self.catalog, acct.get("preference", "balanced"))  # type: ignore[arg-type]
         if isinstance(result, Unsupported):
@@ -178,6 +206,13 @@ class Anywhere:
                 "dataset_name": upload["name"],
                 "dataset_rows": profile.rows,
                 "train_config": cfg.model_dump(mode="json"),
+            }
+
+        if source is not None:
+            plan_doc["inputs"] = {
+                "source_workload_id": int(source["id"]),
+                "source_title": source["title"],
+                "blend_path": blend_path,
             }
 
         decision = budget.evaluate(
@@ -408,6 +443,69 @@ class Anywhere:
                 await self.store.append_message(
                     int(w["conversationId"]), "assistant", "agent", result[:4000], int(w["id"]), "system"
                 )
+
+    # ── Render estimates ──────────────────────────────────────────────────
+
+    async def estimate_render(
+        self, owner: str, workload_id: int, path: str | None = None, samples: int | None = None, frames: int = 1
+    ) -> dict:
+        """Time a quick test render of a saved .blend on a running desktop and extrapolate.
+
+        Uses the newest .blend in ~/Projects unless `path` (relative to ~/Projects) is given."""
+        w = await self.owned(owner, workload_id)
+        if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
+            raise ActionError("Test renders need a running desktop")
+        if path is not None:
+            path = path.strip().lstrip("/").removeprefix("Projects/")
+            if not path.endswith(".blend") or ".." in path.split("/") or not SAFE_PATH.match(path):
+                raise ActionError("Give a .blend file inside ~/Projects, like scenes/alley.blend")
+        remote = self.supervisor.remote(w)
+        docker = 'D=docker; docker ps >/dev/null 2>&1 || D="sudo docker";'
+        if path is None:
+            found = await remote.run(
+                f"cd {PROJECTS_DIR} 2>/dev/null && find . -name '*.blend' -printf '%T@ %P\\n' | sort -nr | head -1",
+                check=False,
+                timeout=30,
+            )
+            path = found.stdout.strip().partition(" ")[2]
+            if not path:
+                raise ActionError("No saved .blend in ~/Projects yet. Save your scene there first (File > Save).")
+        await remote.run(
+            f"{docker} $D exec -i anywhere-desktop sh -c 'cat > /tmp/anywhere-probe.py'",
+            input=_env("render-probe.py").encode(),
+            timeout=30,
+        )
+        cfg = json.dumps({"samples": samples, "percent": 25})
+        res = await remote.run(
+            f"{docker} $D exec anywhere-desktop timeout 600 blender -b {shlex.quote('/projects/' + path)} "
+            f"-P /tmp/anywhere-probe.py -- {shlex.quote(cfg)} 2>&1 | tail -40",
+            check=False,
+            timeout=660,
+        )
+        line = next((ln for ln in res.stdout.splitlines() if ln.startswith("::probe::")), None)
+        if line is None:
+            tail = "\n".join(res.stdout.strip().splitlines()[-5:])
+            raise ActionError(f"The test render didn't finish. Blender said: {tail[-500:] or 'nothing'}")
+        probe = json.loads(line.removeprefix("::probe::"))
+        result = render_bench.extrapolate(probe, frames)
+        hourly = int(w["hourlyCents"])
+        compare = []
+        for gpu in render_bench.SAMPLES_PER_MINUTE:
+            ratio = render_bench.relative_speed(gpu, w["gpuName"])
+            if ratio and gpu != render_bench.gpu_key(w["gpuName"]):
+                compare.append({"gpu": gpu, "seconds_per_frame": round(result["seconds_per_frame"] / ratio, 1)})
+        return {
+            "file": f"~/Projects/{path}",
+            "gpu": w["gpuName"],
+            "device": probe["device"],
+            "resolution": f"{probe['full_width']}x{probe['full_height']}",
+            "samples": probe["target_samples"],
+            **result,
+            "estimated_cost": budget.usd(math.ceil(result["seconds_per_frame"] * frames / 3600 * hourly)),
+            "measured_on": f"two test renders at {probe['probe_width']}x{probe['probe_height']}",
+            "other_gpus": sorted(compare, key=lambda c: c["seconds_per_frame"]),
+            "note": "Denoising adds a little on top. Other-GPU times scale this measurement by Blender Open Data benchmarks.",
+        }
 
     async def resume_agent(self, owner: str, workload_id: int) -> int | None:
         """Hand control back to the agent and continue its last paused goal."""
