@@ -160,3 +160,26 @@ def test_intent_rejects_nonsense_numbers():
         make(kind="fine_tune", model_params_billions=-3)
     with pytest.raises(ValueError):
         make(kind="fine_tune", epochs=500)
+
+
+def test_split_renders_finish_sooner_for_about_the_same_cost():
+    one = plan(make(kind="render", scene_complexity="heavy", render_frames=240, render_samples=256), Catalog())
+    four = plan(
+        make(kind="render", scene_complexity="heavy", render_frames=240, render_samples=256, render_machines=4),
+        Catalog(),
+    )
+    assert one.machines == 1 and four.machines == 4
+    a, b = one.selected.estimate, four.selected.estimate
+    assert b.hours_high < a.hours_high / 3  # ~4x faster wall-clock (setup is fixed per machine)
+    assert 0.9 * a.cost_high_cents <= b.cost_high_cents <= 1.3 * a.cost_high_cents
+    assert any("Split across 4" in x for x in b.assumptions)
+    # Long single-GPU renders get a nudge to split; split ones don't.
+    assert any("4 GPUs" in w for w in one.warnings)
+    assert not any("4 GPUs" in w for w in four.warnings)
+
+
+def test_split_renders_never_use_more_machines_than_frames():
+    p = plan(make(kind="render", render_frames=3, render_machines=8), Catalog())
+    assert p.machines == 3
+    with pytest.raises(ValueError):
+        make(kind="render", render_machines=9)
