@@ -1,6 +1,7 @@
 "use client";
 
 import { ThemeProvider } from "next-themes";
+import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -15,7 +16,20 @@ function Booting() {
   );
 }
 
+/** Pages anyone with a link can open: no account, no SpacetimeDB session. */
+export function isPublicPath(path: string | null) {
+  return !!path?.startsWith("/watch/");
+}
+
 export function Providers({ children }: { children: ReactNode }) {
+  const path = usePathname();
+  if (isPublicPath(path)) {
+    return (
+      <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
+        <TooltipProvider delay={300}>{children}</TooltipProvider>
+      </ThemeProvider>
+    );
+  }
   return (
     <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
       <StdbProvider fallback={<Booting />}>
