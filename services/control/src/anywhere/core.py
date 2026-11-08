@@ -76,7 +76,11 @@ class Anywhere:
                 if attachment:
                     # The outbox row only carries text; the bridge asks for the picture by id.
                     name = attachment.rsplit("/", 1)[-1]
-                    self.vault.section_put("notification_attachments", str(nid), {"key": attachment, "name": name})
+                    self.vault.section_put(
+                        "notification_attachments",
+                        str(nid),
+                        {"key": attachment, "name": name, "at": datetime.now(UTC).isoformat()},
+                    )
                 await self.store.enqueue_notification(nid, w["owner"], "imessage", handle, body)
         except Exception as exc:
             log.warning("notify.imessage_failed", error=str(exc))

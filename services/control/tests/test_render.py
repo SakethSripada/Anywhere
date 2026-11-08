@@ -386,7 +386,8 @@ async def test_notification_pictures_reach_the_bridge(app):
     await app.notify(w, "status", "Render finished.", attachment="users/a/workloads/20/first-frame.jpg")
     nid = queued[0][0]
     att = app.vault.section_get("notification_attachments", str(nid))
-    assert att == {"key": "users/a/workloads/20/first-frame.jpg", "name": "first-frame.jpg"}
+    assert att["key"] == "users/a/workloads/20/first-frame.jpg" and att["name"] == "first-frame.jpg"
+    assert att["at"]  # timestamped so housekeeping can drop it
     assert storage.presign_get(att["key"]).endswith("first-frame.jpg")
 
 
