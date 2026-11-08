@@ -442,7 +442,7 @@ class Supervisor:
                     await self.brev.stop(name)
                     await self.brev.wait_for(name, want="STOPPED", timeout=10 * 60)
                     await self._transition(w, Status.STOPPED, reason)
-                    await self.notify(w, "status", f"{w['title']} stopped. Your files are saved — resume anytime.")
+                    await self.notify(w, "status", f"{w['title']} stopped. Your files are saved. Resume anytime.")
                 else:
                     await self.brev.delete(name)
                     await self._transition(w, Status.TERMINATED, reason)
