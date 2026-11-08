@@ -224,7 +224,7 @@ function Account() {
             <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-neutral-600 to-neutral-800 text-xs font-semibold text-white">
               {account.displayName.slice(0, 1).toUpperCase()}
             </span>
-            <span className="grid min-w-0 flex-1 gap-1 text-left leading-tight">
+            <span className="grid min-w-0 flex-1 gap-1 text-left leading-tight group-data-[collapsible=icon]:hidden">
               <span className="flex items-baseline justify-between gap-2">
                 <span className="truncate text-[13px] font-medium">{account.displayName}</span>
                 <span className="shrink-0 text-[11px] text-muted-foreground tabular">{cents(spent)}</span>
@@ -234,7 +234,7 @@ function Account() {
               </span>
               <span className="truncate text-[11px] text-muted-foreground">of {cents(account.monthlyCapCents)} this month</span>
             </span>
-            <ChevronsUpDown className="ml-auto size-3.5 text-muted-foreground" />
+            <ChevronsUpDown className="ml-auto size-3.5 text-muted-foreground group-data-[collapsible=icon]:hidden" />
           </DropdownMenuTrigger>
           <DropdownMenuContent side="top" align="start" className="w-(--anchor-width) min-w-56">
             <DropdownMenuItem render={<Link href="/settings" />}>
