@@ -853,12 +853,21 @@ class Supervisor:
 
     async def _telemetry_loop(self) -> None:
         while True:
-            for w in list(self._sampling.values()):
-                try:
-                    await self.sample_gpu(w)
-                except Exception as exc:  # telemetry must never break anything else
-                    log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
-            await asyncio.sleep(self.settings.gpu_telemetry_seconds)
+            started = asyncio.get_running_loop().time()
+            sampling = [w for w in self._sampling.values() if not self.busy(w["id"])]
+            # Forget machines that stopped, so a resumed one re-sends its VRAM total.
+            self._gpu_total_sent &= set(self._sampling)
+            # All machines at once: one slow or unreachable machine (8 s timeout)
+            # used to delay every other machine's reading by that much.
+            await asyncio.gather(*(self._sample_quietly(w) for w in sampling))
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(max(1.0, self.settings.gpu_telemetry_seconds - elapsed))
+
+    async def _sample_quietly(self, w: dict) -> None:
+        try:
+            await self.sample_gpu(w)
+        except Exception as exc:  # telemetry must never break anything else
+            log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
 
     async def sample_gpu(self, w: dict) -> list[dict]:
         """One `nvidia-smi` reading from a running machine, stored as `gpu.*` metric points.

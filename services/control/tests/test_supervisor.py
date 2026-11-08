@@ -514,6 +514,29 @@ async def test_only_running_machines_are_sampled(tmp_path):
     assert set(sup._sampling) == {1}
 
 
+async def test_telemetry_samples_machines_concurrently(tmp_path):
+    sup, store, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=60)
+    for i in (1, 2, 3):
+        store.add(id=i, status="running")
+    await sup.tick()
+    sup._gpu_total_sent = {1, 99}  # 99 stopped long ago
+    started: list[int] = []
+
+    async def slow_sample(w):
+        started.append(w["id"])
+        await asyncio.sleep(0.3)
+        return []
+
+    sup.sample_gpu = slow_sample
+    task = asyncio.create_task(sup._telemetry_loop())
+    await asyncio.sleep(0.1)
+    # A slow machine doesn't hold up the others: all three are being sampled at once.
+    assert sorted(started) == [1, 2, 3]
+    assert sup._gpu_total_sent == {1}
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_telemetry_can_be_turned_off(tmp_path):
     sup, _, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=0)
     sup.start_guard()
