@@ -36,6 +36,9 @@ Users describe outcomes; you figure out the compute, set it up, and do the work.
 What you can do today:
 - Interactive GPU desktops in the browser (Blender, VS Code, JupyterLab, or a plain Linux desktop).
 - Fine-tune language models (LoRA/QLoRA) on an uploaded .jsonl or .csv dataset.
+- Render Blender scenes on a fast GPU (kind "render"): the scene is copied from a running desktop's
+  ~/Projects, rendered, and the frames come back; the render machine shuts down when done.
+- Measure render time on a running desktop with estimate_render (a quick test render, ~1 minute).
 - Operate a running desktop yourself: clicking, typing, using apps like Blender (operate_desktop).
 - Check on, save, stop, resume and delete the user's machines.
 
@@ -51,6 +54,12 @@ Rules:
 - When the user asks for something to be done inside a running desktop, use operate_desktop with a
   precise, self-contained goal. Don't narrate each click; the user can watch.
 - Ask a clarifying question only when you truly can't proceed.
+- Desktop time is not render time. A desktop plan prices time at the machine; users are billed only
+  while it runs and can stop any time. Only set session_hours (with session_hours_stated=true) when
+  the user said how long they need. Never invent a long session to cover a big project.
+- For "how long will it render": quote the plan's render_time table as a range, and for a scene saved
+  on a running desktop call estimate_render for a measured number. Heavy scenes with fog or many lights
+  are "heavy"; dense props and textures are "detailed".
 - To answer questions about a machine or job (progress, errors, outputs), call inspect_workload first.
 {channel_rules}{focus}
 Current state:
@@ -62,6 +71,17 @@ IMESSAGE_RULES = """- This conversation is over iMessage: plain text only, no ma
 
 class ProposeArgs(Intent):
     dataset_upload_id: int | None = Field(None, description="Upload id of an attached dataset, if any.")
+    render_from_workload_id: int | None = Field(
+        None, description="Render jobs: the running desktop whose ~/Projects holds the scene."
+    )
+    blend_path: str | None = Field(None, description="Render jobs: the .blend inside ~/Projects; default newest.")
+
+
+class EstimateRenderArgs(BaseModel):
+    workload_id: int
+    blend_path: str | None = Field(None, description="A .blend inside ~/Projects; default the newest one.")
+    samples: int | None = Field(None, description="Override the scene's sample count, if the user asked.")
+    frames: int = Field(1, description="How many frames the user plans to render.")
 
 
 class WorkloadArg(BaseModel):
@@ -173,9 +193,13 @@ def _recorded(app: Anywhere, ctx: TurnContext, tool: StructuredTool) -> Structur
 def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
     async def propose_workload(**kwargs) -> str:
         upload = kwargs.pop("dataset_upload_id", None)
+        source = kwargs.pop("render_from_workload_id", None)
+        blend = kwargs.pop("blend_path", None)
         try:
             intent = Intent.model_validate(kwargs)
-            return json.dumps(await app.propose(ctx.owner, ctx.conversation_id, intent, upload))
+            return json.dumps(
+                await app.propose(ctx.owner, ctx.conversation_id, intent, upload, render_from=source, blend_path=blend)
+            )
         except (ActionError, ValueError) as exc:
             return json.dumps({"ok": False, "message": str(exc)})
 
@@ -214,6 +238,14 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
                 return f"Could not do that: {exc}"
 
         return run
+
+    async def estimate_render(
+        workload_id: int, blend_path: str | None = None, samples: int | None = None, frames: int = 1
+    ) -> str:
+        try:
+            return json.dumps(await app.estimate_render(ctx.owner, workload_id, blend_path, samples, frames))
+        except ActionError as exc:
+            return json.dumps({"ok": False, "message": str(exc)})
 
     async def operate_desktop(workload_id: int, goal: str) -> str:
         try:
@@ -302,6 +334,12 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             name="delete_workload",
             description="Permanently delete a machine. Confirm with the user first.",
             args_schema=WorkloadArg,
+        ),
+        StructuredTool.from_function(
+            coroutine=estimate_render,
+            name="estimate_render",
+            description="Measure how long a saved Blender scene renders on a running desktop's GPU (quick test render).",
+            args_schema=EstimateRenderArgs,
         ),
         StructuredTool.from_function(
             coroutine=operate_desktop,

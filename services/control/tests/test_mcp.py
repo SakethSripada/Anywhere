@@ -273,6 +273,7 @@ async def test_lists_tools_with_honest_annotations(h):
         "list_workloads",
         "get_workload",
         "get_desktop_screenshot",
+        "estimate_render",
         "propose_workload",
         "cancel_plan",
         "approve_workload",
@@ -283,7 +284,14 @@ async def test_lists_tools_with_honest_annotations(h):
         "operate_desktop",
         "stop_desktop_agent",
     }
-    for name in ("get_account", "get_catalog", "list_workloads", "get_workload", "get_desktop_screenshot"):
+    for name in (
+        "get_account",
+        "get_catalog",
+        "list_workloads",
+        "get_workload",
+        "get_desktop_screenshot",
+        "estimate_render",
+    ):
         assert tools[name].annotations.read_only_hint
     assert tools["delete_workload"].annotations.destructive_hint
     assert "money" in tools["approve_workload"].description
@@ -428,7 +436,7 @@ async def test_bad_arguments_are_rejected_before_anything_runs(h):
         for args in ({"workload_id": 0}, {"workload_id": 2**60}, {"workload_id": "eleven"}, {}):
             assert (await c.call_tool("get_workload", args)).is_error, args
         for request in (
-            {"kind": "render", "summary": "Render my film"},
+            {"kind": "inference", "summary": "Serve my model"},
             {"kind": "desktop", "summary": "x"},
             {"kind": "fine_tune", "summary": "Tune it", "epochs": 500},
             {"kind": "desktop", "summary": "Blender", "max_budget_usd": -5},
