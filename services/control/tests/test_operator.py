@@ -69,12 +69,12 @@ async def run(replies, control=lambda: True):
 async def test_clicks_are_mapped_from_screenshot_to_screen_pixels():
     final, screen, steps = await run(
         [
-            {"action": "click", "x": 640, "y": 360, "summary": "Click center"},
+            {"action": "click", "x": 500, "y": 500, "summary": "Click center"},  # 0-1000 grid
             {"action": "done", "text": "Clicked"},
         ]
     )
     assert final["status"] == "done"
-    # 2560px screen is downscaled to 1280px for the model: coordinates double back.
+    # Grid center is (640, 360) in the 1280px screenshot; the 2560px screen doubles it.
     assert screen.calls[0] == ("click", 1280, 720, "left", False)
     assert steps.count("act") == 1 and "done" in steps
 
@@ -126,8 +126,8 @@ def test_harmless_variations_in_the_model_reply_are_accepted():
 async def test_scroll_down_is_positive_for_the_model_and_clamped():
     _, screen, _ = await run(
         [
-            {"action": "scroll", "x": 100, "y": 100, "dy": 2},
-            {"action": "scroll", "x": 100, "y": 100, "dy": -600},
+            {"action": "scroll", "x": 78, "y": 139, "dy": 2},  # grid point for (100, 100)
+            {"action": "scroll", "x": 78, "y": 139, "dy": -600},
             {"action": "done", "text": "ok"},
         ]
     )
@@ -189,3 +189,11 @@ async def test_a_model_that_never_gives_a_usable_reply_fails_with_a_readable_mes
     assert "validation" not in message and "vision model" in message
     assert "set up" in describe_failure(ModelUnavailable("NVIDIA_API_KEY is not configured"))
     assert describe_failure(RuntimeError("tunnel closed\ntraceback...")).endswith("tunnel closed")
+
+
+async def test_model_coordinates_are_read_on_a_0_to_1000_grid():
+    # The live miss: aiming at (267, 88) in a 1280x800 frame, Nemotron said (214, 112).
+    from anywhere.operator import Action, _from_grid
+
+    a = _from_grid(Action(action="click", x=214, y=112), 1280, 800)
+    assert (a.x, a.y) == (274, 89)
