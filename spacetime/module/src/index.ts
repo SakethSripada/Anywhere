@@ -523,6 +523,18 @@ export const createWorkload = spacetimedb.reducer(
   },
 );
 
+/** Re-label a workload's plan: a split render's first part takes its own frame range and share of the cost. */
+export const updateWorkloadPlan = spacetimedb.reducer(
+  { name: "update_workload_plan" },
+  { id: t.u64(), title: t.string(), planJson: t.string(), estLowCents: t.u32(), estHighCents: t.u32() },
+  (ctx, { id, title, planJson, estLowCents, estHighCents }) => {
+    requireWorker(ctx);
+    const row = ctx.db.workload.id.find(id);
+    if (!row) throw new SenderError("Workload not found");
+    ctx.db.workload.id.update({ ...row, title, planJson, estLowCents, estHighCents, updatedAt: ctx.timestamp });
+  },
+);
+
 export const transitionWorkload = spacetimedb.reducer(
   { name: "transition_workload" },
   { id: t.u64(), to: t.string(), detail: t.string() },

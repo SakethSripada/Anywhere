@@ -306,6 +306,7 @@ const reducersSchema = __reducers(
     estHighCents: __t.u32(),
     stoppable: __t.bool(),
   }),
+  __reducerSchema("update_workload_plan", { id: __t.u64(), title: __t.string(), planJson: __t.string(), estLowCents: __t.u32(), estHighCents: __t.u32() }),
   __reducerSchema("transition_workload", { id: __t.u64(), to: __t.string(), detail: __t.string() }),
   __reducerSchema("record_usage", { id: __t.u64(), accruedCents: __t.u32(), touch: __t.bool() }),
   __reducerSchema("add_event", { workloadId: __t.u64(), level: __t.string(), message: __t.string() }),

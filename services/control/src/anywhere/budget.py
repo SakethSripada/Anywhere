@@ -51,6 +51,7 @@ def evaluate(
     account: AccountPolicy,
     spend: SpendSnapshot,
     limits: PlatformLimits,
+    machines: int = 1,
 ) -> Decision:
     blockers: list[str] = []
     notes: list[str] = []
@@ -61,7 +62,13 @@ def evaluate(
     if kind == "desktop" and "desktop" in spend.account_active_kinds:
         blockers.append("You already have a desktop running. Open it, or stop it before starting another.")
 
-    if spend.active_instances >= limits.max_concurrent_instances:
+    if machines > 1 and spend.active_instances + machines > limits.max_concurrent_instances:
+        free = max(0, limits.max_concurrent_instances - spend.active_instances)
+        blockers.append(
+            f"This render uses {machines} GPUs at once, but only {free} more machine"
+            f"{'s' if free != 1 else ''} can run right now. Ask for fewer GPUs, or stop a machine first."
+        )
+    elif spend.active_instances >= limits.max_concurrent_instances:
         blockers.append(
             f"Anywhere is limited to {limits.max_concurrent_instances} running machine"
             f"{'s' if limits.max_concurrent_instances != 1 else ''} right now. Stop one to continue."

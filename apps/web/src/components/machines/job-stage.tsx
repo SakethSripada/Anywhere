@@ -147,6 +147,13 @@ function Overview({ w }: { w: Workload }) {
               <Spec label="Provider" value={`Brev · ${w.provider.toUpperCase()}`} />
               {plan?.inputs?.dataset_name && <Spec label="Dataset" value={`${plan.inputs.dataset_name} · ${(plan.inputs.dataset_rows ?? 0).toLocaleString()} rows`} wide />}
               {plan?.inputs?.source_title && <Spec label="Scene" value={`${plan.inputs.blend_path ?? "newest .blend"} · from ${plan.inputs.source_title}`} wide />}
+              {plan?.inputs?.chunk && (
+                <Spec
+                  label="Split render"
+                  value={`Part ${plan.inputs.chunk.index + 1} of ${plan.inputs.chunk.count} · frames ${plan.inputs.chunk.offset + 1}–${plan.inputs.chunk.offset + plan.inputs.chunk.frames} of ${plan.inputs.chunk.total}`}
+                  wide
+                />
+              )}
             </dl>
           </section>
           <section className="rounded-xl border bg-card">

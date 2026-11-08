@@ -420,6 +420,12 @@ class ProposeIn(BaseModel):
     render_height: int | None = Field(None, ge=16, le=16384)
     render_samples: int | None = Field(None, ge=1, le=65536)
     render_frames: int | None = Field(None, ge=1, le=10000, description="Frames to render (render jobs).")
+    render_machines: int | None = Field(
+        None,
+        ge=1,
+        le=8,
+        description="Render jobs: split the frames across this many GPUs at once (faster, similar cost).",
+    )
     render_from_workload_id: int | None = Field(
         None, ge=1, le=2**53, description="Render jobs: the running desktop whose ~/Projects holds the scene."
     )
