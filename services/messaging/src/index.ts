@@ -139,28 +139,55 @@ async function inboundLoop() {
 /* ── Outbound ──────────────────────────────────────────────────────────── */
 
 const inFlight = new Set<bigint>();
+/** The attempt number each notification's latest delivery started with, so a
+ *  retry we schedule and a subscription event for the same row never both send. */
+const startedAttempt = new Map<bigint, number>();
+/** One iMessage space per handle, reused across notifications (two API calls saved per send). */
+const spaces = new Map<string, Promise<Awaited<ReturnType<typeof im.space.create>>>>();
+
+function spaceFor(handle: string) {
+  let space = spaces.get(handle);
+  if (!space) {
+    space = im.user(handle).then((user) => im.space.create(user));
+    spaces.set(handle, space);
+  }
+  return space;
+}
 
 async function deliver(conn: DbConnection, n: Notification) {
   if (n.channel !== "imessage" || inFlight.has(n.id)) return;
+  if ((startedAttempt.get(n.id) ?? -1) >= n.attempts) return;
   inFlight.add(n.id);
+  startedAttempt.set(n.id, n.attempts);
+  let retry = false;
   try {
     // Back off on retries: 0s, 5s, 20s.
     if (n.attempts > 0) await new Promise((r) => setTimeout(r, 5_000 * 4 ** (n.attempts - 1)));
-    const space = await im.space.create(await im.user(n.handle));
-    await space.send(n.body);
+    try {
+      await (await spaceFor(n.handle)).send(n.body);
+    } catch (err) {
+      spaces.delete(n.handle); // don't keep reusing a space that just failed
+      throw err;
+    }
     health.lastOutboundAt = Date.now();
     await conn.reducers.markNotification({ id: n.id, status: "sent" });
+    startedAttempt.delete(n.id);
     log("info", "outbound.sent", { id: String(n.id), handle: redact(n.handle) });
   } catch (err) {
     const final = n.attempts + 1 >= MAX_ATTEMPTS;
     log(final ? "error" : "warn", "outbound.failed", { id: String(n.id), attempt: n.attempts + 1, error: String(err) });
-    // Re-marking as pending keeps it in the outbox and triggers another attempt.
+    // Re-marking as pending keeps it in the outbox (and visible after a restart).
     await conn.reducers
       .markNotification({ id: n.id, status: final ? "failed" : "pending" })
       .catch((e: unknown) => log("error", "outbound.mark_failed", { id: String(n.id), error: String(e) }));
+    if (final) startedAttempt.delete(n.id);
+    retry = !final;
   } finally {
     inFlight.delete(n.id);
   }
+  // Schedule the retry ourselves: the re-marked row is an update, not an insert,
+  // and may never reach onInsert, which used to leave it stuck until a reconnect.
+  if (retry) void deliver(conn, { ...n, attempts: n.attempts + 1 });
 }
 
 function connectSpacetime() {
