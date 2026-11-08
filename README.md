@@ -78,6 +78,13 @@ What the control plane does:
 
 ---
 
+## Render time and render jobs
+
+- **Before a machine exists**, every Blender plan carries a per-GPU *minutes per frame* range (plan card → Render time). It comes from [Blender Open Data](https://opendata.blender.org) medians for Blender 4.5 with OptiX: per-scene samples per minute, with the benchmark's monster / junkshop / classroom scenes standing in for simple / detailed / heavy scenes. The frame size of the benchmark scenes isn't published, so ~1080p is assumed and the range is widened. Data and assumptions are in `services/control/src/anywhere/render_bench.py`.
+- **On a running desktop**, `estimate_render` (Insights → Render time, the agent, MCP, `POST /v1/workloads/{id}/render-estimate`) times two quick test renders of the newest `.blend` in `~/Projects`, after a warm-up. It splits fixed per-frame overhead from per-sample cost and extrapolates to the full frame and sample count, then scales to other GPUs by benchmark ratios.
+- **Render jobs** (`kind: "render"`) copy a running desktop's `~/Projects` to a GPU picked by measured render speed, render the frames with the pinned Blender, and shut the machine down. Frames are uploaded as an artifact when object storage is set up, and otherwise copied back to the desktop's `~/Projects/renders/<job>`. The desktop is kept from idle-stopping until they arrive.
+- **Desktop plans price time at the machine, not render time.** They start as a 1 h session, billed only while running. A session length the agent guessed is shown as a low-confidence range; only a length the user stated is "high confidence".
+
 ## Capability status
 
 **Verified** means exercised end to end against real services. **Tested** means covered by automated tests with fakes. **Built** means implemented but not yet run against the real provider, because the keys or credits aren't connected yet.
@@ -217,7 +224,7 @@ The control plane is also an [MCP](https://modelcontextprotocol.io) server at `/
 
 | Permission | Tools |
 |---|---|
-| `read` | `get_account`, `get_catalog`, `list_workloads`, `get_workload` (status, spend and the desktop agent's latest steps), `get_desktop_screenshot` |
+| `read` | `get_account`, `get_catalog`, `list_workloads`, `get_workload` (status, spend and the desktop agent's latest steps), `get_desktop_screenshot`, `estimate_render` (a measured test render; up to ~11 min) |
 | `plan` | `propose_workload`, `cancel_plan` |
 | `control` | `stop_workload`, `save_project`, `delete_workload` (needs `confirm: true`), `operate_desktop`, `stop_desktop_agent` |
 | `spend` | `approve_workload`, `resume_desktop` |

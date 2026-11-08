@@ -10,6 +10,7 @@ import { cents } from "@/lib/format";
 import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
+import { parsePlan } from "@/lib/plan";
 import { AppLogo, appKey, appName } from "../app/app-logo";
 import { Uptime } from "./shared";
 import { MachineMenu } from "./machine-menu";
@@ -85,13 +86,21 @@ export function JobPreview({ w }: { w: Workload }) {
     };
   }, [mine]);
   const latest = loss.at(-1);
+  const render = appKey(w) === "blender";
+  const total = render ? (parsePlan(w.planJson)?.intent.render_frames ?? 1) : 0;
   return (
     <div className="relative flex h-full flex-col overflow-hidden rounded-[7px] bg-inset">
       <div className="flex items-baseline justify-between px-2.5 pt-2 text-[10.5px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
-          <AppLogo app="pytorch" size={11} /> loss
+          <AppLogo app={render ? "blender" : "pytorch"} size={11} /> {render ? "frames" : "loss"}
         </span>
-        {latest != null && <span className="text-[11.5px] text-foreground tabular">{latest.toFixed(3)}</span>}
+        {render && progress != null ? (
+          <span className="text-[11.5px] text-foreground tabular">
+            {Math.round(progress * total)} of {total}
+          </span>
+        ) : (
+          latest != null && <span className="text-[11.5px] text-foreground tabular">{latest.toFixed(3)}</span>
+        )}
       </div>
       <div className="min-h-0 flex-1">
         {loss.length > 1 ? <Sparkline values={loss.slice(-160)} /> : <p className="px-2.5 pt-2 text-[11.5px] text-muted-foreground">{w.statusDetail || "Waiting for metrics"}</p>}
