@@ -2,10 +2,12 @@ import { cn } from "@/lib/utils";
 
 export function LogoMark({ className }: { className?: string }) {
   return (
-    <span className={cn("grid size-6 shrink-0 place-items-center rounded-md bg-foreground text-background", className)}>
-      <svg viewBox="0 0 16 16" fill="none" className="size-3.5" aria-hidden>
-        <rect x="1.75" y="2.75" width="12.5" height="9" rx="2" stroke="currentColor" strokeWidth="1.7" />
-        <path d="M5 14.25h6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    <span className={cn("grid size-6 shrink-0 place-items-center text-foreground", className)}>
+      <svg viewBox="0 0 48 48" className="size-full" aria-hidden>
+        <g stroke="currentColor" fill="currentColor" strokeWidth="2.4" strokeLinejoin="round">
+          <path d="M15 6.5h26.5l-8.5 14.5H6.5z" />
+          <path d="M15 27h26.5L33 41.5H6.5z" opacity="0.45" />
+        </g>
       </svg>
     </span>
   );
