@@ -119,6 +119,12 @@ async def test_steering_from_chat_replaces_the_task_and_stop_keeps_the_machine_o
 
     first = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a cube"}))
     await until(lambda: any(r["id"] == first["run_id"] for r in store.runs))
+    # Calling it again in the same turn doesn't restart the run.
+    again = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a cube"}))
+    assert again["run_id"] == str(first["run_id"])
+    assert next(r for r in store.runs if r["id"] == first["run_id"])["status"] == "running"
+    # The user steering is a new turn.
+    tools = {t.name: t for t in _tools(app, TurnContext(owner=ALICE, conversation_id=1, channel="web"))}
     second = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a red cube"}))
     assert second["ok"] and second["run_id"] != first["run_id"]
     assert next(r for r in store.runs if r["id"] == first["run_id"])["status"] == "stopped"

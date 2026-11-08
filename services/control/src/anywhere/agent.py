@@ -18,6 +18,7 @@ import structlog
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import BaseModel, Field
@@ -204,6 +205,11 @@ def _recorded(app: Anywhere, ctx: TurnContext, tool: StructuredTool) -> Structur
 
 
 def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
+    #: Desktops the agent was started on in this turn. Starting replaces the running task,
+    #: so a model that calls operate_desktop again in the same turn (seen live, in a loop
+    #: until the recursion limit) would restart the run each time.
+    operated: dict[int, str] = {}
+
     async def propose_workload(**kwargs) -> str:
         upload = kwargs.pop("dataset_upload_id", None)
         source = kwargs.pop("render_from_workload_id", None)
@@ -264,9 +270,19 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             return json.dumps({"ok": False, "message": str(exc)})
 
     async def operate_desktop(workload_id: int, goal: str) -> str:
+        if workload_id in operated:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "run_id": operated[workload_id],
+                    "message": "Already started in this turn and working now. Don't call this again; "
+                    "tell the user it's underway.",
+                }
+            )
         try:
             # A new goal while it works is the user steering: it replaces the current task.
             run_id = await app.operate(ctx.owner, workload_id, goal, replace=True)
+            operated[workload_id] = str(run_id)
             return json.dumps(
                 {
                     "ok": True,
@@ -467,7 +483,11 @@ class Agent:
         graph = g.compile(checkpointer=self.checkpointer)
 
         config = {"configurable": {"thread_id": f"conversation-{ctx.conversation_id}"}, "recursion_limit": 24}
-        result = await graph.ainvoke({"messages": [HumanMessage(text)]}, config)
+        try:
+            result = await graph.ainvoke({"messages": [HumanMessage(text)]}, config)
+        except GraphRecursionError:
+            log.warning("agent.recursion_limit", conversation=ctx.conversation_id)
+            return "I went around in circles on that one. Tell me what you'd like next, or ask again more specifically."
         reply = next((m for m in reversed(result["messages"]) if isinstance(m, AIMessage) and m.content), None)
         content = reply.content if reply else ""
         if isinstance(content, list):
