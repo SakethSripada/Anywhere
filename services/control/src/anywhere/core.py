@@ -295,9 +295,10 @@ class Anywhere:
         await self.store.start_agent_run(run_id, w["id"], goal)
         status, result = "failed", ""
         shots = 0
+        last_touch = float("-inf")
 
         async def record(kind: str, summary: str, detail: str, jpeg: bytes | None) -> None:
-            nonlocal shots
+            nonlocal shots, last_touch
             key = ""
             if jpeg and self.settings.storage_ready:
                 shots += 1
@@ -309,7 +310,12 @@ class Anywhere:
             if kind == "observe" and not key:
                 return
             await self.store.add_agent_step(run_id, kind, summary, detail, key)
-            await self.store.record_usage(w["id"], int(w.get("accruedCents", 0)), touch=True)
+            # Activity only feeds the 20-minute idle check, so one touch every 30 s
+            # is plenty; each one rewrites the workload row for every subscriber.
+            now = asyncio.get_running_loop().time()
+            if now - last_touch >= 30:
+                last_touch = now
+                await self.store.record_usage(w["id"], int(w.get("accruedCents", 0)), touch=True)
 
         async def has_control() -> bool:
             current = await self.store.workload(w["id"])
