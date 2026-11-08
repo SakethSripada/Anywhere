@@ -65,6 +65,9 @@ names like "cyan", "magenta", "gold". Every builder returns the object(s) it mad
 - kit.show()  live GPU ray-traced view through the camera. kit.save()  save.
 
 Rules:
+- If a builder exists for the subject, you MUST use it, never rebuild it from primitives:
+  rockets -> kit.rocket, cities/skylines -> kit.city, planets/stars/space -> kit.planet + kit.starry_sky,
+  hills/mountains/landscapes -> kit.terrain, forests -> kit.trees, seas/lakes -> kit.water.
 - Build something striking and recognisable for the request in under 60 lines. Compose kit
   builders; build a hero object from primitives (boxes, spheres, cylinders, cones, tori) arranged
   with math when there's no builder for it (a rocket = cylinder + cone + fins, a robot = boxes).

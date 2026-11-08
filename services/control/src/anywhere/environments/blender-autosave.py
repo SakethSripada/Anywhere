@@ -428,7 +428,7 @@ def _orbit(target=(0, 0, 0), radius=30.0, height=15.0, frames=240, lens=35.0, su
             hi = [max(p[i] for p in pts) for i in range(3)]
             target = tuple((lo[i] + hi[i]) / 2 for i in range(3))
             span = max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1.0)
-            radius, height = span * 1.9, target[2] + span * 0.55
+            radius, height = span * 2.4, target[2] + span * 0.45  # whole subject in frame, with room
     return _base_orbit(_vec(target), float(radius), float(height), int(frames), float(lens))
 
 
