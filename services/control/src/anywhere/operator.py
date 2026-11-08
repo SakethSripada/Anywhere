@@ -21,7 +21,7 @@ from typing import Literal, TypedDict
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .desktop import Frame, Screen, prepare_frame
 from .llm import ainvoke_json
@@ -67,6 +67,22 @@ ActionName = Literal[
     "click", "double_click", "right_click", "move", "drag", "type", "key", "scroll", "shell", "wait", "done", "fail"
 ]
 
+#: Names vision models commonly use for the same actions.
+_ACTION_ALIASES = {
+    "left_click": "click",
+    "doubleclick": "double_click",
+    "rightclick": "right_click",
+    "mouse_move": "move",
+    "hover": "move",
+    "hotkey": "key",
+    "keypress": "key",
+    "press": "key",
+    "key_press": "key",
+    "type_text": "type",
+    "finish": "done",
+    "finished": "done",
+}
+
 
 class Action(BaseModel):
     thought: str = ""
@@ -80,6 +96,20 @@ class Action(BaseModel):
     keys: list[str] | None = None
     dy: int | None = None
     command: str | None = None
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _short_summary(cls, v: object) -> object:
+        # A wordy label is not worth a repair round trip (or, twice, the whole run).
+        return v[:120] if isinstance(v, str) else v
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _known_action(cls, v: object) -> object:
+        if isinstance(v, str):
+            name = v.strip().lower().replace("-", "_").replace(" ", "_")
+            return _ACTION_ALIASES.get(name, name)
+        return v
 
     @model_validator(mode="after")
     def _fields_for_action(self) -> Action:
