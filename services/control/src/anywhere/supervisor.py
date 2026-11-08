@@ -60,6 +60,21 @@ RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
 PROJECTS_DIR = "~/workspace/anywhere/projects"
 
+#: Opens ~/Projects/scene.blend when one was restored, and installs the autosave.
+#: Runs as the desktop user through Cua's shell.
+BLENDER_LAUNCH = (
+    "cat > /tmp/anywhere_autosave.py <<'ANYWHERE_PY'\n"
+    + resources.files("anywhere.environments").joinpath("blender-autosave.py").read_text()
+    + "\nANYWHERE_PY\n"
+    "cd ~/Projects && f=; [ -f scene.blend ] && f=scene.blend; "
+    "DISPLAY=:1 nohup blender $f --python /tmp/anywhere_autosave.py >/tmp/blender.log 2>&1 &"
+)
+#: Flag the autosave, then give Blender a moment to write before the archive.
+SAVE_NOW = (
+    "(docker exec anywhere-desktop touch /tmp/anywhere-save-now 2>/dev/null"
+    " || sudo -n docker exec anywhere-desktop touch /tmp/anywhere-save-now) && sleep 5"
+)
+
 #: Blender's published checksum for the pinned release (download.blender.org).
 BLENDER_SHA256 = {"4.5.15": "0d2b8bb2efe97e6c8eb57de6b7322f8800e1984e3125b60decca5f6771e4773e"}
 
@@ -386,7 +401,7 @@ class Supervisor:
         if plan.get("intent", {}).get("application") == "blender":
             with contextlib.suppress(Exception):
                 async with connect_screen(remote, self.vault.agent_token(w["id"])) as screen:
-                    await screen.shell("cd ~/Projects && DISPLAY=:1 nohup blender >/tmp/blender.log 2>&1 &", timeout=10)
+                    await screen.shell(BLENDER_LAUNCH, timeout=15)
                 await self._event(w, "Blender is open")
 
     # ── Projects ──────────────────────────────────────────────────────────
@@ -411,6 +426,10 @@ class Supervisor:
             await self._event(w, "Object storage isn't configured; files stay on the machine's disk only.", "warn")
             return None
         pid, key = self._project(w)
+        if w["kind"] == "desktop":
+            # Ask Blender's autosave (blender-autosave.py) to write the open scene first.
+            with contextlib.suppress(Exception):
+                await remote.run(SAVE_NOW, timeout=20, check=False)
         proc = remote.popen(f"tar -czf - -C {PROJECTS_DIR} .", stdout=subprocess.PIPE)
         size = await self.storage.upload_stream(proc, key, "application/gzip")
         await self.store.upsert_project(pid, w["owner"], w["title"], "blender", key, size, True)
