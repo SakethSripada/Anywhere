@@ -49,7 +49,16 @@ if ! $DOCKER exec "$NAME" test -f /opt/.anywhere-ready; then
     apt-get install -y -qq --no-install-recommends x11vnc novnc websockify xz-utils curl ca-certificates \
       libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libegl1 libsm6 libice6 >/dev/null
     f=blender-$BLENDER_VERSION-linux-x64.tar.xz
-    curl -fsSLo /tmp/\$f https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/\$f
+    # Retry, then fall back to official mirrors: one blender.org hiccup used to fail
+    # the whole launch (curl exit 22). The checksum below vouches for any mirror.
+    ok=
+    for base in https://download.blender.org/release https://mirrors.ocf.berkeley.edu/blender/release \\
+                https://ftp.nluug.nl/pub/graphics/blender/release; do
+      if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 20 \\
+           -o /tmp/\$f \$base/Blender${BLENDER_VERSION%.*}/\$f; then ok=1; break; fi
+      echo \"Blender download from \$base failed; trying the next mirror\" >&2
+    done
+    [ -n \"\$ok\" ] || { echo 'Could not download Blender from any mirror' >&2; exit 22; }
     echo '$BLENDER_SHA256  /tmp/'\$f | sha256sum -c -
     tar -xJf /tmp/\$f -C /opt && rm /tmp/\$f
     ln -sf /opt/blender-$BLENDER_VERSION-linux-x64/blender /usr/local/bin/blender
