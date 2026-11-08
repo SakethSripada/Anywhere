@@ -364,6 +364,32 @@ async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_pa
     assert ("delete", instance_name(1)) in brev.calls
 
 
+async def test_batch_monitor_reads_the_rest_of_the_log_before_failing(tmp_path, monkeypatch):
+    from anywhere import supervisor as sup_mod
+
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 3600  # only the first poll may wait; draining must not
+    sup.remote_factory = ScriptedRemote
+    backlog = ("x" * 99 + "\n") * (sup_mod.LOG_CHUNK // 100)
+    ScriptedRemote.polls = [
+        poll_output(log=backlog, status="failed: Training exited with an error (exit 1)"),
+        poll_output(log="torch.OutOfMemoryError: CUDA out of memory\n", status="failed: oom"),
+    ]
+    w = store.add(kind="batch", status="running")
+    sleeps = []
+
+    async def no_wait(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(sup_mod.asyncio, "sleep", no_wait)
+    await sup._monitor_batch(w)
+    assert "".join(t for _, t in store.logs).endswith("CUDA out of memory\n")
+    assert sleeps.count(3600) == 1
+    assert store.rows[1]["status"] == "failed"
+    assert "oom" in store.rows[1]["statusDetail"]
+
+
 async def test_batch_monitor_fails_when_runner_dies_silently(tmp_path):
     brev = FakeBrev()
     sup, store, _ = make(tmp_path, brev)
