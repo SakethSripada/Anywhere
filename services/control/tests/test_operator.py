@@ -223,3 +223,13 @@ def test_keys_lists_are_chords_only_with_modifiers():
     assert key_chords(["g", "x", "3", "return"]) == [["g"], ["x"], ["3"], ["return"]]
     assert key_chords(["shift", "a", "escape"]) == [["shift", "a"], ["escape"]]
     assert key_chords(["f3"]) == [["f3"]]
+
+
+async def test_keys_on_a_type_action_are_pressed_after_the_text():
+    _, screen, _ = await run(
+        [
+            {"action": "type", "text": "3", "keys": ["Return"]},
+            {"action": "done", "text": "ok"},
+        ]
+    )
+    assert [c[0] for c in screen.calls] == ["type", "keys"]
