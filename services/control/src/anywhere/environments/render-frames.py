@@ -2,9 +2,9 @@
 
     blender -b project/scene.blend -P render-frames.py -- config.json
 
-config.json: {"frames": 24, "samples": null}. Renders `frames` frames starting at
-the scene's start frame (the scene's own settings otherwise), writes them to
-renders/, and appends one JSON line per frame to metrics.jsonl.
+config.json: {"frames": 24, "offset": 0, "samples": null}. Renders `frames` frames
+starting `offset` frames after the scene's start frame (a split render's part), with the
+scene's own settings otherwise. Frames keep their real numbers, so parts merge cleanly.
 """
 
 import json
@@ -43,10 +43,12 @@ if cfg.get("samples"):
     scene.cycles.samples = int(cfg["samples"])
 
 total = max(1, int(cfg.get("frames") or 1))
+offset = max(0, int(cfg.get("offset") or 0))  # a split render's part starts this many frames in
 out = job / "renders"
 out.mkdir(exist_ok=True)
 with (job / "metrics.jsonl").open("a") as metrics:
-    for done, frame in enumerate(range(scene.frame_start, scene.frame_start + total), start=1):
+    first = scene.frame_start + offset
+    for done, frame in enumerate(range(first, first + total), start=1):
         scene.frame_set(frame)
         scene.render.filepath = str(out / f"frame_{frame:04d}")
         start = time.perf_counter()

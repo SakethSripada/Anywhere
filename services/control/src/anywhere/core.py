@@ -223,6 +223,7 @@ class Anywhere:
             ),
             spend=await self.spend_snapshot(owner),
             limits=self._limits(),
+            machines=result.machines,
         )
         plan_doc["policy"] = {"blockers": decision.blockers, "notes": decision.notes}
 
@@ -317,6 +318,8 @@ class Anywhere:
                 f"Brev isn't offering {w['instanceType']} right now. Ask me for a new plan and I'll pick another machine."
             )
         acct = await self.account(owner)
+        plan_doc = json.loads(w["planJson"])
+        machines = int(plan_doc.get("machines") or 1)
         decision = budget.evaluate(
             kind=w["kind"],
             cost_high_cents=int(w["estHighCents"]),
@@ -325,13 +328,75 @@ class Anywhere:
             ),
             spend=await self.spend_snapshot(owner),
             limits=self._limits(),
+            machines=machines,
         )
         if not decision.allowed:
             raise ActionError(" ".join(decision.blockers))
+        if machines > 1:
+            parts = await self._split_render(w, plan_doc, machines)
+            for part in parts:
+                self.supervisor.launch(part)
+            return {"ok": True, "machines": len(parts), "workload_ids": [int(p["id"]) for p in parts]}
         await self.store.transition(workload_id, Status.APPROVED, "Approved")
         w["status"] = Status.APPROVED
         self.supervisor.launch(w)
         return {"ok": True}
+
+    async def _split_render(self, w: dict, plan_doc: dict, machines: int) -> list[dict]:
+        """Turn an approved split render into one render job per GPU, each with its own frames.
+
+        The approved workload becomes part 1; the rest are created beside it in the same
+        conversation. Every part keeps the farm's id so their frames land in one folder."""
+        frames = int(plan_doc.get("intent", {}).get("render_frames") or 1)
+        machines = max(1, min(machines, frames))
+        base, extra = divmod(frames, machines)
+        sizes = [base + (1 if i < extra else 0) for i in range(machines)]
+        low, high = int(w["estLowCents"]), int(w["estHighCents"])
+        farm = int(w["id"])
+        parts: list[dict] = []
+        offset = 0
+        for i, size in enumerate(sizes):
+            part_plan = json.loads(json.dumps(plan_doc))
+            part_plan["machines"] = 1
+            part_plan.setdefault("intent", {})["render_frames"] = size
+            part_plan.setdefault("inputs", {})["chunk"] = {
+                "index": i,
+                "count": machines,
+                "offset": offset,
+                "frames": size,
+                "total": frames,
+                "farm_id": farm,
+            }
+            title = f"Render part {i + 1} of {machines} (frames {offset + 1}–{offset + size} of {frames})"
+            part_low, part_high = math.ceil(low / machines), math.ceil(high / machines)
+            if i == 0:
+                await self.store.update_workload_plan(farm, title, json.dumps(part_plan), part_low, part_high)
+                pid = farm
+            else:
+                pid = new_id()
+                await self.store.create_workload(
+                    id=pid,
+                    owner=w["owner"],
+                    conversation_id=int(w["conversationId"]),
+                    project_id=int(w.get("projectId", 0)),
+                    kind=w["kind"],
+                    title=title,
+                    summary=w.get("summary", ""),
+                    plan_json=json.dumps(part_plan),
+                    instance_type=w["instanceType"],
+                    gpu_name=w["gpuName"],
+                    provider=w.get("provider", ""),
+                    hourly_cents=int(w["hourlyCents"]),
+                    est_low_cents=part_low,
+                    est_high_cents=part_high,
+                    stoppable=bool(w.get("stoppable", False)),
+                )
+            await self.store.transition(pid, Status.APPROVED, f"Approved (part {i + 1} of {machines})")
+            part = await self.store.workload(pid) or {**w, "id": pid}
+            part = {**part, "planJson": json.dumps(part_plan), "status": Status.APPROVED}
+            parts.append(part)
+            offset += size
+        return parts
 
     async def cancel(self, owner: str, workload_id: int) -> None:
         w = await self.owned(owner, workload_id)

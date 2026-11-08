@@ -100,3 +100,20 @@ def test_guard_stops_everything_at_the_platform_budget():
 
 def test_guard_ignores_settled_workloads():
     assert _guard(status="stopped", idle_minutes=999) is None
+
+
+def test_split_renders_need_room_for_every_machine():
+    from anywhere.budget import AccountPolicy, PlatformLimits, SpendSnapshot, evaluate
+
+    acct = AccountPolicy(True, 5000, 0)
+    spend = SpendSnapshot(
+        account_month_cents=0, platform_cents=0, active_instances=1, account_active_kinds=("desktop",)
+    )
+    tight = evaluate(
+        kind="batch", cost_high_cents=100, account=acct, spend=spend, limits=PlatformLimits(5000, 4), machines=4
+    )
+    assert not tight.allowed and any("4 GPUs at once" in b and "only 3 more" in b for b in tight.blockers)
+    roomy = evaluate(
+        kind="batch", cost_high_cents=100, account=acct, spend=spend, limits=PlatformLimits(5000, 5), machines=4
+    )
+    assert roomy.allowed

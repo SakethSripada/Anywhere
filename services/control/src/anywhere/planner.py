@@ -33,6 +33,10 @@ SUPPORTED_APPS: dict[str, str] = {
 SETUP_MINUTES = {"desktop": 9, "batch": 6}
 #: Installing Blender on a render machine and copying the project over.
 RENDER_SETUP_MINUTES = 4
+#: A split render runs at most this many GPUs at once.
+MAX_RENDER_MACHINES = 8
+#: Suggest splitting a single-GPU render once it has at least this many frames.
+SPLIT_SUGGESTION_FRAMES = 24
 
 
 class Intent(BaseModel):
@@ -63,6 +67,11 @@ class Intent(BaseModel):
     render_height: int | None = Field(None, description="Render height in pixels, if known (default 1080).")
     render_samples: int | None = Field(None, description="Cycles samples per pixel, if known (default 128).")
     render_frames: int | None = Field(None, description="Number of frames to render, for a render job (default 1).")
+    render_machines: int | None = Field(
+        None,
+        description="Render jobs: how many GPUs to split the frames across, 1-8. More GPUs finish sooner for "
+        "about the same total cost; use it for animations when the user wants speed.",
+    )
     preference: Preference | None = None
     max_budget_usd: float | None = None
 
@@ -85,6 +94,13 @@ class Intent(BaseModel):
     def _samples(cls, v: int | None) -> int | None:
         if v is not None and not 1 <= v <= 65536:
             raise ValueError("samples must be between 1 and 65536")
+        return v
+
+    @field_validator("render_machines")
+    @classmethod
+    def _machines(cls, v: int | None) -> int | None:
+        if v is not None and not 1 <= v <= MAX_RENDER_MACHINES:
+            raise ValueError(f"render_machines must be between 1 and {MAX_RENDER_MACHINES}")
         return v
 
     @field_validator("render_frames")
@@ -137,6 +153,8 @@ class Plan(BaseModel):
     warnings: list[str]
     #: For Blender work: estimated minutes per frame on each candidate GPU (see render_bench).
     render_time: dict | None = None
+    #: Machines that run at once (more than one for a split render).
+    machines: int = 1
 
 
 class Unsupported(BaseModel):
@@ -300,6 +318,7 @@ def estimate(intent: Intent, req: Requirements, offer: Offer) -> Estimate:
         assumptions.append("Idle desktops are saved and stopped automatically.")
     elif req.environment == "blender-render":
         frames = intent.render_frames or 1
+        machines = render_machines(intent)
         fe = frame_minutes(
             offer.gpu_name,
             intent.scene_complexity or "detailed",
@@ -312,12 +331,18 @@ def estimate(intent: Intent, req: Requirements, offer: Offer) -> Estimate:
             confidence = "low"
             assumptions.append(f"No benchmark data for the {offer.gpu_name}, so this is a wide guess.")
         else:
-            low, high = frames * fe.minutes_low / 60, frames * fe.minutes_high / 60
+            per_machine = math.ceil(frames / machines)
+            low, high = per_machine * fe.minutes_low / 60, per_machine * fe.minutes_high / 60
             confidence = "medium" if fe.runs >= 3 else "low"
             assumptions.append(
                 f"{frames} frame{'s' if frames != 1 else ''} at ~{fe.minutes_low:.1f}–{fe.minutes_high:.1f} min each on the "
                 f"{fe.gpu}, from Blender Open Data benchmarks ({fe.runs} run{'s' if fe.runs != 1 else ''})."
             )
+            if machines > 1:
+                assumptions.append(
+                    f"Split across {machines} {fe.gpu}s rendering at once, {per_machine} frames each; "
+                    f"times are wall-clock and the cost covers all {machines} machines."
+                )
         assumptions.append(f"Includes ~{RENDER_SETUP_MINUTES} min to install Blender and copy your project.")
         low, high = low + RENDER_SETUP_MINUTES / 60, high + RENDER_SETUP_MINUTES / 60
         assumptions.append("The machine shuts down as soon as the last frame is saved.")
@@ -344,11 +369,13 @@ def estimate(intent: Intent, req: Requirements, offer: Offer) -> Estimate:
         assumptions.append("Runtime depends heavily on inputs we haven't inspected yet.")
 
     low, high = low + setup_h, high + setup_h
+    # Every machine of a split render bills for the whole (parallel) run.
+    fleet = render_machines(intent) if req.environment == "blender-render" else 1
     return Estimate(
         hours_low=round(low, 2),
         hours_high=round(high, 2),
-        cost_low_cents=math.ceil(low * offer.price_per_hour * 100),
-        cost_high_cents=math.ceil(high * offer.price_per_hour * 100),
+        cost_low_cents=math.ceil(low * offer.price_per_hour * 100 * fleet),
+        cost_high_cents=math.ceil(high * offer.price_per_hour * 100 * fleet),
         confidence=confidence,
         assumptions=assumptions,
     )
@@ -429,6 +456,12 @@ def plan(intent: Intent, catalog: Catalog, default_preference: Preference = "bal
 
     selected, *rest = ranked
     title = _title(intent)
+    machines = render_machines(intent) if req.environment == "blender-render" else 1
+    if req.environment == "blender-render" and machines == 1 and (intent.render_frames or 1) >= SPLIT_SUGGESTION_FRAMES:
+        warnings.append(
+            "Tip: splitting this across 4 GPUs would finish about 4x sooner for about the same cost. "
+            "Ask for it to use 4 GPUs."
+        )
     return Plan(
         intent=intent,
         title=title,
@@ -438,7 +471,13 @@ def plan(intent: Intent, catalog: Catalog, default_preference: Preference = "bal
         outputs=_outputs(intent, req),
         warnings=warnings,
         render_time=render_table(intent, [selected, *rest[:2]]) if _is_blender(intent) else None,
+        machines=machines,
     )
+
+
+def render_machines(intent: Intent) -> int:
+    """GPUs a render job runs on at once: as asked, but never more than there are frames."""
+    return max(1, min(intent.render_machines or 1, intent.render_frames or 1, MAX_RENDER_MACHINES))
 
 
 def _is_blender(intent: Intent) -> bool:
@@ -462,6 +501,7 @@ def render_table(intent: Intent, choices: list[Choice]) -> dict:
         "height": height,
         "samples": samples,
         "frames": intent.render_frames or 1,
+        "machines": render_machines(intent) if intent.kind == "render" else 1,
         "rows": rows,
         "basis": "Blender Open Data, Blender 4.5 OptiX medians. A test render on the machine gives an exact number.",
     }
