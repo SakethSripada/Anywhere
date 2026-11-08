@@ -52,8 +52,8 @@ Blender (keyboard first; its menu rows are small and easy to miss with a click):
 - Blender shortcuts act on the panel under the mouse: "move" over the 3D viewport first.
 - Add or run anything with search: press F3, type the name (e.g. "Cylinder", "Subdivision \
 Surface"), then press Enter. Shift+A opens the Add menu if you need to browse.
-- Move, rotate or scale the selection with separate "key" actions, mouse over the viewport: \
-key g, key x, key 3, key Return moves 3 m along X (r rotates, s scales, y/z pick the axis). \
+- Move, rotate or scale the selection with a "key" action, mouse over the viewport: \
+keys ["g", "x", "3", "Return"] moves 3 m along X (r rotates, s scales, y/z pick the axis). \
 Never "type" these with spaces: in Blender a space plays the animation and a bare x opens \
 Delete. If a Delete prompt appears, press Escape. Tab toggles Edit Mode. Ctrl+S saves.
 - Check a transform worked in the Location/Rotation/Scale fields on the right (Object \
@@ -363,6 +363,26 @@ def _from_grid(action: Action, width: int, height: int) -> Action:
     )
 
 
+MODIFIERS = {"ctrl", "control", "shift", "alt", "super", "meta", "cmd", "win"}
+
+
+def key_chords(keys: list[str]) -> list[list[str]]:
+    """Split a keys list into presses: modifiers hold for the next key, everything else is
+    pressed in turn. ["ctrl", "s"] is one chord; ["g", "x", "3", "enter"] is four presses
+    (sent as one chord on a live run, it did nothing while the agent reported a move)."""
+    chords: list[list[str]] = []
+    held: list[str] = []
+    for k in keys:
+        if k in MODIFIERS:
+            held.append(k)
+        else:
+            chords.append([*held, k])
+            held = []
+    if held:
+        chords.append(held)
+    return chords
+
+
 def _on_screen(action: Action, width: int, height: int) -> Action:
     """Clamp coordinates into the screenshot. A point just off the edge would otherwise
     land outside the desktop (or fail in Cua) and draw the cursor off the stream."""
@@ -407,7 +427,8 @@ async def _execute(screen: Screen, a: Action, frame: Frame) -> str:
         case "type":
             await screen.type(a.text or "")
         case "key":
-            await screen.keys([k.lower() for k in a.keys or []])
+            for chord in key_chords([k.lower() for k in a.keys or []]):
+                await screen.keys(chord)
         case "shell":
             command = a.command or ""
             if not command_allowed(command):
