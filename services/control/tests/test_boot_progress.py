@@ -62,7 +62,7 @@ async def test_wait_for_fails_fast_when_brev_deletes_the_instance(monkeypatch):
         return next(stages)
 
     monkeypatch.setattr(cli, "get", get)
-    with pytest.raises(BrevError, match="deleting"):
+    with pytest.raises(BrevError, match="shut the machine down"):
         await cli.wait_for("n", interval=0)
 
 
