@@ -1,4 +1,4 @@
-"""Text-to-3D server for an Anywhere GPU box: SD-Turbo makes an object picture, TripoSR
+"""Text-to-3D server for an Anywhere GPU box: SDXL-Turbo makes an object picture, TripoSR
 turns it into a coloured mesh, returned as GLB. Runs on the host (not in Docker):
 
     python gen3d-server.py            # listens on 127.0.0.1:7860
@@ -26,16 +26,18 @@ from tsr.system import TSR  # noqa: E402
 from tsr.utils import remove_background, resize_foreground, to_gradio_3d_orientation  # noqa: E402
 
 DEVICE = "cuda"
+# Phrased as a figurine with wide margins: image models then draw the whole subject, uncropped
+# and without a base, which is what TripoSR needs to rebuild a clean, complete mesh.
 STYLE = (
-    "{p}, a single complete object, entire object visible, centered, isolated on a plain white background, "
-    "highly detailed, vibrant colors, 3d render, product shot, soft studio lighting"
+    "a miniature figurine of {p}, full body, the whole figurine small in the center of an empty pure white "
+    "background with wide empty margins on every side, side three-quarter view, no base, no ground, "
+    "highly detailed, vibrant colors, studio product photo"
 )
-NEGATIVE = "cropped, cut off, multiple objects, text, watermark, blurry, dark background, scene, ground"
 
-print("loading SD-Turbo", flush=True)
-pipe = AutoPipelineForText2Image.from_pretrained("stabilityai/sd-turbo", torch_dtype=torch.float16, variant="fp16").to(
-    DEVICE
-)
+print("loading SDXL-Turbo", flush=True)  # draws one complete subject on white far more reliably than SD-Turbo
+pipe = AutoPipelineForText2Image.from_pretrained(
+    "stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16"
+).to(DEVICE)
 pipe.set_progress_bar_config(disable=True)
 print("loading TripoSR", flush=True)
 model = TSR.from_pretrained("stabilityai/TripoSR", config_name="config.yaml", weight_name="model.ckpt")
@@ -51,14 +53,14 @@ def generate(prompt: str, seed: int = 0) -> tuple[bytes, dict]:
     g = torch.Generator(DEVICE).manual_seed(int(seed) or 42)
     image = pipe(
         prompt=STYLE.format(p=prompt.strip()),
-        negative_prompt=NEGATIVE,
-        num_inference_steps=3,
+        num_inference_steps=4,
         guidance_scale=0.0,
         width=512,
         height=512,
         generator=g,
     ).images[0]
     t1 = time.time()
+    image.save("/tmp/gen3d-last.png")  # the picture TripoSR worked from, for debugging
     fg = resize_foreground(remove_background(image, session), 0.85)
     arr = np.array(fg).astype(np.float32) / 255.0
     arr = arr[:, :, :3] * arr[:, :, 3:4] + (1 - arr[:, :, 3:4]) * 0.5
