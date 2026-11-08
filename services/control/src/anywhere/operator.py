@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .desktop import Frame, Screen, prepare_frame
-from .llm import ainvoke_json
+from .llm import ModelUnavailable, ainvoke_json
 
 log = structlog.get_logger()
 
@@ -294,6 +294,19 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
     g.add_edge("decide", "act")
     g.add_conditional_edges("act", after_act, ["observe", END])
     return g.compile()
+
+
+def describe_failure(exc: Exception) -> str:
+    """What to tell the user when a run crashes, without a raw traceback or validation dump."""
+    if isinstance(exc, ModelUnavailable):
+        return "The vision model isn't set up on this server, so I can't operate the desktop."
+    text = str(exc)
+    if text.startswith("Model did not produce valid output"):
+        return (
+            "The vision model kept replying in a form I couldn't act on, so I stopped. Try again or rephrase the task."
+        )
+    first = text.strip().splitlines()[0][:300] if text.strip() else exc.__class__.__name__
+    return f"I hit a problem operating the desktop: {first}"
 
 
 def _on_screen(action: Action, width: int, height: int) -> Action:

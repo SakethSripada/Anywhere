@@ -4,7 +4,8 @@ import json
 from langchain_core.messages import AIMessage
 from PIL import Image
 
-from anywhere.operator import Action, build_operator, command_allowed
+from anywhere.llm import ModelUnavailable
+from anywhere.operator import Action, build_operator, command_allowed, describe_failure
 
 
 def png(w=2560, h=1440) -> bytes:
@@ -177,3 +178,14 @@ async def test_the_agent_stops_when_the_desktop_keeps_failing():
     final = await graph.ainvoke({"goal": "test", "step": 0, "history": []})
     assert final["status"] == "failed" and final["step"] == 3
     assert "tunnel closed" in final["result"]
+
+
+async def test_a_model_that_never_gives_a_usable_reply_fails_with_a_readable_message():
+    import pytest
+
+    with pytest.raises(ValueError) as caught:
+        await run([{"action": "click"}, {"action": "click"}])
+    message = describe_failure(caught.value)
+    assert "validation" not in message and "vision model" in message
+    assert "set up" in describe_failure(ModelUnavailable("NVIDIA_API_KEY is not configured"))
+    assert describe_failure(RuntimeError("tunnel closed\ntraceback...")).endswith("tunnel closed")
