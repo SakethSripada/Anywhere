@@ -17,6 +17,8 @@ from PIL import Image
 from .remote import Remote
 
 VNC_PORT = 6080
+#: A second, view-only VNC server (x11vnc -viewonly) for watch links.
+WATCH_VNC_PORT = 6081
 SPACESD_PORT = 3211
 
 
@@ -179,10 +181,20 @@ class TunnelPool:
 
 
 class VncTunnels(TunnelPool):
-    """Browser VNC sessions: one shared tunnel per desktop to its VNC port."""
+    """Browser VNC sessions: one shared tunnel per desktop to its VNC port, and one to
+    its view-only port for people watching through a share link."""
 
     def __init__(self) -> None:
         super().__init__(VNC_PORT)
+        self.watch = TunnelPool(WATCH_VNC_PORT)
+
+    async def close(self, workload_id: int) -> None:
+        await super().close(workload_id)
+        await self.watch.close(workload_id)
+
+    async def close_all(self) -> None:
+        await super().close_all()
+        await self.watch.close_all()
 
 
 class Screenshots:
