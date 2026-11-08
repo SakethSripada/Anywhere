@@ -708,6 +708,15 @@ class Supervisor:
         except Exception as exc:
             log.warning("recover.unavailable", error=str(exc))
             return
+        if any(w["status"] == Status.RUNNING for w in workloads) and self.brev.api_key:
+            # ~/.ssh/config (with the Include `brev refresh` adds) isn't on a volume,
+            # so after a container restart the instance host aliases are gone. Without
+            # this, a reattached training monitor can't reach its machine and fails
+            # the job, and desktops can't open VNC.
+            try:
+                await self.brev.refresh_ssh()
+            except Exception as exc:
+                log.warning("recover.refresh_ssh_failed", error=str(exc))
         for w in workloads:
             status = w["status"]
             if status in (Status.PROVISIONING, Status.CONFIGURING, Status.SAVING, Status.STOPPING, Status.APPROVED):
