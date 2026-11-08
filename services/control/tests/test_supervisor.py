@@ -609,3 +609,28 @@ async def test_relay_copies_between_machines(tmp_path):
     out = tmp_path / "out"
     await _relay(_LocalShell(), "printf hello", _LocalShell(), f"cat > {out}")
     assert out.read_text() == "hello"
+
+
+def test_housekeeping_drops_vault_records_nothing_will_read(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from anywhere import savings, sharing
+
+    sup, _, _ = make(tmp_path, FakeBrev())
+    now = datetime.now(UTC)
+    v = sup.vault
+    v.section_put(sharing.SECTION, "live", {"workload_id": 1, "expires_at": (now + timedelta(hours=1)).isoformat()})
+    v.section_put(sharing.SECTION, "old", {"workload_id": 2, "expires_at": (now - timedelta(minutes=1)).isoformat()})
+    v.section_put("notification_attachments", "1", {"key": "k", "name": "a.jpg", "at": now.isoformat()})
+    v.section_put(
+        "notification_attachments", "2", {"key": "k", "name": "a.jpg", "at": (now - timedelta(days=2)).isoformat()}
+    )
+    v.section_put("notification_attachments", "3", {"key": "k", "name": "a.jpg"})  # written before timestamps
+    v.section_put(savings.SECTION, "recent", {"stopped_at": (now - timedelta(days=3)).isoformat()})
+    v.section_put(savings.SECTION, "ancient", {"stopped_at": (now - timedelta(days=200)).isoformat()})
+
+    assert sup.housekeeping(now) == 4
+    assert [k for k, _ in v.section_items(sharing.SECTION)] == ["live"]
+    assert [k for k, _ in v.section_items("notification_attachments")] == ["1"]
+    assert [k for k, _ in v.section_items(savings.SECTION)] == ["recent"]
+    assert sup.housekeeping(now) == 0

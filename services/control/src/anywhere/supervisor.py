@@ -23,14 +23,14 @@ import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from . import budget, savings
+from . import budget, savings, sharing
 from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
 from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
@@ -49,6 +49,8 @@ JOB_DIR = "~/workspace/anywhere/job"
 #: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
 STARTING_POLL_LIMIT = 6
 #: How often the guard looks for orphaned Brev instances.
+#: Idle-stop savings older than this stop counting toward the total and are dropped.
+IDLE_STOP_RETENTION_DAYS = 90
 RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
 PROJECTS_DIR = "~/workspace/anywhere/projects"
@@ -971,7 +973,20 @@ class Supervisor:
         loop_now = asyncio.get_running_loop().time()
         if loop_now - self._last_reconcile >= RECONCILE_SECONDS:
             self._last_reconcile = loop_now
+            self.housekeeping()
             await self.reconcile(workloads)
+
+    def housekeeping(self, now: datetime | None = None) -> int:
+        """Drop vault records nothing will read again. Every vault write rewrites (and
+        fsyncs) the whole file, so these used to make every later write slower."""
+        now = now or _now()
+        dropped = self.vault.purge_records(sharing.SECTION, lambda r: not sharing.live(r, now))
+        # The bridge fetches a text's picture seconds after sending the text.
+        day_ago = (now - timedelta(days=1)).isoformat()
+        dropped += self.vault.purge_records("notification_attachments", lambda r: (r.get("at") or "") < day_ago)
+        kept = (now - timedelta(days=IDLE_STOP_RETENTION_DAYS)).isoformat()
+        dropped += self.vault.purge_records(savings.SECTION, lambda r: r["stopped_at"] < kept)
+        return dropped
 
     async def reconcile(self, workloads: list[dict]) -> None:
         """Delete Anywhere instances that no billable workload owns."""
