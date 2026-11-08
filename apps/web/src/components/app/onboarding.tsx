@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, useApi } from "@/lib/api";
 import { reducers, useReducer, type Session } from "@/lib/stdb";
-import { Logo } from "./logo";
+import { LogoMark } from "./logo";
 
 export function Onboarding({ session, account, accountReady }: { session: Session; account: Account | null; accountReady: boolean }) {
   if (!session.ready || !accountReady) {
@@ -37,7 +37,7 @@ function Stage({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-4">
       <div className="mb-10 flex items-center gap-2">
-        <Logo className="size-6" />
+        <LogoMark className="size-7" />
         <span className="text-lg font-semibold tracking-tight">Anywhere</span>
       </div>
       <div className="w-full max-w-[360px]">{children}</div>
