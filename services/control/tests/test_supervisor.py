@@ -695,3 +695,27 @@ async def test_no_fallback_without_a_same_gpu_offer_elsewhere(tmp_path):
     sup.launch(store.add(instanceType="g6e.2xlarge", gpuName="L40S", provider="aws", kind="batch"))
     await drain(sup)
     assert store.rows[1]["status"] == "failed"
+
+
+async def test_a_failed_type_is_remembered_and_skipped_next_launch(tmp_path):
+    from anywhere.catalog import Catalog
+
+    catalog = Catalog()
+    brev = FakeBrev(fail_types={"g4dn.xlarge"})
+    sup, store, _ = make(tmp_path, brev)
+    sup.catalog = catalog
+
+    async def configure(w, remote): ...
+
+    sup._configure_desktop = configure
+    sup.launch(store.add(instanceType="g4dn.xlarge", gpuName="T4", provider="aws", hourlyCents=63))
+    await drain(sup)
+    assert catalog.recently_failed("g4dn.xlarge")
+    assert "g4dn.xlarge" not in {o.type for o in catalog.offers()}
+
+    # A plan made before the failure goes straight to the working machine.
+    brev.calls.clear()
+    sup.launch(store.add(id=2, instanceType="g4dn.xlarge", gpuName="T4", provider="aws", hourlyCents=63))
+    await drain(sup)
+    assert store.rows[2]["instanceType"] == "n1-standard-4:nvidia-tesla-t4:1"
+    assert [c for c in brev.calls if c[0] == "create"] == [("create", instance_name(2))]
