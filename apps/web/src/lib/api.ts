@@ -49,7 +49,7 @@ async function request<T>(path: string, init: RequestInit & { token: string | nu
 export function useApi() {
   const { token, identity } = useSession();
 
-  const get = useCallback(<T,>(path: string) => request<T>(path, { method: "GET", token, identity }), [token, identity]);
+  const get = useCallback(<T,>(path: string, opts?: { signal?: AbortSignal }) => request<T>(path, { method: "GET", token, identity, signal: opts?.signal }), [token, identity]);
   const post = useCallback(
     <T,>(path: string, body?: Json) =>
       request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body), token, identity }),
@@ -62,9 +62,9 @@ export function useApi() {
 }
 
 /** Unauthenticated probe used for the integrations panel and the offline banner. */
-export async function fetchHealth(): Promise<{ ok: boolean; mode: string; integrations: Record<string, boolean> } | null> {
+export async function fetchHealth(signal?: AbortSignal): Promise<{ ok: boolean; mode: string; integrations: Record<string, boolean> } | null> {
   try {
-    const res = await fetch(`${config.apiUrl}/health`, { cache: "no-store" });
+    const res = await fetch(`${config.apiUrl}/health`, { cache: "no-store", signal });
     return res.ok ? await res.json() : null;
   } catch {
     return null;
@@ -78,11 +78,15 @@ export async function uploadDataset(
   api: ReturnType<typeof useApi>,
   file: File,
   onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
 ): Promise<{ uploadId: number; profile: UploadProfile }> {
   const meta = { filename: file.name, content_type: file.type || "application/octet-stream", size: file.size };
   const { upload_id, put_url } = await api.post<{ upload_id: number; put_url: string }>("/v1/uploads", meta);
   await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Upload cancelled", "AbortError"));
     const xhr = new XMLHttpRequest();
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.onabort = () => reject(new DOMException("Upload cancelled", "AbortError"));
     xhr.open("PUT", put_url);
     xhr.setRequestHeader("Content-Type", meta.content_type);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
@@ -90,6 +94,7 @@ export async function uploadDataset(
     xhr.onerror = () => reject(new ApiError("Upload failed. Check your connection.", 0));
     xhr.send(file);
   });
+  if (signal?.aborted) throw new DOMException("Upload cancelled", "AbortError");
   const done = await api.post<{ upload_id: number; profile: UploadProfile }>(`/v1/uploads/${upload_id}/complete`, meta);
   return { uploadId: done.upload_id, profile: done.profile };
 }
