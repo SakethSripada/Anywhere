@@ -30,6 +30,11 @@ log = structlog.get_logger()
 
 MAX_STEPS = 40
 MAX_NOTCHES = 10
+#: The same click, typing or command chosen this many times in a row means the agent is stuck.
+MAX_REPEATS = 3
+MAX_REPEATS_LONG = 8
+#: Consecutive actions the desktop failed to perform before giving up.
+MAX_ERRORS = 3
 
 #: What the operator says when the user takes the controls mid-task.
 PAUSED = "You took control. I'll pick up when you hand it back."
@@ -150,6 +155,9 @@ class OpState(TypedDict, total=False):
     outcome: str
     status: str  # running | paused | done | failed
     result: str
+    last_sig: str  # the previous action, to notice the model repeating itself
+    repeats: int  # how many times in a row that action has been chosen
+    errors: int  # consecutive actions the desktop failed to perform
 
 
 StepSink = Callable[[str, str, str, bytes | None], Awaitable[None]]
@@ -207,14 +215,28 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
                 "step": step,
             }
 
+        # Stuck: the same action chosen again and again. Stop rather than spend model
+        # calls until the step limit. Keys, scrolls and waits legitimately repeat more.
+        sig = json.dumps(_public(action), sort_keys=True)
+        repeats = state.get("repeats", 0) + 1 if sig == state.get("last_sig") else 1
+        if repeats > (MAX_REPEATS_LONG if action.action in ("key", "scroll", "wait") else MAX_REPEATS):
+            result = (
+                f"I kept trying the same thing ({label}) without getting anywhere, so I stopped. "
+                "Take over, or tell me what to try instead."
+            )
+            await record("error", "Stopped: repeating the same action", result, None)
+            return {"status": "failed", "result": result, "step": step}
+
         if not await has_control():
             return {"status": "paused", "result": PAUSED}
 
         outcome = "ok"
+        errors = 0
         try:
             outcome = await _execute(screen, action, frame)
         except Exception as exc:  # surfaced to the model so it can recover
             outcome = f"error: {exc}"
+            errors = state.get("errors", 0) + 1
             log.warning("operator.action_failed", action=action.action, error=str(exc))
 
         await record(
@@ -234,7 +256,19 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
         history = [*state.get("history", []), f"{label} → {outcome[:160]}"]
         status = "running" if step < max_steps else "failed"
         result = "" if status == "running" else f"Stopped after {max_steps} steps without finishing."
-        return {"history": history, "outcome": outcome, "step": step, "status": status, "result": result}
+        if errors >= MAX_ERRORS:
+            status = "failed"
+            result = f"The desktop stopped responding to my actions, so I stopped. Last error: {outcome[7:300]}"
+        return {
+            "history": history,
+            "outcome": outcome,
+            "step": step,
+            "status": status,
+            "result": result,
+            "last_sig": sig,
+            "repeats": repeats,
+            "errors": errors,
+        }
 
     async def snapshot(state: OpState) -> OpState:
         # Persist the frame the decision was made on, so the timeline shows what the agent saw.
