@@ -39,7 +39,7 @@ from .photon import PhotonClient, PhotonError, normalize_phone
 from .planner import SUPPORTED_APPS, Application, Intent, Preference
 from .stdb import ReducerRejected, SpacetimeClient
 from .storage import Storage, StorageUnavailable, safe_filename
-from .store import Store
+from .store import Store, plain_dashes
 from .training import DatasetError, inspect_dataset
 from .vault import Vault
 
@@ -710,7 +710,7 @@ async def _agent_turn(app: Anywhere, agent: Agent, ctx: TurnContext, text: str, 
     try:
         async with entry[0]:
             try:
-                reply = await agent.respond(ctx, text)
+                reply = plain_dashes(await agent.respond(ctx, text))
                 kind = "text"
             except ModelUnavailable as exc:
                 reply, kind = f"The Nemotron agent isn't configured yet ({exc}).", "error"
