@@ -13,6 +13,7 @@ import { ApiError, uploadDataset, useApi, type UploadProfile } from "@/lib/api";
 import { useAccount } from "@/lib/data";
 import { bytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { AppLogo } from "../app/app-logo";
 import type { Template } from "./templates";
 
 const HOURS = ["1", "2", "4", "8"];
@@ -87,12 +88,12 @@ export function LaunchDialog({ template, onOpenChange }: { template: Template | 
         {t && (
           <>
             <DialogHeader>
-              <div className="mb-1 grid size-10 place-items-center rounded-xl bg-accent text-accent-foreground">
-                <t.icon className="size-5" />
+              <div className="mb-1 grid size-10 place-items-center rounded-card bg-field shadow-hairline">
+                <AppLogo app={app && t.apps ? app : t.logo} size={22} />
               </div>
               <DialogTitle>{t.title}</DialogTitle>
               <DialogDescription>
-                Anywhere picks the hardware and shows you the cost before anything is billed.
+                Choose a few options to get a plan and a cost estimate.
               </DialogDescription>
             </DialogHeader>
 
@@ -111,7 +112,7 @@ export function LaunchDialog({ template, onOpenChange }: { template: Template | 
 
               {isTune ? (
                 <>
-                  <Field label="Dataset" hint=".jsonl or .csv — chat messages, prompt/response pairs, or plain text">
+                  <Field label="Dataset" hint=".jsonl or .csv with chat messages, prompt/response pairs, or plain text">
                     <input ref={fileInput} type="file" accept=".jsonl,.json,.csv" hidden onChange={(e) => pick(e.target.files)} />
                     {upload ? (
                       <div className={cn("relative flex items-center gap-3 overflow-hidden rounded-lg border px-3 py-2.5", upload.error && "border-destructive/50")}>
@@ -157,7 +158,7 @@ export function LaunchDialog({ template, onOpenChange }: { template: Template | 
                   </div>
                 </>
               ) : (
-                <Field label="How long will you work?" hint="An estimate for the cost preview — you can stop or resume any time.">
+                <Field label="How long will you work?" hint="Used for the cost estimate. You can stop or resume any time.">
                   <Choice value={hours} onChange={setHours} options={HOURS.map((h) => ({ value: h, label: `${h} h` }))} />
                 </Field>
               )}

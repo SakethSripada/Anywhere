@@ -1,8 +1,7 @@
-import { Code2, FlaskConical, NotebookPen, Shapes, type LucideIcon } from "lucide-react";
-
 export type Template = {
   id: string;
-  icon: LucideIcon;
+  /** key into AppLogo */
+  logo: string;
   title: string;
   description: string;
   tagline: string;
@@ -15,7 +14,7 @@ export type Template = {
 export const TEMPLATES: Template[] = [
   {
     id: "blender",
-    icon: Shapes,
+    logo: "blender",
     title: "Blender studio",
     description: "Model, sculpt and render on a GPU desktop in your browser.",
     tagline: "GPU desktop · Blender",
@@ -25,7 +24,7 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "finetune",
-    icon: FlaskConical,
+    logo: "pytorch",
     title: "Fine-tune a model",
     description: "LoRA/QLoRA on your dataset. Get an adapter and an eval report.",
     tagline: "Batch job · LoRA / QLoRA",
@@ -34,7 +33,7 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "jupyter",
-    icon: NotebookPen,
+    logo: "jupyter",
     title: "JupyterLab",
     description: "Notebooks with CUDA ready for experiments and analysis.",
     tagline: "GPU desktop · Notebooks",
@@ -44,7 +43,7 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "dev",
-    icon: Code2,
+    logo: "vscode",
     title: "Dev workspace",
     description: "VS Code or a plain Linux desktop with a GPU attached.",
     tagline: "GPU desktop · VS Code / Linux",
