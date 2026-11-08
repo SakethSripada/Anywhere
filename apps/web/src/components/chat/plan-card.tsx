@@ -69,7 +69,7 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
         </div>
         <div className="mt-0.5 flex items-baseline justify-between gap-4 text-[13px] text-muted-foreground">
           <span className="truncate">
-            NVIDIA {offer.gpu} · {offer.vram_gb} GB · {hoursRange(est.hours_low, est.hours_high)}
+            {(plan.machines ?? 1) > 1 ? `${plan.machines}× ` : ""}NVIDIA {offer.gpu} · {offer.vram_gb} GB · {hoursRange(est.hours_low, est.hours_high)}
           </span>
           <span className="shrink-0 tabular">${offer.price_per_hour.toFixed(2)}/hr</span>
         </div>
@@ -138,7 +138,7 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
                   Cancel
                 </Button>
                 <Button size="sm" disabled={!!busy || blockers.length > 0} onClick={() => act("approve")}>
-                  {busy === "approve" ? "Approving…" : "Approve"}
+                  {busy === "approve" ? "Approving…" : (plan.machines ?? 1) > 1 ? `Approve ${plan.machines} GPUs` : "Approve"}
                 </Button>
               </>
             ) : (
@@ -207,7 +207,7 @@ export function PlanRow({ workloadId }: { workloadId: bigint }) {
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-medium">{w.title}</div>
         <div className="truncate text-xs text-muted-foreground tabular">
-          NVIDIA {plan.selected.offer.gpu} · {centsRange(est.cost_low_cents, est.cost_high_cents)} · {hoursRange(est.hours_low, est.hours_high)}
+          {(plan.machines ?? 1) > 1 ? `${plan.machines}× ` : ""}NVIDIA {plan.selected.offer.gpu} · {centsRange(est.cost_low_cents, est.cost_high_cents)} · {hoursRange(est.hours_low, est.hours_high)}
         </div>
       </div>
       {w.status === "planned" ? (
