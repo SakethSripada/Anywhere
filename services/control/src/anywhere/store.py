@@ -6,14 +6,44 @@ spacetime/module/src/index.ts (the HTTP API takes positional arguments).
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any
 
-from .stdb import SpacetimeClient, identity_arg
+import structlog
+
+from .stdb import SpacetimeClient, SpacetimeError, identity_arg
+
+log = structlog.get_logger()
+
+_HEX_IDENTITY = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+
+
+def _sql_str(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_identity(hex_identity: str) -> str:
+    if not _HEX_IDENTITY.match(hex_identity):
+        raise ValueError("not a hex identity")
+    return "0x" + hex_identity.removeprefix("0x").lower()
 
 
 class Store:
     def __init__(self, client: SpacetimeClient):
         self.client = client
+
+    async def _where(self, view: str, clause: str, fallback) -> list[dict]:
+        """`SELECT * FROM view WHERE clause`, so only matching rows cross the wire.
+
+        If the server rejects the filter, fall back to scanning the view and
+        filtering here, so a SQL dialect difference can never break a lookup.
+        """
+        try:
+            return await self.client.sql(f"SELECT * FROM {view} WHERE {clause}")
+        except SpacetimeError as exc:
+            log.warning("store.filter_fallback", view=view, error=str(exc)[:200])
+            return [r for r in await self.client.sql(f"SELECT * FROM {view}") if fallback(r)]
 
     # ── Accounts ──────────────────────────────────────────────────────────
     async def activate_account(self, identity: str, activated: bool) -> None:
@@ -23,7 +53,12 @@ class Store:
         return await self.client.sql("SELECT * FROM worker_accounts")
 
     async def account(self, identity: str) -> dict | None:
-        return next((a for a in await self.accounts() if a["identity"] == identity), None)
+        try:
+            clause = f"identity = {_sql_identity(identity)}"
+        except ValueError:
+            return None
+        rows = await self._where("worker_accounts", clause, lambda a: a["identity"] == identity)
+        return next((a for a in rows if a["identity"] == identity), None)
 
     # ── Conversations ─────────────────────────────────────────────────────
     async def upsert_conversation(self, id: int, owner: str, title: str, channel: str) -> None:
@@ -68,7 +103,9 @@ class Store:
         return await self.client.sql("SELECT * FROM worker_workloads")
 
     async def workload(self, id: int) -> dict | None:
-        return next((w for w in await self.workloads() if w["id"] == id), None)
+        wid = int(id)  # interpolated into SQL: must be an integer
+        rows = await self._where("worker_workloads", f"id = {wid}", lambda w: w["id"] == wid)
+        return next((w for w in rows if w["id"] == wid), None)
 
     async def telemetry(self, workload_id: int) -> dict[str, list[dict]]:
         """Everything recorded for one workload, for the agent's inspect tool."""
@@ -80,10 +117,10 @@ class Store:
             "artifacts": "worker_artifacts",
             "agent_runs": "worker_agent_runs",
         }
-        out: dict[str, list[dict]] = {}
-        for key, view in views.items():
-            out[key] = await self.client.sql(f"SELECT * FROM {view} WHERE workloadId = {wid}")
-        return out
+        results = await asyncio.gather(
+            *(self.client.sql(f"SELECT * FROM {view} WHERE workloadId = {wid}") for view in views.values())
+        )
+        return dict(zip(views, results, strict=True))
 
     # ── Telemetry ─────────────────────────────────────────────────────────
     async def add_event(self, workload_id: int, level: str, message: str) -> None:
@@ -124,11 +161,15 @@ class Store:
         await self.client.call("link_handle", handle, code, channel)
 
     async def handle_owner(self, handle: str) -> str | None:
-        rows = await self.client.sql("SELECT * FROM worker_handles")
+        rows = await self._where("worker_handles", f"handle = {_sql_str(handle)}", lambda r: r["handle"] == handle)
         return next((r["owner"] for r in rows if r["handle"] == handle), None)
 
     async def handles_for(self, owner: str) -> list[str]:
-        rows = await self.client.sql("SELECT * FROM worker_handles")
+        try:
+            clause = f"owner = {_sql_identity(owner)}"
+        except ValueError:
+            return []
+        rows = await self._where("worker_handles", clause, lambda r: r["owner"] == owner)
         return [r["handle"] for r in rows if r["owner"] == owner]
 
     async def enqueue_notification(self, id: int, owner: str, channel: str, handle: str, body: str) -> None:
