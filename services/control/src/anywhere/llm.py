@@ -48,7 +48,10 @@ def vision(settings: Settings):
         model=settings.vision_model,
         api_key=_key(settings),
         base_url=settings.nvidia_base_url,
-        temperature=0.2,
+        # NVIDIA's model card for Nemotron 3.5 Super VL recommends temperature 0.6
+        # and top_p 0.95 for image input (1.0 / 0.95 for text).
+        temperature=0.6,
+        top_p=0.95,
         max_completion_tokens=8192,
     )
     known = model._client.model  # None for ids missing from the library's model table
