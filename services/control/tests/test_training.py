@@ -61,3 +61,49 @@ def test_lora_training_script_keeps_gradients_flowing_through_checkpointed_layer
     compile(src, "train.py", "exec")
     assert "model.enable_input_require_grads()" in src
     assert '"use_reentrant": False' in src
+
+
+def _run_batch_script(tmp_path, python_body: str) -> tuple[str, str]:
+    import os
+    import shutil
+    import subprocess
+    from importlib import resources
+
+    if not shutil.which("bash"):
+        pytest.skip("bash is not available")
+    job = tmp_path / "home" / "workspace" / "anywhere" / "job"
+    job.mkdir(parents=True)
+    (job / "run.sh").write_text(resources.files("anywhere.environments").joinpath("batch-run.sh").read_text())
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    stubs = {
+        "nvidia-smi": 'echo "Tesla T4, 15360 MiB"',
+        "uv": 'if [ "$1" = venv ]; then mkdir -p .venv/bin && : > .venv/bin/activate; fi',
+        "python": python_body,
+    }
+    for name, body in stubs.items():
+        (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_ / name).chmod(0o755)
+    env = {"HOME": str(tmp_path / "home"), "PATH": f"{bin_}:/usr/bin:/bin"}
+    subprocess.run(["bash", "run.sh"], cwd=job, env=env, capture_output=True, timeout=60, check=False)
+    assert os.path.exists(job / "pid")
+    return (job / "status").read_text().strip(), (job / "run.log").read_text()
+
+
+def test_batch_runner_reports_the_python_error_and_logs_it_before_the_status(tmp_path):
+    status, log = _run_batch_script(
+        tmp_path,
+        'echo "Traceback (most recent call last):"\n'
+        'echo "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB" >&2\nexit 1',
+    )
+    assert status == (
+        "failed: Training exited with an error (exit 1): "
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB"
+    )
+    assert "::error::" in log and "Traceback" in log
+
+
+def test_batch_runner_marks_success_after_the_last_step(tmp_path):
+    status, log = _run_batch_script(tmp_path, "echo trained")
+    assert status == "succeeded"
+    assert log.rstrip().endswith("::step:: Done")
