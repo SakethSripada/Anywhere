@@ -117,6 +117,17 @@ async def connect_screen(remote: Remote, token: str) -> AsyncIterator[Screen]:
         yield CuaScreen(sb)
 
 
+async def _port_open(port: int, timeout: float = 1.0) -> bool:
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout)
+    except (OSError, TimeoutError):
+        return False
+    writer.close()
+    with contextlib.suppress(Exception):
+        await writer.wait_closed()
+    return True
+
+
 class VncTunnels:
     """One shared SSH tunnel per desktop for browser VNC sessions."""
 
@@ -127,7 +138,14 @@ class VncTunnels:
     async def port_for(self, workload_id: int, remote: Remote) -> int:
         async with self._lock:
             if workload_id in self._tunnels:
-                return self._tunnels[workload_id][1]
+                cm, port = self._tunnels[workload_id]
+                if await _port_open(port):
+                    return port
+                # The ssh -N process died (network blip, instance restart). Drop
+                # it and open a fresh tunnel instead of handing out a dead port.
+                del self._tunnels[workload_id]
+                with contextlib.suppress(Exception):
+                    await cm.__aexit__(None, None, None)
             cm = remote.tunnel(VNC_PORT)
             port = await cm.__aenter__()
             self._tunnels[workload_id] = (cm, port)
