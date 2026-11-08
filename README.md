@@ -215,6 +215,23 @@ pnpm -r typecheck && pnpm --filter web lint
    docker compose -f deploy/docker-compose.yml exec control brev login --token "$BREV_API_KEY"
    ```
 
+### Object storage (R2)
+
+Browsers upload datasets straight to the bucket with presigned `PUT` URLs, and download outputs with presigned `GET` URLs. R2 rejects those cross-origin requests unless the bucket has a CORS policy. In the Cloudflare dashboard, open the bucket, then **Settings → CORS policy**, and add:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://YOUR_DOMAIN", "http://localhost:3001"],
+    "AllowedMethods": ["PUT", "GET"],
+    "AllowedHeaders": ["Content-Type"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+`S3_ENDPOINT_URL` is `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`, and `S3_REGION` stays `auto`.
+
 Caddy provisions TLS automatically. It routes `/api/*` (including the long-lived VNC WebSockets) to the control plane and everything else to the web app.
 
 ---
