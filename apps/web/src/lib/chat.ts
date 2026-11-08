@@ -1,4 +1,5 @@
 import type { Message } from "@anywhere/stdb";
+import { useEffect, useState } from "react";
 
 /** One agent tool invocation, assembled from its tool_call and tool_result messages. */
 export type ToolCall = {
@@ -70,14 +71,33 @@ export function toItems(messages: readonly Message[]): ChatItem[] {
   return items;
 }
 
-/** True while the agent is still mid-turn: the last thing said was the user's, or a tool is running. */
-export function agentBusy(items: ChatItem[], nowMs: number): boolean {
+const BUSY_TIMEOUT = 180_000;
+
+/**
+ * When the agent stops counting as mid-turn (epoch ms), or null if it isn't:
+ * the last thing said was the user's, or a tool is running, for up to 3 minutes.
+ */
+export function busyDeadline(items: readonly ChatItem[]): number | null {
   const last = items.at(-1);
-  if (!last) return false;
+  if (!last) return null;
   // After tools the model always writes a reply, so a trailing tool run means "still working".
   const at = last.type === "tools" ? last.calls.at(-1)!.startedAt : last.type === "user" ? last.m.createdAt : null;
-  if (!at) return false;
-  return nowMs === 0 || nowMs - Number(at.toMillis()) < 180_000;
+  return at ? Number(at.toMillis()) + BUSY_TIMEOUT : null;
+}
+
+/**
+ * True while the agent is still mid-turn (see busyDeadline). No ticking clock:
+ * one timer fires at the deadline instead of re-rendering every second.
+ */
+export function useAgentBusy(items: readonly ChatItem[]): boolean {
+  const deadline = busyDeadline(items);
+  const [passed, setPassed] = useState<number | null>(null);
+  useEffect(() => {
+    if (deadline == null) return;
+    const t = setTimeout(() => setPassed(deadline), Math.max(0, deadline - Date.now()));
+    return () => clearTimeout(t);
+  }, [deadline]);
+  return deadline != null && passed !== deadline;
 }
 
 export function parseOutput(output: string): Record<string, unknown> | null {

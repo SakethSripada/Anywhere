@@ -56,10 +56,15 @@ export const VncScreen = forwardRef<
   const opts = useRef({ viewOnly, scale, quality });
   const callbacks = useRef({ onPhase, onRect, onRemoteClipboard });
   const [phase, setPhase] = useState<Phase>("connecting");
-  const [attempt, setAttempt] = useState(0);
+  // `generation` re-runs the connect effect; the retry count lives in a ref so
+  // resetting it on a successful connect doesn't tear that connection down.
+  const [generation, setGeneration] = useState(0);
+  const tries = useRef(0);
+  const apiRef = useRef(api);
 
   useEffect(() => {
     callbacks.current = { onPhase, onRect, onRemoteClipboard };
+    apiRef.current = api;
   });
 
   useEffect(() => {
@@ -79,26 +84,45 @@ export const VncScreen = forwardRef<
     c.compressionLevel = QUALITY[quality].c;
   }, [viewOnly, scale, quality]);
 
+  const lastRect = useRef<ScreenRect | null | undefined>(undefined);
   const measure = useCallback(() => {
     const canvas = target.current?.querySelector("canvas");
     const box = frame.current?.getBoundingClientRect();
-    if (!canvas || !box || !canvas.width) return callbacks.current.onRect?.(null);
-    const r = canvas.getBoundingClientRect();
-    callbacks.current.onRect?.({ left: r.left - box.left, top: r.top - box.top, width: r.width, height: r.height, fbWidth: canvas.width, fbHeight: canvas.height });
+    let next: ScreenRect | null = null;
+    if (canvas && box && canvas.width) {
+      const r = canvas.getBoundingClientRect();
+      next = { left: r.left - box.left, top: r.top - box.top, width: r.width, height: r.height, fbWidth: canvas.width, fbHeight: canvas.height };
+    }
+    // Only report real changes; a fresh object every call re-renders the stage.
+    const prev = lastRect.current;
+    const same =
+      prev === next ||
+      (!!prev && !!next && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height && prev.fbWidth === next.fbWidth && prev.fbHeight === next.fbHeight);
+    if (same) return;
+    lastRect.current = next;
+    callbacks.current.onRect?.(next);
   }, []);
 
   useEffect(() => {
     if (phase !== "live") return;
-    const ro = new ResizeObserver(measure);
+    // noVNC rescales asynchronously after a resize; re-measure for a moment, then stop.
+    let timers: ReturnType<typeof setTimeout>[] = [];
+    const settle = () => {
+      timers.forEach(clearTimeout);
+      timers = [150, 500, 1200].map((d) => setTimeout(measure, d));
+    };
+    const ro = new ResizeObserver(() => {
+      measure();
+      settle();
+    });
     if (frame.current) ro.observe(frame.current);
     const canvas = target.current?.querySelector("canvas");
     if (canvas) ro.observe(canvas);
-    // noVNC rescales asynchronously after a resize; re-measure for a moment.
-    const id = setInterval(measure, 1000);
     measure();
+    settle();
     return () => {
       ro.disconnect();
-      clearInterval(id);
+      timers.forEach(clearTimeout);
     };
   }, [phase, measure, scale]);
 
@@ -107,16 +131,18 @@ export const VncScreen = forwardRef<
     let retry: ReturnType<typeof setTimeout> | undefined;
     const backoff = () => {
       if (cancelled) return;
-      if (attempt < 6) {
+      const n = tries.current;
+      if (n < 6) {
+        tries.current = n + 1;
         setPhase("lost");
-        retry = setTimeout(() => setAttempt((a) => a + 1), Math.min(1000 * 2 ** attempt, 10_000));
+        retry = setTimeout(() => setGeneration((g) => g + 1), Math.min(1000 * 2 ** n, 10_000));
       } else setPhase("failed");
     };
     (async () => {
       try {
         const [{ default: RFBClass }, { ticket }] = await Promise.all([
           import("@novnc/novnc"),
-          api.post<{ ticket: string }>(`/v1/desktops/${workloadId}/session`),
+          apiRef.current.post<{ ticket: string }>(`/v1/desktops/${workloadId}/session`),
         ]);
         if (cancelled || !target.current) return;
         const url = apiWsUrl(`/v1/desktops/${workloadId}/vnc?ticket=${encodeURIComponent(ticket)}`);
@@ -132,10 +158,11 @@ export const VncScreen = forwardRef<
         client.addEventListener("connect", () => {
           if (cancelled) return;
           setPhase("live");
-          setAttempt(0);
+          tries.current = 0;
         });
         client.addEventListener("disconnect", () => {
-          rfb.current = null;
+          // A late event from a superseded client must not clear the current one.
+          if (rfb.current === client) rfb.current = null;
           backoff();
         });
         client.addEventListener("clipboard", (e) => {
@@ -153,12 +180,13 @@ export const VncScreen = forwardRef<
       rfb.current?.disconnect();
       rfb.current = null;
     };
-    // `attempt` drives reconnects; settings are applied live above.
-  }, [api, workloadId, attempt]);
+    // `generation` drives reconnects; settings are applied live above.
+  }, [workloadId, generation]);
 
   const reconnect = useCallback(() => {
     setPhase("connecting");
-    setAttempt((a) => (a >= 6 ? 0 : a + 1));
+    tries.current = 0;
+    setGeneration((g) => g + 1);
   }, []);
 
   useImperativeHandle(

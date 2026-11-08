@@ -66,14 +66,17 @@ def _token_identity(token: str) -> str | None:
         return None
 
 
-async def check_spacetime(s: Settings) -> Check:
+async def check_spacetime(s: Settings, *, count: bool = True) -> Check:
+    """`count=False` (the background readiness probe) skips reading every workload
+    just to report how many there are; the worker-only reducer probe alone proves
+    the database is reachable and the identity is allowlisted."""
     name = "SpacetimeDB worker"
     if not s.spacetime_worker_token:
         return Check("spacetime", name, "not configured", "set SPACETIME_WORKER_TOKEN (see README step 2)")
     token = s.spacetime_worker_token.get_secret_value()
     client = SpacetimeClient(s.spacetime_host, s.spacetime_database, token, timeout=10)
     try:
-        workloads = await client.sql("SELECT * FROM worker_workloads")
+        workloads = await client.sql("SELECT * FROM worker_workloads") if count else None
         # A harmless worker-only reducer: workers get "Workload not found",
         # anyone else "reserved for Anywhere services". Nothing is written.
         try:
@@ -105,7 +108,8 @@ async def check_spacetime(s: Settings) -> Check:
         "spacetime",
         name,
         "ok",
-        f"{s.spacetime_host}/{s.spacetime_database}: identity {short} is a worker; {len(workloads)} workloads visible",
+        f"{s.spacetime_host}/{s.spacetime_database}: identity {short} is a worker"
+        + (f"; {len(workloads)} workloads visible" if workloads is not None else ""),
     )
 
 
@@ -152,7 +156,8 @@ async def check_nvidia(s: Settings, *, live: bool) -> list[Check]:
 # ── Brev ────────────────────────────────────────────────────────────────────
 
 
-async def check_brev(s: Settings) -> Check:
+async def check_brev(s: Settings, cli: BrevCLI | None = None) -> Check:
+    """`cli` lets the readiness loop reuse the app's BrevCLI and its shared `brev ls` cache."""
     name = "NVIDIA Brev CLI"
     binary = shutil.which(s.brev_binary)
     if not binary:
@@ -160,7 +165,7 @@ async def check_brev(s: Settings) -> Check:
         return Check("brev", name, status, f"'{s.brev_binary}' not found on PATH (the control image installs v0.6.337)")
     if not s.brev_api_key:
         return Check("brev", name, "not configured", f"{binary} installed; set BREV_API_KEY (an org API key, bak-…)")
-    cli = BrevCLI(binary, s.brev_api_key.get_secret_value(), s.provisioning_mode)
+    cli = cli or BrevCLI(binary, s.brev_api_key.get_secret_value(), s.provisioning_mode)
     try:
         count = await cli.check_auth()
     except BrevError as exc:
@@ -171,13 +176,16 @@ async def check_brev(s: Settings) -> Check:
 # ── Object storage ──────────────────────────────────────────────────────────
 
 
-async def check_storage(s: Settings, *, round_trip: bool) -> Check:
+async def check_storage(s: Settings, *, round_trip: bool, storage=None) -> Check:
+    """`storage` lets the readiness loop reuse the app's client instead of building a
+    boto3 client (synchronously, on the event loop) every refresh."""
     name = "Object storage (S3)"
     if not s.storage_ready:
         return Check("storage", name, "not configured", "set S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY")
     from .storage import Storage
 
-    storage = Storage(s)
+    if storage is None:
+        storage = await asyncio.to_thread(Storage, s)
     where = f"{s.s3_endpoint_url or 'AWS S3'} bucket {s.s3_bucket}"
     try:
         await asyncio.to_thread(storage.client.head_bucket, Bucket=storage.bucket)
@@ -291,7 +299,14 @@ class Readiness:
 
     settings: Settings
     interval: float = 300
+    #: The app's shared clients, so background checks reuse caches and connections.
+    brev: BrevCLI | None = None
+    storage: object | None = None
     checks: dict[str, Check] = field(default_factory=dict)
+    #: Failures seen by real calls (e.g. the planner model returning 404). The
+    #: background probe only confirms a model is *listed*, so without this a model
+    #: that is listed but not served shows green while every chat fails.
+    observed: dict[str, Check] = field(default_factory=dict)
     checked_at: datetime | None = None
     _task: asyncio.Task | None = None
     _last: float = 0.0
@@ -305,13 +320,25 @@ class Readiness:
     def integrations(self) -> dict[str, bool]:
         """Configured, and not failing its most recent live check."""
         configured = self.configured()
-        return {k: configured[k] and not (k in self.checks and self.checks[k].failed) for k in INTEGRATIONS}
+        return {
+            k: configured[k]
+            and not (k in self.checks and self.checks[k].failed)
+            and not (k in self.observed and self.observed[k].failed)
+            for k in INTEGRATIONS
+        }
+
+    def record_call(self, key: str, name: str, error: BaseException | None) -> None:
+        """Feed the outcome of a real call into readiness (cleared by the next success)."""
+        if error is None:
+            self.observed.pop(key, None)
+        else:
+            self.observed[key] = Check(key, name, "fail", f"last call failed: {_err(error)}")
 
     def details(self) -> dict[str, dict]:
         configured = self.configured()
         out = {}
         for k in INTEGRATIONS:
-            c = self.checks.get(k)
+            c = self.observed.get(k) or self.checks.get(k)
             out[k] = {
                 "configured": configured[k],
                 "status": c.status if c else ("pending" if configured[k] else "not configured"),
@@ -322,10 +349,10 @@ class Readiness:
     async def refresh(self) -> None:
         s = self.settings
         probes: list[Callable[[], Awaitable[Check | list[Check]]]] = [
-            lambda: check_spacetime(s),
+            lambda: check_spacetime(s, count=False),
             lambda: check_nvidia(s, live=False),
-            lambda: check_brev(s),
-            lambda: check_storage(s, round_trip=False),
+            lambda: check_brev(s, self.brev),
+            lambda: check_storage(s, round_trip=False, storage=self.storage),
             lambda: check_photon(s),
         ]
         results = await asyncio.gather(*(p() for p in probes), return_exceptions=True)

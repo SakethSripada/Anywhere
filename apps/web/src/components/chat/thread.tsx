@@ -3,12 +3,13 @@
 import type { Message, Workload } from "@anywhere/stdb";
 import { ArrowDown } from "lucide-react";
 import Link from "next/link";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LoadingStatus } from "@/components/bui/loader";
-import { agentBusy, toItems, type ChatItem } from "@/lib/chat";
-import { useNow, useWorkloads } from "@/lib/data";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import { toItems, useAgentBusy, type ChatItem } from "@/lib/chat";
+import { useWorkload } from "@/lib/data";
 import { clock, ms } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { href } from "@/lib/workloads";
 import { Markdown } from "./markdown";
@@ -16,6 +17,8 @@ import { PlanCard, PlanRow } from "./plan-card";
 import { RunTrace, ToolRun } from "./tool-run";
 
 export type Pending = { id: string; text: string };
+
+const NO_ITEMS: ChatItem[] = [];
 
 type StreamItem =
   | { kind: "chat"; at: number; item: ChatItem }
@@ -33,18 +36,24 @@ export function Thread({
   compact,
   focus,
   className,
+  busy: busyProp,
 }: {
   messages: readonly Message[];
   pending: Pending[];
+  /** whether the agent is mid-turn, when the parent already knows */
+  busy?: boolean;
   compact?: boolean;
   /** stream this machine's agent runs and events in as well */
   focus?: Workload;
   className?: string;
 }) {
   const items = useMemo(() => toItems(messages), [messages]);
-  const now = useNow(1000);
-  const [runs] = useTable(tables.myAgentRuns);
-  const [events] = useTable(tables.myEvents);
+  // Runs and events only join the stream for a focused machine; otherwise
+  // don't subscribe, and don't recompute or re-scroll on their changes.
+  const runRows = useShared("myAgentRuns", !!focus).rows;
+  const eventRows = useShared("myEvents", !!focus).rows;
+  const runs = focus ? runRows : NONE;
+  const events = focus ? eventRows : NONE;
 
   const stream = useMemo<StreamItem[]>(() => {
     const out: StreamItem[] = items.map((item) => ({ kind: "chat", at: itemTime(item), item }));
@@ -60,8 +69,10 @@ export function Thread({
     return out.sort((a, b) => a.at - b.at);
   }, [items, runs, events, focus]);
 
-  const busy = pending.length > 0 || agentBusy(items, now);
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  // A parent that already tracks this passes `busy` down; otherwise derive it here.
+  const ownBusy = useAgentBusy(busyProp === undefined ? items : NO_ITEMS);
+  const busy = busyProp ?? (pending.length > 0 || ownBusy);
+  const lastUser = useMemo(() => messages.findLast((m) => m.role === "user"), [messages]);
   const scroller = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
@@ -133,25 +144,15 @@ function itemTime(item: ChatItem): number {
 
 const prose = (compact?: boolean) => (compact ? "text-[13.5px] leading-[1.7] text-ink" : undefined);
 
-function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; focused: boolean }) {
+// Memoized: scroll state, pending bubbles and busy changes re-render the thread, not every item.
+const Item = memo(function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; focused: boolean }) {
   switch (item.type) {
     case "user":
       return <UserBubble text={item.m.body} channel={item.m.channel} time={clock(item.m.createdAt)} compact={compact} />;
     case "tools":
       return <ToolRun calls={item.calls} linkMachines={!focused} />;
     case "plan":
-      return compact ? (
-        <PlanRow workloadId={item.m.workloadId} />
-      ) : (
-        <>
-          <div className="xl:hidden">
-            <PlanCard workloadId={item.m.workloadId} />
-          </div>
-          <div className="hidden max-w-md xl:block">
-            <PlanRow workloadId={item.m.workloadId} />
-          </div>
-        </>
-      );
+      return compact ? <PlanRow workloadId={item.m.workloadId} /> : <WidePlan workloadId={item.m.workloadId} />;
     case "status":
       return <StatusLine m={item.m} focused={focused} />;
     case "error":
@@ -161,6 +162,20 @@ function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; f
     default:
       return <Markdown text={item.m.body} className={prose(compact)} />;
   }
+});
+
+/** Full card below xl, compact row at xl and up: mount only the one that shows. */
+function WidePlan({ workloadId }: { workloadId: bigint }) {
+  const xl = useMediaQuery("(min-width: 80rem)") // Tailwind's `xl`;
+  return xl ? (
+    <div className="max-w-md">
+      <PlanRow workloadId={workloadId} />
+    </div>
+  ) : (
+    <div>
+      <PlanCard workloadId={workloadId} />
+    </div>
+  );
 }
 
 function UserBubble({ text, channel, time, compact }: { text: string; channel?: string; time?: string; compact?: boolean }) {
@@ -184,8 +199,7 @@ function UserBubble({ text, channel, time, compact }: { text: string; channel?: 
 }
 
 function StatusLine({ m, focused }: { m: Message; focused: boolean }) {
-  const { all } = useWorkloads();
-  const w = all.find((x) => x.id === m.workloadId);
+  const { workload: w } = useWorkload(m.workloadId);
   return (
     <div className="flex items-baseline gap-2 text-[12.5px] text-ink-2">
       <span className="size-1.5 shrink-0 -translate-y-px rounded-full bg-green" />

@@ -55,6 +55,8 @@ CODE_TTL = 300
 REQUEST_TTL = 600
 REFRESH_PREFIX = "awmcpr_"
 MAX_CLIENTS = 1000
+#: A registered client with no connection and no pending sign-in is dropped after this.
+CLIENT_IDLE_SECONDS = 7 * 86400
 
 
 class Code(AuthorizationCode):
@@ -114,6 +116,8 @@ class AnywhereOAuth:
         except HTTPException as exc:
             raise RegistrationError("invalid_client_metadata", "Too many registrations; try again shortly") from exc
         if self.vault.section_size("oauth_clients") >= MAX_CLIENTS:
+            self._purge_unused()  # make room by dropping clients nobody uses
+        if self.vault.section_size("oauth_clients") >= MAX_CLIENTS:
             raise RegistrationError("invalid_client_metadata", "This server can't register more clients")
         uris = [str(u) for u in client_info.redirect_uris or []]
         if not uris or not all(_safe_redirect(u) for u in uris):
@@ -131,7 +135,7 @@ class AnywhereOAuth:
             raise AuthorizeError("invalid_scope", f"Unknown scope: {', '.join(sorted(unknown))}")
         if params.resource and params.resource.rstrip("/") != self.resource_url.rstrip("/"):
             raise AuthorizeError("invalid_target", "Tokens can only be issued for this Anywhere server")
-        self._purge()
+        self._purge_unused()
         request_id = secrets.token_urlsafe(24)
         self.vault.section_put(
             "oauth_requests",
@@ -159,8 +163,16 @@ class AnywhereOAuth:
 
     def decide(self, request_id: str, owner: str, approve: bool, scopes: list[str] | None) -> str:
         """Approve or deny a pending request for `owner`. Returns where to send the browser."""
-        record = self.vault.section_pop("oauth_requests", request_id[:64])
+        # Validate before consuming the request: a rejected submission (say, every
+        # permission unticked) must leave it in place so the user can fix and retry.
+        record = self.vault.section_get("oauth_requests", request_id[:64])
         if not record or record["expires_ts"] <= time.time():
+            raise HTTPException(404, "This sign-in request has expired. Start again from your app.")
+        if approve:
+            requested = set(record["scopes"])
+            if not set(scopes if scopes is not None else record["scopes"]) & requested:
+                raise HTTPException(422, "Allow at least one permission, or choose Deny")
+        if not self.vault.section_pop("oauth_requests", request_id[:64]):
             raise HTTPException(404, "This sign-in request has expired. Start again from your app.")
         if not approve:
             log.info("oauth.denied", client=record["client_id"], owner=owner[:12])
@@ -174,20 +186,34 @@ class AnywhereOAuth:
         granted = sorted(set(scopes if scopes is not None else record["scopes"]) & set(record["scopes"]))
         if not granted:
             raise HTTPException(422, "Allow at least one permission, or choose Deny")
-        grant_id = new_id()
-        self.vault.section_put(
-            "oauth_grants",
-            str(grant_id),
-            {
-                "id": grant_id,
-                "owner": owner,
-                "client_id": record["client_id"],
-                "client_name": record["client_name"],
-                "scopes": granted,
-                "created_at": _now().isoformat(),
-                "last_used_at": None,
-            },
+        # Re-authorizing the same client reuses its connection (and its MCP
+        # conversation) instead of piling up a new grant each time.
+        existing = next(
+            (
+                g
+                for _, g in self.vault.section_items("oauth_grants")
+                if g["owner"] == owner and g["client_id"] == record["client_id"]
+            ),
+            None,
         )
+        if existing is not None:
+            grant_id = int(existing["id"])
+            self.vault.section_put("oauth_grants", str(grant_id), {**existing, "scopes": granted})
+        else:
+            grant_id = new_id()
+            self.vault.section_put(
+                "oauth_grants",
+                str(grant_id),
+                {
+                    "id": grant_id,
+                    "owner": owner,
+                    "client_id": record["client_id"],
+                    "client_name": record["client_name"],
+                    "scopes": granted,
+                    "created_at": _now().isoformat(),
+                    "last_used_at": None,
+                },
+            )
         code = secrets.token_urlsafe(32)
         self.vault.section_put(
             "oauth_codes",
@@ -314,6 +340,12 @@ class AnywhereOAuth:
 
     def _purge(self) -> None:
         self.vault.purge_expired(_now().isoformat(), time.time())
+
+    def _purge_unused(self) -> None:
+        # Only from authorize/register: never mid token rotation, when a grant
+        # briefly has no refresh token between popping the old one and issuing anew.
+        self._purge()
+        self.vault.purge_unused(time.time(), CLIENT_IDLE_SECONDS)
 
     # ── URLs ────────────────────────────────────────────────────────────
 

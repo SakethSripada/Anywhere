@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { StdbProvider } from "@/lib/stdb";
+import { TablesProvider } from "@/lib/tables";
 
 function Booting() {
   return (
@@ -18,10 +19,12 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
       <StdbProvider fallback={<Booting />}>
-        <TooltipProvider delay={300}>
-          {children}
-          <Toaster position="bottom-right" />
-        </TooltipProvider>
+        <TablesProvider>
+          <TooltipProvider delay={300}>
+            {children}
+            <Toaster position="bottom-right" />
+          </TooltipProvider>
+        </TablesProvider>
       </StdbProvider>
     </ThemeProvider>
   );

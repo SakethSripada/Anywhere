@@ -1,5 +1,6 @@
 """The MCP server, end to end: real HTTP through the auth layer, the real SDK client, fake backends."""
 
+import asyncio
 import base64
 import io
 import json
@@ -50,6 +51,12 @@ class McpStore(FakeStore):
 
     async def workload(self, id):
         return next((w for w in await self.workloads() if w["id"] == id), None)
+
+    async def workloads_for(self, owner):
+        return [w for w in await self.workloads() if w["owner"] == owner]
+
+    async def agent_step_summaries(self, run_id):
+        return await self.agent_steps(run_id)
 
     async def account(self, identity):
         return next((a for a in self.accounts_ if a["identity"] == identity), None)
@@ -357,6 +364,10 @@ def _png(width=1920, height=1080) -> bytes:
     return buf.getvalue()
 
 
+async def _no_tunnel(self, workload_id, remote):
+    return 0
+
+
 async def test_screenshots_of_running_desktops(h, monkeypatch):
     h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
     h.store.add(id=12, owner=ALICE, status="stopped", conversationId=1)
@@ -367,17 +378,20 @@ async def test_screenshots_of_running_desktops(h, monkeypatch):
             return _png()
 
     @asynccontextmanager
-    async def connect(remote, token):
+    async def connect(remote, token, port=None):
         calls.append(token)
         yield Screen()
 
     monkeypatch.setattr(desktop_module, "connect_screen", connect)
+    monkeypatch.setattr(desktop_module.TunnelPool, "port_for", _no_tunnel)
     async with h.running(), h.client(h.token(scopes=("read",))) as c:
         shot = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
         assert not shot.is_error, text(shot)
         (image,) = shot.content
         assert image.mime_type == "image/jpeg"
         assert PILImage.open(io.BytesIO(base64.b64decode(image.data))).width == 1280
+        again = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
+        assert not again.is_error  # served from the short frame cache
         stopped = await c.call_tool("get_desktop_screenshot", {"workload_id": 12})
         assert stopped.is_error and "running desktop" in text(stopped)
     assert len(calls) == 1
@@ -387,11 +401,12 @@ async def test_unreachable_desktops_fail_politely(h, monkeypatch):
     h.store.add(id=11, owner=ALICE, status="running", conversationId=1)
 
     @asynccontextmanager
-    async def connect(remote, token):
+    async def connect(remote, token, port=None):
         raise OSError("ssh: connect to host 10.0.0.7 port 22: Connection refused")
         yield
 
     monkeypatch.setattr(desktop_module, "connect_screen", connect)
+    monkeypatch.setattr(desktop_module.TunnelPool, "port_for", _no_tunnel)
     async with h.running(), h.client(h.token()) as c:
         shot = await c.call_tool("get_desktop_screenshot", {"workload_id": 11})
     assert shot.is_error and "Couldn't reach the desktop" in text(shot) and "10.0.0.7" not in text(shot)
@@ -522,3 +537,44 @@ def test_token_endpoints_require_a_browser_identity(tmp_path):
         # An MCP token is not a browser identity, so it can never mint more tokens.
         mcp_token = {"Authorization": "Bearer awmcp_" + "z" * 43}
         assert c.post("/v1/mcp/tokens", json={"name": "x"}, headers=mcp_token).status_code == 401
+
+
+class _ConversationApp:
+    """Just enough of Anywhere for `_conversation`: a real vault and a slow store."""
+
+    def __init__(self, tmp_path):
+        from anywhere.vault import Vault
+
+        self.vault = Vault(tmp_path / "vault.json")
+        self.created: list[int] = []
+        app = self
+
+        class Store:
+            async def upsert_conversation(self, cid, owner, title, channel):
+                await asyncio.sleep(0.01)
+                app.created.append(cid)
+
+        self.store = Store()
+
+
+async def test_parallel_first_calls_share_one_conversation(tmp_path):
+    from anywhere.mcp_server import Principal, _conversation
+
+    app = _ConversationApp(tmp_path)
+    app.vault.section_put("oauth_grants", "5", {"id": 5, "owner": ALICE})
+    p = Principal(1, "d", ALICE, "Claude", frozenset({"read"}), grant_id=5)
+    cids = await asyncio.gather(*(_conversation(app, p) for _ in range(4)))
+    assert len(set(cids)) == 1 and len(app.created) == 1
+
+
+async def test_a_revoke_during_first_call_is_not_undone(tmp_path):
+    from anywhere.mcp_server import Principal, _conversation
+
+    app = _ConversationApp(tmp_path)
+    app.vault.section_put("oauth_grants", "5", {"id": 5, "owner": ALICE})
+    p = Principal(1, "d", ALICE, "Claude", frozenset({"read"}), grant_id=5)
+    task = asyncio.create_task(_conversation(app, p))
+    await asyncio.sleep(0)
+    app.vault.drop_grant(5)  # user revokes while the conversation is being created
+    await task
+    assert app.vault.section_get("oauth_grants", "5") is None
