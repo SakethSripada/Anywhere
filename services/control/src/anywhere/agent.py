@@ -15,7 +15,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START, MessagesState, StateGraph
@@ -94,6 +94,23 @@ def trim_history(messages: list, limit: int = 30) -> list:
     while history and isinstance(history[0], ToolMessage):
         history.pop(0)
     return history
+
+
+#: Messages kept in a conversation's checkpointed state. The model only ever sees
+#: the last 30 (trim_history); anything older is dead weight that every graph
+#: step re-serialises into the checkpoint, so it is removed from the state.
+HISTORY_KEEP = 60
+
+
+def prune_history(messages: list, keep: int = HISTORY_KEEP) -> list:
+    """RemoveMessage markers for everything before the last `keep` messages, never
+    leaving the kept history starting on an orphaned tool result."""
+    if len(messages) <= keep:
+        return []
+    cut = len(messages) - keep
+    while cut < len(messages) and isinstance(messages[cut], ToolMessage):
+        cut += 1
+    return [RemoveMessage(id=m.id) for m in messages[:cut] if getattr(m, "id", None)]
 
 
 def _failed(output: str) -> bool:
@@ -353,7 +370,7 @@ class Agent:
                 self.app.readiness.record_call("nemotron", "Nemotron planner model", exc)
                 raise
             self.app.readiness.record_call("nemotron", "Nemotron planner model", None)
-            return {"messages": [reply]}
+            return {"messages": [*prune_history(state["messages"]), reply]}
 
         g = StateGraph(MessagesState)
         g.add_node("agent", call_model)
