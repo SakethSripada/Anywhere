@@ -31,7 +31,9 @@ def planner(settings: Settings) -> ChatNVIDIA:
         model=settings.planner_model,
         api_key=_key(settings),
         base_url=settings.nvidia_base_url,
-        temperature=0.6,
+        # NVIDIA's model card recommends temperature 1.0 / top_p 0.95 for this
+        # reasoning model across all tasks; lower temperatures degrade its reasoning.
+        temperature=1.0,
         top_p=0.95,
         max_completion_tokens=4096,
     )
@@ -44,7 +46,12 @@ def vision(settings: Settings) -> ChatNVIDIA:
         api_key=_key(settings),
         base_url=settings.nvidia_base_url,
         temperature=0.2,
-        max_completion_tokens=2048,
+        # Reasoning is on by default for Nemotron 3 models and its thinking tokens
+        # count against the output budget, so a 2048-token cap could end before
+        # any action JSON. Grounding one GUI action doesn't need long reasoning:
+        # turn thinking off, and leave headroom in case the template ignores it.
+        max_completion_tokens=4096,
+        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
 
