@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for a new Anywhere main every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=anywhere-redeploy.service
+
+[Install]
+WantedBy=timers.target

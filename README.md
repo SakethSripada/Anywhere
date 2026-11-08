@@ -306,6 +306,26 @@ Use this instead of step 3 if you'd rather not use Maincloud. It's how the 639Cl
 
 The repo is private, so a fresh VM can't `git clone` it. Push from a machine that has access instead: `git init --bare /opt/anywhere.git` on the VM, then `git push ssh://root@<vm>/opt/anywhere.git main` and `git clone /opt/anywhere.git /opt/anywhere`. Later updates are another push, then `git pull`.
 
+### Automatic redeploys
+
+The VM pulls `main` itself every 2 minutes and redeploys when it changes. Nothing has to be pushed to it, and no secret leaves it.
+
+1. On the VM, create a key that can only read this repo, and add its public half to **GitHub → Settings → Deploy keys** (leave write access off):
+   ```bash
+   ssh-keygen -t ed25519 -N "" -C "anywhere-vm-deploy (read-only)" -f /root/.ssh/anywhere_github
+   printf "Host github-anywhere\n  HostName github.com\n  User git\n  IdentityFile /root/.ssh/anywhere_github\n  IdentitiesOnly yes\n" >> /root/.ssh/config
+   cd /opt/anywhere && git remote add github git@github-anywhere:SakethSripada/Anywhere.git
+   cat /root/.ssh/anywhere_github.pub
+   ```
+2. Install the timer:
+   ```bash
+   install -m 755 deploy/redeploy.sh /usr/local/sbin/anywhere-redeploy
+   cp deploy/anywhere-redeploy.service deploy/anywhere-redeploy.timer /etc/systemd/system/
+   systemctl daemon-reload && systemctl enable --now anywhere-redeploy.timer
+   ```
+
+`deploy/redeploy.sh` does nothing when `main` hasn't moved. When it has, it fast-forwards the checkout (keeping local edits like the Caddyfile `stdb` block), republishes the SpacetimeDB module only if `spacetime/module` changed, and builds the images while the old containers keep serving. If the build fails, the previous version keeps running. Otherwise it restarts the services, moves any container compose left on its old image, waits for the control plane to be healthy and runs `anywhere doctor`. Runs never overlap. Everything is logged to `/var/log/anywhere-redeploy.log`. To deploy right away, run `systemctl start anywhere-redeploy` or `deploy/redeploy.sh --force`.
+
 ### Object storage (R2)
 
 Browsers upload datasets straight to the bucket with presigned `PUT` URLs, and download outputs with presigned `GET` URLs. R2 rejects those cross-origin requests unless the bucket has a CORS policy. In the Cloudflare dashboard, open the bucket, then **Settings → CORS policy**, and add:

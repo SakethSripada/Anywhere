@@ -1,0 +1,13 @@
+[Unit]
+Description=Redeploy Anywhere from the latest main
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The repo's copy once it exists; before that, the bootstrap copy installed alongside this unit.
+ExecStart=/bin/bash -c 'if [ -x /opt/anywhere/deploy/redeploy.sh ]; then exec /opt/anywhere/deploy/redeploy.sh; else exec /usr/local/sbin/anywhere-redeploy; fi'
+# A full rebuild can take several minutes on a small VM.
+TimeoutStartSec=30min
+StandardOutput=append:/var/log/anywhere-redeploy.log
+StandardError=append:/var/log/anywhere-redeploy.log
