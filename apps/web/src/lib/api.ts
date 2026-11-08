@@ -62,9 +62,9 @@ export function useApi() {
 }
 
 /** Unauthenticated probe used for the integrations panel and the offline banner. */
-export async function fetchHealth(): Promise<{ ok: boolean; mode: string; integrations: Record<string, boolean> } | null> {
+export async function fetchHealth(signal?: AbortSignal): Promise<{ ok: boolean; mode: string; integrations: Record<string, boolean> } | null> {
   try {
-    const res = await fetch(`${config.apiUrl}/health`, { cache: "no-store" });
+    const res = await fetch(`${config.apiUrl}/health`, { cache: "no-store", signal });
     return res.ok ? await res.json() : null;
   } catch {
     return null;

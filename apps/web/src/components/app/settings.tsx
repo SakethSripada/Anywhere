@@ -10,7 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ApiError, fetchHealth, useApi } from "@/lib/api";
-import { useAccount, useMonthSpend, useNow } from "@/lib/data";
+import { useAccount, useMonthSpend, useNow, usePlatform } from "@/lib/data";
 import { cents, ms } from "@/lib/format";
 import { reducers, tables, useReducer, useSession, useTable } from "@/lib/stdb";
 import { cn } from "@/lib/utils";
@@ -270,10 +270,20 @@ const INTEGRATIONS = [
 ];
 
 function Integrations() {
-  const [health, setHealth] = useState<Awaited<ReturnType<typeof fetchHealth>> | undefined>(undefined);
+  // Readiness and mode come from the live platform row (the control plane
+  // writes the same readiness snapshot /health serves); /health is only probed
+  // to tell whether the control plane is reachable right now.
+  const { platform, integrations } = usePlatform();
+  const [probe, setProbe] = useState<Awaited<ReturnType<typeof fetchHealth>> | undefined>(undefined);
   useEffect(() => {
-    void fetchHealth().then(setHealth);
+    const ctl = new AbortController();
+    void fetchHealth(ctl.signal).then((h) => {
+      if (!ctl.signal.aborted) setProbe(h);
+    });
+    return () => ctl.abort();
   }, []);
+  // Before the supervisor's first platform write, fall back to the probe's own snapshot.
+  const health = probe && platform ? { mode: platform.provisioningMode, integrations } : probe;
 
   return (
     <Section title="Integrations" description="What this deployment is connected to. Keys live only on the server.">
