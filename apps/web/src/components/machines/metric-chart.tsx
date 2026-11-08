@@ -6,7 +6,7 @@ import { compact } from "@/lib/format";
 type Point = { step: number; value: number };
 
 const PAD = { top: 12, right: 12, bottom: 24, left: 44 };
-const HEIGHT = 220;
+const HEIGHT = 260;
 
 function niceTicks(min: number, max: number, count = 4): number[] {
   if (min === max) return [min];
@@ -24,7 +24,7 @@ function niceTicks(min: number, max: number, count = 4): number[] {
  * Single-series line chart for one training metric: a 2px line, a soft area,
  * recessive gridlines, and a crosshair tooltip that snaps to the nearest step.
  */
-export function MetricChart({ points, label }: { points: Point[]; label: string }) {
+export function MetricChart({ points, label, compare, compareLabel }: { points: Point[]; label: string; compare?: Point[]; compareLabel?: string }) {
   const wrap = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
@@ -39,8 +39,9 @@ export function MetricChart({ points, label }: { points: Point[]; label: string 
 
   const geo = useMemo(() => {
     if (!points.length || width < 80) return null;
-    const xs = points.map((p) => p.step);
-    const ys = points.map((p) => p.value);
+    const both = compare?.length ? [...points, ...compare] : points;
+    const xs = both.map((p) => p.step);
+    const ys = both.map((p) => p.value);
     const x0 = Math.min(...xs);
     const x1 = Math.max(...xs);
     let y0 = Math.min(...ys);
@@ -54,8 +55,9 @@ export function MetricChart({ points, label }: { points: Point[]; label: string 
     const sy = (v: number) => PAD.top + (1 - (v - y0) / (y1 - y0)) * ih;
     const line = points.map((p, i) => `${i ? "L" : "M"}${sx(p.step).toFixed(1)},${sy(p.value).toFixed(1)}`).join("");
     const area = `${line}L${sx(x1).toFixed(1)},${PAD.top + ih}L${sx(x0).toFixed(1)},${PAD.top + ih}Z`;
-    return { sx, sy, line, area, yTicks: niceTicks(y0, y1), xTicks: niceTicks(x0, x1, Math.max(2, Math.floor(iw / 90))), ih };
-  }, [points, width]);
+    const cline = compare?.length ? compare.map((p, i) => `${i ? "L" : "M"}${sx(p.step).toFixed(1)},${sy(p.value).toFixed(1)}`).join("") : null;
+    return { sx, sy, line, cline, area, yTicks: niceTicks(y0, y1), xTicks: niceTicks(x0, x1, Math.max(2, Math.floor(iw / 90))), ih };
+  }, [points, compare, width]);
 
   function onMove(e: React.PointerEvent<SVGRectElement>) {
     if (!geo) return;
@@ -78,19 +80,19 @@ export function MetricChart({ points, label }: { points: Point[]; label: string 
   return (
     <div ref={wrap} className="relative w-full" style={{ height: HEIGHT }}>
       {!points.length && (
-        <div className="grid h-full place-items-center text-[13px] text-muted-foreground">No {label} points yet — they stream in as training runs.</div>
+        <div className="grid h-full place-items-center text-[13px] text-muted-foreground">No {label} data yet.</div>
       )}
       {geo && (
         <svg width={width} height={HEIGHT} className="block overflow-visible" role="img" aria-label={`${label} by training step`}>
           <defs>
             <linearGradient id={`area-${label}`} x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="var(--chart-1)" stopOpacity="0.07" />
-              <stop offset="100%" stopColor="var(--chart-1)" stopOpacity="0.07" />
+              <stop offset="0%" stopColor="var(--chart-1)" stopOpacity="0.18" />
+              <stop offset="100%" stopColor="var(--chart-1)" stopOpacity="0" />
             </linearGradient>
           </defs>
           {geo.yTicks.map((t) => (
             <g key={`y${t}`}>
-              <line x1={PAD.left} x2={width - PAD.right} y1={geo.sy(t)} y2={geo.sy(t)} stroke="var(--border)" />
+              <line x1={PAD.left} x2={width - PAD.right} y1={geo.sy(t)} y2={geo.sy(t)} stroke="var(--border)" strokeDasharray="2 4" />
               <text x={PAD.left - 8} y={geo.sy(t)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular">
                 {compact(t)}
               </text>
@@ -102,7 +104,8 @@ export function MetricChart({ points, label }: { points: Point[]; label: string 
             </text>
           ))}
           <path d={geo.area} fill={`url(#area-${label})`} />
-          <path d={geo.line} fill="none" stroke="var(--chart-1)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          <path d={geo.line} fill="none" stroke="var(--chart-1)" strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
+          {geo.cline && <path d={geo.cline} fill="none" stroke="var(--chart-2)" strokeWidth={1.75} strokeDasharray="4 3" strokeLinejoin="round" />}
           {latest && hover == null && (
             <circle cx={geo.sx(latest.step)} cy={geo.sy(latest.value)} r={4} fill="var(--chart-1)" stroke="var(--background)" strokeWidth={2} />
           )}
@@ -134,8 +137,19 @@ export function MetricChart({ points, label }: { points: Point[]; label: string 
           <div className="tabular font-medium">
             {label} {compact(hp.value)}
           </div>
+          {compare && nearest(compare, hp.step) && (
+            <div className="tabular text-muted-foreground">
+              {compareLabel} {compact(nearest(compare, hp.step)!.value)}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
+}
+
+function nearest(points: Point[], step: number): Point | null {
+  let best: Point | null = null;
+  for (const p of points) if (p.step <= step && (!best || p.step > best.step)) best = p;
+  return best;
 }
