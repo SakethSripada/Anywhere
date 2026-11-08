@@ -1,6 +1,13 @@
 import { ScheduleAt, Timestamp } from "spacetimedb";
 import { CaseConversionPolicy, schema, SenderError, t, table } from "spacetimedb/server";
-import { canTransition, CONTROLLERS, shouldBumpConversation, usageUpdate, validatePreferences } from "./lifecycle";
+import {
+  canTransition,
+  CONTROLLERS,
+  newestTelemetry,
+  shouldBumpConversation,
+  usageUpdate,
+  validatePreferences,
+} from "./lifecycle";
 
 /*
  * Anywhere's system of record.
@@ -523,6 +530,31 @@ export const createWorkload = spacetimedb.reducer(
   },
 );
 
+/** Re-label a workload's plan: a split render's first part takes its own frame range and share of the cost. */
+export const updateWorkloadPlan = spacetimedb.reducer(
+  { name: "update_workload_plan" },
+  { id: t.u64(), title: t.string(), planJson: t.string(), estLowCents: t.u32(), estHighCents: t.u32() },
+  (ctx, { id, title, planJson, estLowCents, estHighCents }) => {
+    requireWorker(ctx);
+    const row = ctx.db.workload.id.find(id);
+    if (!row) throw new SenderError("Workload not found");
+    ctx.db.workload.id.update({ ...row, title, planJson, estLowCents, estHighCents, updatedAt: ctx.timestamp });
+  },
+);
+
+/** Move a workload that hasn't booted yet to another machine, when its provider couldn't deliver the first one. */
+export const switchWorkloadMachine = spacetimedb.reducer(
+  { name: "switch_workload_machine" },
+  { id: t.u64(), instanceType: t.string(), gpuName: t.string(), provider: t.string(), hourlyCents: t.u32() },
+  (ctx, { id, instanceType, gpuName, provider, hourlyCents }) => {
+    requireWorker(ctx);
+    const row = ctx.db.workload.id.find(id);
+    if (!row) throw new SenderError("Workload not found");
+    if (row.status !== "provisioning") throw new SenderError("Only a machine that is still provisioning can switch");
+    ctx.db.workload.id.update({ ...row, instanceType, gpuName, provider, hourlyCents, updatedAt: ctx.timestamp });
+  },
+);
+
 export const transitionWorkload = spacetimedb.reducer(
   { name: "transition_workload" },
   { id: t.u64(), to: t.string(), detail: t.string() },
@@ -847,7 +879,9 @@ export const myLogs = spacetimedb.view(
 export const myMetrics = spacetimedb.view(
   { name: "my_metrics", public: true },
   t.array(metricPoint.rowType),
-  (ctx) => [...ctx.db.metricPoint.owner.filter(ctx.sender)],
+  // GPU telemetry adds a reading per series every 10 s for every running machine;
+  // browsers get the newest hour of it (training metrics are kept whole).
+  (ctx) => newestTelemetry([...ctx.db.metricPoint.owner.filter(ctx.sender)].sort((a, b) => (a.id < b.id ? -1 : 1))),
 );
 
 export const myAgentRuns = spacetimedb.view(

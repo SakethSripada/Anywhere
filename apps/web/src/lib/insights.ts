@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
+import { useNow } from "./data";
 import { ms } from "./format";
-import { tables, useTable } from "./stdb";
+import { NONE, useShared } from "./tables";
 
 /* ── GPU telemetry ─────────────────────────────────────────────────────────
  * The control plane samples `nvidia-smi` on running machines and stores each
@@ -14,18 +15,20 @@ export type GpuSeries = { util: GpuPoint[]; mem: GpuPoint[]; temp: GpuPoint[]; p
 const KEYS = { "gpu.util_pct": "util", "gpu.mem_used_gb": "mem", "gpu.temp_c": "temp", "gpu.power_w": "power" } as const;
 
 export function useGpuTelemetry(workloadId: bigint): GpuSeries {
-  const [rows] = useTable(tables.myMetrics);
+  // The shared subscription, already grouped by machine: no second subscription,
+  // and no scan of every machine's readings on each new one.
+  const rows = useShared("myMetrics").byWorkload.get(workloadId) ?? NONE;
   return useMemo(() => {
     const out: GpuSeries = { util: [], mem: [], temp: [], power: [], memTotal: null };
     for (const r of rows) {
-      if (r.workloadId !== workloadId || !Number.isFinite(r.value)) continue;
+      if (!Number.isFinite(r.value)) continue;
       if (r.name === "gpu.mem_total_gb") out.memTotal = r.value;
       const key = KEYS[r.name as keyof typeof KEYS];
       if (key) out[key].push({ t: r.step, v: r.value });
     }
     for (const k of ["util", "mem", "temp", "power"] as const) out[k].sort((a, b) => a.t - b.t);
     return out;
-  }, [rows, workloadId]);
+  }, [rows]);
 }
 
 /* ── Boot timeline ─────────────────────────────────────────────────────────
@@ -33,7 +36,7 @@ export function useGpuTelemetry(workloadId: bigint): GpuSeries {
  * sync with BOOT_* in services/control/src/anywhere/supervisor.py). */
 
 const BOOT_START = ["Machine requested", "Restarting the machine"];
-const BOOT_END = ["Desktop is live", "Blender is open", "Training started"];
+const BOOT_END = ["Desktop is live", "Blender is open", "Training started", "Rendering started"];
 
 const FRIENDLY: [RegExp, string][] = [
   [/^Machine requested/, "Brev boots a new GPU machine"],
@@ -53,17 +56,19 @@ export type Boot = { kind: "cold" | "resume"; startedAt: number; stages: BootSta
 
 const friendly = (m: string) => FRIENDLY.find(([re]) => re.test(m))?.[1] ?? m;
 
-export function useBootTimeline(workloadId: bigint, now: number): Boot | null {
-  const [rows] = useTable(tables.myEvents);
+/** The machine's latest boot. Its clock ticks only while a stage is still running. */
+export function useBootTimeline(workloadId: bigint): Boot | null {
+  const rows = useShared("myEvents").byWorkload.get(workloadId) ?? NONE;
   const events = useMemo(
     () =>
       rows
-        .filter((e) => e.workloadId === workloadId)
         .map((e) => ({ id: e.id, level: e.level, message: e.message, at: ms(e.createdAt) }))
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-    [rows, workloadId],
+    [rows],
   );
-  return useMemo(() => bootFrom(events, now), [events, now]);
+  const settled = useMemo(() => bootFrom(events, 0), [events]);
+  const now = useNow(1000, !!settled && !settled.done);
+  return useMemo(() => (settled && !settled.done ? bootFrom(events, now) : settled), [settled, events, now]);
 }
 
 type Ev = { level: string; message: string; at: number };

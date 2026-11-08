@@ -26,7 +26,9 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +43,10 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,40}$")
 
 class BrevError(Exception):
     pass
+
+
+class BrevDeployFailed(BrevError):
+    """Brev accepted the create but couldn't deliver the machine (failed, torn down, or gone)."""
 
 
 class ProvisioningDisabled(BrevError):
@@ -157,8 +163,32 @@ class BrevCLI:
     async def get(self, name: str) -> Instance | None:
         return next((i for i in await self.list() if i.name == name), None)
 
-    async def refresh_ssh(self) -> None:
-        await self._run("refresh", timeout=90)
+    #: Seconds between `brev refresh` attempts.
+    REFRESH_RETRY_SECONDS = 5.0
+
+    async def refresh_ssh(self, attempts: int = 8) -> None:
+        """Rewrite ~/.brev/ssh_config. Retried with backoff (about 3 minutes in all): it
+        runs right after a machine boots, and giving up here deletes a machine that is
+        fine. Seen live: Brev's API answered 504 three times in 15 seconds."""
+        for attempt in range(attempts):
+            try:
+                await self._run("refresh", timeout=90)
+                return
+            except BrevError as exc:
+                if attempt == attempts - 1:
+                    raise
+                log.warning("brev.refresh_retry", attempt=attempt, error=str(exc)[:200])
+                await asyncio.sleep(self.REFRESH_RETRY_SECONDS * min(2**attempt, 8))
+
+    def has_ssh_host(self, name: str) -> bool:
+        """Whether the last refresh wrote an alias for `name`. Right after a start,
+        refresh can succeed while Brev has no SSH details for the machine yet, leaving
+        the config empty (seen live on a resume)."""
+        try:
+            text = (Path.home() / ".brev" / "ssh_config").read_text()
+        except OSError:
+            return False
+        return any(line.strip() == f"Host {name}" for line in text.splitlines())
 
     async def check_auth(self) -> int:
         """Confirm the CLI is authenticated. Returns how many instances the org has."""
@@ -182,7 +212,11 @@ class BrevCLI:
         if self.mode == ProvisioningMode.DISABLED:
             raise ProvisioningDisabled("Provisioning is disabled (PROVISIONING_MODE=disabled)")
 
-    async def create(self, name: str, instance_type: str, startup_script: Path) -> CreateResult:
+    async def create(self, name: str, instance_type: str) -> CreateResult:
+        # No --startup-script: on live runs every instance created with one (even a
+        # script that backgrounds its work and exits 0) went UNHEALTHY and Brev
+        # deleted it ~3.5 min in, while the same create without it booted healthy.
+        # All setup happens over SSH instead, where it's observable.
         self._guard()
         if not NAME_RE.match(name):
             raise BrevError(f"Invalid instance name: {name!r}")
@@ -194,8 +228,6 @@ class BrevCLI:
             "--mode",
             "vm",
             "--jupyter=false",
-            "--startup-script",
-            f"@{startup_script}",
             "--detached",
         ]
         dry_run = self.mode == ProvisioningMode.DRY_RUN
@@ -234,18 +266,40 @@ class BrevCLI:
             self._invalidate()
 
     async def wait_for(
-        self, name: str, *, want: str = "RUNNING", timeout: float = 1200, interval: float = 10
+        self,
+        name: str,
+        *,
+        want: str = "RUNNING",
+        timeout: float = 1200,
+        interval: float = 10,
+        on_change: Callable[[Instance], Awaitable[None]] | None = None,
     ) -> Instance:
         """Poll `brev ls` until the instance reaches a status. `brev create` may
-        return before the machine exists, so this is the source of truth."""
+        return before the machine exists, so this is the source of truth.
+        `on_change` hears each new (status, shell status) so callers can show progress."""
         deadline = asyncio.get_running_loop().time() + timeout
         last: Instance | None = None
+        seen: tuple[str, str] | None = None
+        existed = False
         while asyncio.get_running_loop().time() < deadline:
             last = await self.get(name)
+            if last and on_change and (last.status, last.shell_status) != seen:
+                seen = (last.status, last.shell_status)
+                try:
+                    await on_change(last)
+                except Exception as exc:  # progress is cosmetic; never fail the wait over it
+                    log.warning("brev.on_change_failed", error=str(exc))
             if last and last.status == want and (want != "RUNNING" or last.ready):
                 return last
             if last and last.status == "FAILURE":
-                raise BrevError(f"Instance {name} failed to deploy")
+                raise BrevDeployFailed("Brev couldn't start the machine")
+            # Brev tears a failed deploy down by itself. Waiting out the full timeout
+            # would leave the user staring at "Provisioning" for nothing.
+            if want != "DELETING" and last and last.status == "DELETING":
+                raise BrevDeployFailed("Brev shut the machine down before it finished booting")
+            if existed and last is None:
+                raise BrevDeployFailed("The machine disappeared from Brev before it finished booting")
+            existed = existed or last is not None
             await asyncio.sleep(interval)
         raise BrevError(f"Instance {name} did not reach {want} within {timeout / 60:.0f} min (last: {last})")
 
@@ -264,5 +318,22 @@ def parse_ls(out: str) -> list[dict]:
     return [r for r in data if isinstance(r, dict)]
 
 
-def instance_name(workload_id: int) -> str:
-    return f"anywhere-{workload_id:x}"
+def instance_name(workload_id: int, prefix: str = "anywhere") -> str:
+    return f"{prefix}-{workload_id:x}"
+
+
+def site_prefix(data_dir: Path) -> str:
+    """This deployment's instance-name prefix, e.g. `aw7k2q`. Stable across restarts
+    (kept in DATA_DIR) and distinct per deployment, so teammates or a hosted server
+    sharing one Brev org never reconcile away each other's machines. It deliberately
+    doesn't start with `anywhere-`, which older control planes treat as theirs."""
+    path = Path(data_dir) / "site-id"
+    try:
+        site = path.read_text().strip()
+    except OSError:
+        site = ""
+    if not re.fullmatch(r"[a-z0-9]{4,8}", site):
+        site = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(5))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(site + "\n")
+    return f"aw{site}"

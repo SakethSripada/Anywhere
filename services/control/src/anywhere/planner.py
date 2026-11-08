@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from .catalog import Catalog, Offer
+from .render_bench import frame_minutes
 
 WorkloadKind = Literal["desktop", "fine_tune", "training", "inference", "render"]
 Application = Literal["blender", "vscode", "jupyter", "terminal", "unity", "unreal", "other"]
@@ -30,6 +31,12 @@ SUPPORTED_APPS: dict[str, str] = {
 
 #: Minutes of billed time spent before useful work begins.
 SETUP_MINUTES = {"desktop": 9, "batch": 6}
+#: Installing Blender on a render machine and copying the project over.
+RENDER_SETUP_MINUTES = 4
+#: A split render runs at most this many GPUs at once.
+MAX_RENDER_MACHINES = 8
+#: Suggest splitting a single-GPU render once it has at least this many frames.
+SPLIT_SUGGESTION_FRAMES = 24
 
 
 class Intent(BaseModel):
@@ -43,7 +50,28 @@ class Intent(BaseModel):
     )
     dataset_size_mb: float | None = Field(None, description="Dataset size if known from an upload or the request.")
     epochs: int | None = Field(None, description="Training epochs if the user specified them.")
-    session_hours: float | None = Field(None, description="How long the user expects to work, if stated.")
+    session_hours: float | None = Field(
+        None,
+        description="How long the user will work on the desktop. Leave empty unless they said it; "
+        "this is time at the machine, not how long a render takes.",
+    )
+    session_hours_stated: bool = Field(
+        False, description="True only if the user explicitly said how long they need the machine."
+    )
+    scene_complexity: Literal["simple", "detailed", "heavy"] | None = Field(
+        None,
+        description="For Blender renders: simple (a few objects), detailed (dense props and textures), "
+        "or heavy (interiors, volumetric fog, many lights).",
+    )
+    render_width: int | None = Field(None, description="Render width in pixels, if known (default 1920).")
+    render_height: int | None = Field(None, description="Render height in pixels, if known (default 1080).")
+    render_samples: int | None = Field(None, description="Cycles samples per pixel, if known (default 128).")
+    render_frames: int | None = Field(None, description="Number of frames to render, for a render job (default 1).")
+    render_machines: int | None = Field(
+        None,
+        description="Render jobs: how many GPUs to split the frames across, 1-8. More GPUs finish sooner for "
+        "about the same total cost; use it for animations when the user wants speed.",
+    )
     preference: Preference | None = None
     max_budget_usd: float | None = None
 
@@ -52,6 +80,34 @@ class Intent(BaseModel):
     def _non_negative(cls, v: float | None) -> float | None:
         if v is not None and (v < 0 or not math.isfinite(v)):
             raise ValueError("must be a finite, non-negative number")
+        return v
+
+    @field_validator("render_width", "render_height")
+    @classmethod
+    def _resolution(cls, v: int | None) -> int | None:
+        if v is not None and not 16 <= v <= 16384:
+            raise ValueError("resolution must be between 16 and 16384 pixels")
+        return v
+
+    @field_validator("render_samples")
+    @classmethod
+    def _samples(cls, v: int | None) -> int | None:
+        if v is not None and not 1 <= v <= 65536:
+            raise ValueError("samples must be between 1 and 65536")
+        return v
+
+    @field_validator("render_machines")
+    @classmethod
+    def _machines(cls, v: int | None) -> int | None:
+        if v is not None and not 1 <= v <= MAX_RENDER_MACHINES:
+            raise ValueError(f"render_machines must be between 1 and {MAX_RENDER_MACHINES}")
+        return v
+
+    @field_validator("render_frames")
+    @classmethod
+    def _frames(cls, v: int | None) -> int | None:
+        if v is not None and not 1 <= v <= 10000:
+            raise ValueError("frames must be between 1 and 10000")
         return v
 
     @field_validator("epochs")
@@ -95,6 +151,10 @@ class Plan(BaseModel):
     alternatives: list[Choice]
     outputs: list[str]
     warnings: list[str]
+    #: For Blender work: estimated minutes per frame on each candidate GPU (see render_bench).
+    render_time: dict | None = None
+    #: Machines that run at once (more than one for a split render).
+    machines: int = 1
 
 
 class Unsupported(BaseModel):
@@ -236,15 +296,56 @@ def estimate(intent: Intent, req: Requirements, offer: Offer) -> Estimate:
     assumptions = [f"Includes ~{round(setup_h * 60)} min to boot and configure."]
 
     if req.mode == "interactive":
-        if intent.session_hours:
+        confidence: Literal["low", "medium", "high"]
+        if intent.session_hours and intent.session_hours_stated:
             low = high = intent.session_hours
-            confidence: Literal["low", "medium", "high"] = "high"
-            assumptions.append(f"A {intent.session_hours:g} h session, as requested.")
+            confidence = "high"
+            assumptions.append(f"A {intent.session_hours:g} h session, as you asked.")
+        elif intent.session_hours:
+            # The agent's guess at how long the work might take: show it as a range from a
+            # short first session, never as a confident commitment.
+            low, high = 1.0, max(1.0, intent.session_hours)
+            confidence = "low"
+            assumptions.append(
+                f"Priced as a 1 h session to start; Anywhere guessed the whole job could take up to "
+                f"~{intent.session_hours:g} h of work at the machine."
+            )
         else:
-            low, high = 1.0, 3.0
+            low = high = 1.0
             confidence = "medium"
-            assumptions.append("Typical session of 1–3 h; you're billed only while it runs.")
+            assumptions.append("Priced as a 1 h session to start.")
+        assumptions.append("Billed only while it runs: stop any time and resume later.")
         assumptions.append("Idle desktops are saved and stopped automatically.")
+    elif req.environment == "blender-render":
+        frames = intent.render_frames or 1
+        machines = render_machines(intent)
+        fe = frame_minutes(
+            offer.gpu_name,
+            intent.scene_complexity or "detailed",
+            intent.render_width or 1920,
+            intent.render_height or 1080,
+            intent.render_samples or 128,
+        )
+        if fe is None:
+            low, high = 0.25, 2.0
+            confidence = "low"
+            assumptions.append(f"No benchmark data for the {offer.gpu_name}, so this is a wide guess.")
+        else:
+            per_machine = math.ceil(frames / machines)
+            low, high = per_machine * fe.minutes_low / 60, per_machine * fe.minutes_high / 60
+            confidence = "medium" if fe.runs >= 3 else "low"
+            assumptions.append(
+                f"{frames} frame{'s' if frames != 1 else ''} at ~{fe.minutes_low:.1f}–{fe.minutes_high:.1f} min each on the "
+                f"{fe.gpu}, from Blender Open Data benchmarks ({fe.runs} run{'s' if fe.runs != 1 else ''})."
+            )
+            if machines > 1:
+                assumptions.append(
+                    f"Split across {machines} {fe.gpu}s rendering at once, {per_machine} frames each; "
+                    f"times are wall-clock and the cost covers all {machines} machines."
+                )
+        assumptions.append(f"Includes ~{RENDER_SETUP_MINUTES} min to install Blender and copy your project.")
+        low, high = low + RENDER_SETUP_MINUTES / 60, high + RENDER_SETUP_MINUTES / 60
+        assumptions.append("The machine shuts down as soon as the last frame is saved.")
     elif req.environment == "lora-sft":
         params = intent.model_params_billions or 0.5
         epochs = intent.epochs or 2
@@ -268,11 +369,13 @@ def estimate(intent: Intent, req: Requirements, offer: Offer) -> Estimate:
         assumptions.append("Runtime depends heavily on inputs we haven't inspected yet.")
 
     low, high = low + setup_h, high + setup_h
+    # Every machine of a split render bills for the whole (parallel) run.
+    fleet = render_machines(intent) if req.environment == "blender-render" else 1
     return Estimate(
         hours_low=round(low, 2),
         hours_high=round(high, 2),
-        cost_low_cents=math.ceil(low * offer.price_per_hour * 100),
-        cost_high_cents=math.ceil(high * offer.price_per_hour * 100),
+        cost_low_cents=math.ceil(low * offer.price_per_hour * 100 * fleet),
+        cost_high_cents=math.ceil(high * offer.price_per_hour * 100 * fleet),
         confidence=confidence,
         assumptions=assumptions,
     )
@@ -300,16 +403,23 @@ def rank(intent: Intent, req: Requirements, offers: list[Offer], preference: Pre
     max_cost = max(e.cost_high_cents for _, e in scored) or 1
     max_hours = max(e.hours_high for _, e in scored) or 1
 
+    # Render estimates already come from per-GPU benchmarks, so a render's hours *are* its
+    # speed; scaling them by the generic catalog speed factor would count speed twice.
+    measured = req.environment == "blender-render"
+
+    def speed(o: Offer) -> float:
+        return 1.0 if measured else o.speed
+
     def key(item: tuple[Offer, Estimate]) -> tuple:
         o, e = item
         if preference == "cheapest":
             return (e.cost_high_cents, -o.speed)
         if preference == "fastest":
-            return (-o.speed, e.cost_high_cents)
+            return (e.hours_high, e.cost_high_cents) if measured else (-o.speed, e.cost_high_cents)
         # balanced: interactive work is billed by the hour regardless of GPU speed,
         # so weigh price more heavily there; batch weighs time and cost equally.
         w = 0.75 if req.mode == "interactive" else 0.5
-        return (w * e.cost_high_cents / max_cost + (1 - w) * e.hours_high / max_hours / o.speed, o.type)
+        return (w * e.cost_high_cents / max_cost + (1 - w) * e.hours_high / max_hours / speed(o), o.type)
 
     # Collapse equivalent machines (same GPU/vCPU/RAM) to the cheapest provider.
     best: dict[tuple, tuple[Offer, Estimate]] = {}
@@ -346,6 +456,12 @@ def plan(intent: Intent, catalog: Catalog, default_preference: Preference = "bal
 
     selected, *rest = ranked
     title = _title(intent)
+    machines = render_machines(intent) if req.environment == "blender-render" else 1
+    if req.environment == "blender-render" and machines == 1 and (intent.render_frames or 1) >= SPLIT_SUGGESTION_FRAMES:
+        warnings.append(
+            "Tip: splitting this across 4 GPUs would finish about 4x sooner for about the same cost. "
+            "Ask for it to use 4 GPUs."
+        )
     return Plan(
         intent=intent,
         title=title,
@@ -354,7 +470,41 @@ def plan(intent: Intent, catalog: Catalog, default_preference: Preference = "bal
         alternatives=rest[:2],
         outputs=_outputs(intent, req),
         warnings=warnings,
+        render_time=render_table(intent, [selected, *rest[:2]]) if _is_blender(intent) else None,
+        machines=machines,
     )
+
+
+def render_machines(intent: Intent) -> int:
+    """GPUs a render job runs on at once: as asked, but never more than there are frames."""
+    return max(1, min(intent.render_machines or 1, intent.render_frames or 1, MAX_RENDER_MACHINES))
+
+
+def _is_blender(intent: Intent) -> bool:
+    return intent.kind == "render" or (intent.kind == "desktop" and intent.application == "blender")
+
+
+def render_table(intent: Intent, choices: list[Choice]) -> dict:
+    """Estimated minutes per frame on each candidate GPU, for the plan card and the agent."""
+    complexity = intent.scene_complexity or "detailed"
+    width, height = intent.render_width or 1920, intent.render_height or 1080
+    samples = intent.render_samples or 128
+    rows: list[dict] = []
+    for c in choices:
+        fe = frame_minutes(c.offer["gpu"], complexity, width, height, samples)
+        # One row per GPU: two machine sizes with the same GPU render at the same speed.
+        if fe is not None and all(r["gpu"] != fe.gpu for r in rows):
+            rows.append({**fe.public(), "type": c.offer["type"], "price_per_hour": c.offer["price_per_hour"]})
+    return {
+        "complexity": complexity,
+        "width": width,
+        "height": height,
+        "samples": samples,
+        "frames": intent.render_frames or 1,
+        "machines": render_machines(intent) if intent.kind == "render" else 1,
+        "rows": rows,
+        "basis": "Blender Open Data, Blender 4.5 OptiX medians. A test render on the machine gives an exact number.",
+    }
 
 
 def _title(intent: Intent) -> str:

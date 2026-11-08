@@ -16,19 +16,22 @@ import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 import { Composer, type ComposerHandle } from "../chat/composer";
 import { Thread } from "../chat/thread";
+import { appKey } from "../app/app-logo";
 
 export type AgentPanelHandle = { focus(text?: string): void };
 
 function suggestions(w: Workload, working: boolean): string[] {
   const running = w.status === "running";
   if (w.kind === "desktop") {
+    if (w.status === "provisioning" || w.status === "configuring") return ["How long until it’s ready?"];
     if (!running) return ["Why isn’t this running?", "What did you do last time?"];
     if (working) return ["What are you doing?", "Save when you’re done"];
     return ["Model a low-poly tree in Blender", "What’s on screen?", "Save my project"];
   }
-  if (w.status === "succeeded") return ["Summarize the results", "How do I use the adapter?"];
+  const render = appKey(w) === "blender";
+  if (w.status === "succeeded") return render ? ["Where are my frames?", "How long did each frame take?"] : ["Summarize the results", "How do I use the adapter?"];
   if (w.status === "failed") return ["Why did this fail?", "Retry on a bigger GPU"];
-  return ["How’s training going?", "Any errors in the logs?", "When will it finish?"];
+  return [render ? "How’s the render going?" : "How’s training going?", "Any errors in the logs?", "When will it finish?"];
 }
 
 const STATUS: Record<OrbState, string> = {
@@ -38,6 +41,12 @@ const STATUS: Record<OrbState, string> = {
   ready: "Ready",
   offline: "Machine isn’t running",
 };
+
+/** While the machine boots it isn't broken, just not ready yet. */
+function statusText(state: OrbState, status: string) {
+  if (state === "offline" && (status === "provisioning" || status === "configuring")) return "Waiting for the machine";
+  return STATUS[state];
+}
 
 /**
  * The agent beside one machine: a single stream of the conversation, every
@@ -107,7 +116,7 @@ export const AgentPanel = forwardRef<
         <AgentOrb state={state} size={18} />
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="text-[13px] font-medium text-ink">Agent</span>
-          <span className={cn("truncate text-[12px]", state === "working" || state === "thinking" ? "bui-shimmer" : "text-ink-3")}>{STATUS[state]}</span>
+          <span className={cn("truncate text-[12px]", state === "working" || state === "thinking" ? "bui-shimmer" : "text-ink-3")}>{statusText(state, w.status)}</span>
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger

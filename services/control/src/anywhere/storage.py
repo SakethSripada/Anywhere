@@ -154,6 +154,12 @@ class Storage:
 
         await asyncio.to_thread(_download)
 
+    async def get_bytes(self, key: str) -> bytes:
+        def _get() -> bytes:
+            return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+
+        return await asyncio.to_thread(_get)
+
     async def put_bytes(self, key: str, data: bytes, content_type: str) -> None:
         await asyncio.to_thread(
             self.client.put_object, Bucket=self.bucket, Key=key, Body=data, ContentType=content_type

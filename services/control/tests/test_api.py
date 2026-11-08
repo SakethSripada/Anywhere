@@ -30,10 +30,19 @@ def test_commands_require_authentication(tmp_path):
     with client(tmp_path) as c:
         assert c.post("/v1/chat", json={"text": "hi"}).status_code == 401
         assert c.post("/v1/workloads/1/approve").status_code == 401
+        assert c.get("/v1/costs").status_code == 401
         assert (
             c.post("/v1/bridge/inbound", json={"handle": "+15550100", "text": "hi", "message_id": "m"}).status_code
             == 401
         )
+        assert c.get("/v1/bridge/notifications/1/attachment").status_code == 401
+
+
+def test_sharing_needs_the_owner_and_unknown_links_are_not_found(tmp_path):
+    with client(tmp_path) as c:
+        assert c.post("/v1/workloads/1/share", json={}).status_code == 401
+        assert c.delete("/v1/workloads/1/share").status_code == 401
+        assert c.get("/v1/watch/not-a-real-token").status_code == 404
 
 
 def test_vnc_tickets_are_signed_scoped_and_short_lived():
@@ -125,3 +134,27 @@ async def test_vnc_relay_closes_the_browser_when_the_desktop_goes_away(caplog):
     await asyncio.wait_for(_relay(browser, _Upstream(), touch), 5)
     assert browser.received == [b"frame"]
     assert browser.closed == 1001
+
+
+def test_every_workload_post_reaches_its_own_route(tmp_path):
+    """A catch-all `/v1/workloads/{id}/{action}` once swallowed /share and /render-estimate."""
+    from anywhere.auth import current_identity
+
+    api = create_app(Settings(_env_file=None, data_dir=tmp_path))
+    api.dependency_overrides[current_identity] = lambda: "owner"
+    hit = []
+
+    async def record(name, result):
+        hit.append(name)
+        return result
+
+    with TestClient(api) as c:
+        core = api.state.anywhere
+        core.create_share = lambda o, w, h: record("share", {"token": "t", "expires_at": "x", "replaced": None})
+        core.estimate_render = lambda *a: record("render-estimate", {"ok": True})
+        core.stop = lambda o, w: record("stop", None)
+        assert c.post("/v1/workloads/42/share", json={"hours": 1}).json()["token"] == "t"
+        assert c.post("/v1/workloads/42/render-estimate", json={"frames": 1}).status_code == 200
+        assert c.post("/v1/workloads/42/stop").json() == {"ok": True}
+        assert c.post("/v1/workloads/42/frobnicate").status_code == 404
+    assert hit == ["share", "render-estimate", "stop"]

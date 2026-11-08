@@ -14,6 +14,17 @@ import structlog
 
 from .stdb import SpacetimeClient, SpacetimeError, identity_arg
 
+_SPACED_DASH = re.compile(r"\s*[\u2014\u2013]\s*(?=\S)")
+_RANGE_DASH = re.compile(r"(?<=\d)\u2013(?=\d)")
+
+
+def plain_dashes(text: str) -> str:
+    """Models use em dashes despite being told not to; the product never shows them.
+    "T4 — the cheapest" becomes "T4, the cheapest"; "5–10" becomes "5-10"."""
+    text = _RANGE_DASH.sub("-", text)
+    return _SPACED_DASH.sub(", ", text).replace("\u2014", "").replace("\u2013", "")
+
+
 log = structlog.get_logger()
 
 _HEX_IDENTITY = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
@@ -72,6 +83,8 @@ class Store:
     async def append_message(
         self, conversation_id: int, role: str, kind: str, body: str, workload_id: int = 0, channel: str = "web"
     ) -> None:
+        if role == "assistant" and not body.lstrip().startswith(("{", "[")):
+            body = plain_dashes(body)
         await self.client.call("append_message", conversation_id, role, kind, body, workload_id, channel)
 
     # ── Workloads ─────────────────────────────────────────────────────────
@@ -94,6 +107,16 @@ class Store:
             w["est_high_cents"],
             w["stoppable"],
         )
+
+    async def update_workload_plan(
+        self, id: int, title: str, plan_json: str, est_low_cents: int, est_high_cents: int
+    ) -> None:
+        await self.client.call("update_workload_plan", id, title, plan_json, est_low_cents, est_high_cents)
+
+    async def switch_workload_machine(
+        self, id: int, instance_type: str, gpu_name: str, provider: str, hourly_cents: int
+    ) -> None:
+        await self.client.call("switch_workload_machine", id, instance_type, gpu_name, provider, hourly_cents)
 
     async def transition(self, id: int, to: str, detail: str) -> None:
         await self.client.call("transition_workload", id, to, detail)

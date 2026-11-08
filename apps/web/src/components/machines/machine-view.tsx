@@ -34,6 +34,7 @@ import { AppLogo, appKey } from "../app/app-logo";
 import { AgentPanel, type AgentPanelHandle, type AgentPanelMemory } from "./agent-panel";
 import { DesktopStage } from "./desktop-stage";
 import { Insights } from "./insights";
+import { ShareButton } from "./share-dialog";
 import { JobStage } from "./job-stage";
 import { LiveCost, Uptime, useWorkloadAction } from "./shared";
 import { StatusChip } from "./status";
@@ -129,11 +130,17 @@ function Workspace({ w }: { w: Workload }) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const work = w.kind === "desktop" ? <DesktopStage w={w} onAskAgent={askAgent} /> : <JobStage w={w} />;
-  // The desktop stays mounted while Insights is open, so its stream doesn't reconnect on every switch.
+  // The desktop stays mounted while Insights is open, so its stream doesn't reconnect on
+  // every switch. A job has no stream to keep, so it unmounts and stops its clocks.
   const stage = (
     <>
-      <div className={cn("h-full min-h-0", view !== "work" && "hidden")}>{work}</div>
+      {w.kind === "desktop" ? (
+        <div className={cn("h-full min-h-0", view !== "work" && "hidden")}>
+          <DesktopStage w={w} onAskAgent={askAgent} />
+        </div>
+      ) : (
+        view === "work" && <JobStage w={w} />
+      )}
       {view === "insights" && <Insights w={w} />}
     </>
   );
@@ -247,6 +254,7 @@ function Header({
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
+        {desktop && w.status === "running" && <ShareButton w={w} />}
         {running && (
           <Button size="sm" variant="outline" onClick={() => setConfirm(desktop && w.stoppable ? "stop" : "delete")}>
             {desktop && w.stoppable ? <Pause /> : <Square className="size-3" />}

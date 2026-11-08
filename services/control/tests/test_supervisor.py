@@ -364,6 +364,32 @@ async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_pa
     assert ("delete", instance_name(1)) in brev.calls
 
 
+async def test_batch_monitor_reads_the_rest_of_the_log_before_failing(tmp_path, monkeypatch):
+    from anywhere import supervisor as sup_mod
+
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 3600  # only the first poll may wait; draining must not
+    sup.remote_factory = ScriptedRemote
+    backlog = ("x" * 99 + "\n") * (sup_mod.LOG_CHUNK // 100)
+    ScriptedRemote.polls = [
+        poll_output(log=backlog, status="failed: Training exited with an error (exit 1)"),
+        poll_output(log="torch.OutOfMemoryError: CUDA out of memory\n", status="failed: oom"),
+    ]
+    w = store.add(kind="batch", status="running")
+    sleeps = []
+
+    async def no_wait(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(sup_mod.asyncio, "sleep", no_wait)
+    await sup._monitor_batch(w)
+    assert "".join(t for _, t in store.logs).endswith("CUDA out of memory\n")
+    assert sleeps.count(3600) == 1
+    assert store.rows[1]["status"] == "failed"
+    assert "oom" in store.rows[1]["statusDetail"]
+
+
 async def test_batch_monitor_fails_when_runner_dies_silently(tmp_path):
     brev = FakeBrev()
     sup, store, _ = make(tmp_path, brev)
@@ -514,9 +540,257 @@ async def test_only_running_machines_are_sampled(tmp_path):
     assert set(sup._sampling) == {1}
 
 
+async def test_telemetry_samples_machines_concurrently(tmp_path):
+    sup, store, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=60)
+    for i in (1, 2, 3):
+        store.add(id=i, status="running")
+    await sup.tick()
+    sup._gpu_total_sent = {1, 99}  # 99 stopped long ago
+    started: list[int] = []
+
+    async def slow_sample(w):
+        started.append(w["id"])
+        await asyncio.sleep(0.3)
+        return []
+
+    sup.sample_gpu = slow_sample
+    task = asyncio.create_task(sup._telemetry_loop())
+    await asyncio.sleep(0.1)
+    # A slow machine doesn't hold up the others: all three are being sampled at once.
+    assert sorted(started) == [1, 2, 3]
+    assert sup._gpu_total_sent == {1}
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_telemetry_can_be_turned_off(tmp_path):
     sup, _, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=0)
     sup.start_guard()
     assert sup._telemetry_task is None
     await sup.shutdown()
     await asyncio.gather(sup._guard_task, return_exceptions=True)
+
+
+def test_desktop_setup_falls_back_to_blender_mirrors():
+    import subprocess
+
+    from anywhere.supervisor import _env, render
+
+    script = render(
+        _env("desktop-setup.sh"), DESKTOP_IMAGE="img", BLENDER_VERSION="4.5.15", BLENDER_SHA256="x", CUA_TOKEN="t"
+    )
+    assert subprocess.run(["bash", "-n"], input=script.encode()).returncode == 0
+    for mirror in ("download.blender.org", "mirrors.ocf.berkeley.edu", "ftp.nluug.nl"):
+        assert mirror in script
+    assert "--retry" in script and "sha256sum -c" in script
+
+
+async def test_setup_failures_keep_the_last_output_on_the_machine_log(tmp_path):
+    from anywhere.remote import RemoteError
+
+    sup, store, _ = make(tmp_path, FakeBrev())
+    logs: list[str] = []
+
+    async def append_logs(wid, text):
+        logs.append(text)
+
+    store.append_logs = append_logs
+    w = store.add(status="configuring")
+    await sup._fail(w, RemoteError("desktop-setup.sh exited 22\ncurl: (22) The requested URL returned error: 403"))
+    assert store.rows[1]["statusDetail"] == "desktop-setup.sh exited 22"
+    assert logs and "returned error: 403" in logs[0]
+
+
+class _LocalShell:
+    """A Remote stand-in that runs commands on this host."""
+
+    def popen(self, command, *, stdin=None, stdout=None):
+        import subprocess
+
+        return subprocess.Popen(["sh", "-c", command], stdin=stdin, stdout=stdout, stderr=subprocess.DEVNULL)
+
+
+async def test_relay_does_not_hang_when_the_receiver_exits_early():
+    from anywhere.remote import RemoteError
+    from anywhere.supervisor import _relay
+
+    # The receiver reads 10 bytes and exits; the sender has ~200 MB to send.
+    with pytest.raises(RemoteError):
+        await asyncio.wait_for(
+            _relay(_LocalShell(), "yes | head -c 200000000", _LocalShell(), "head -c 10 >/dev/null; exit 3"), 20
+        )
+
+
+async def test_relay_times_out_and_kills_both_sides():
+    from anywhere.remote import RemoteError
+    from anywhere.supervisor import _relay
+
+    with pytest.raises(RemoteError, match="too long"):
+        await _relay(_LocalShell(), "sleep 30", _LocalShell(), "cat >/dev/null", timeout=0.5)
+
+
+async def test_relay_copies_between_machines(tmp_path):
+    from anywhere.supervisor import _relay
+
+    out = tmp_path / "out"
+    await _relay(_LocalShell(), "printf hello", _LocalShell(), f"cat > {out}")
+    assert out.read_text() == "hello"
+
+
+def test_housekeeping_drops_vault_records_nothing_will_read(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from anywhere import savings, sharing
+
+    sup, _, _ = make(tmp_path, FakeBrev())
+    now = datetime.now(UTC)
+    v = sup.vault
+    v.section_put(sharing.SECTION, "live", {"workload_id": 1, "expires_at": (now + timedelta(hours=1)).isoformat()})
+    v.section_put(sharing.SECTION, "old", {"workload_id": 2, "expires_at": (now - timedelta(minutes=1)).isoformat()})
+    v.section_put("notification_attachments", "1", {"key": "k", "name": "a.jpg", "at": now.isoformat()})
+    v.section_put(
+        "notification_attachments", "2", {"key": "k", "name": "a.jpg", "at": (now - timedelta(days=2)).isoformat()}
+    )
+    v.section_put("notification_attachments", "3", {"key": "k", "name": "a.jpg"})  # written before timestamps
+    v.section_put(savings.SECTION, "recent", {"stopped_at": (now - timedelta(days=3)).isoformat()})
+    v.section_put(savings.SECTION, "ancient", {"stopped_at": (now - timedelta(days=200)).isoformat()})
+
+    assert sup.housekeeping(now) == 4
+    assert [k for k, _ in v.section_items(sharing.SECTION)] == ["live"]
+    assert [k for k, _ in v.section_items("notification_attachments")] == ["1"]
+    assert [k for k, _ in v.section_items(savings.SECTION)] == ["recent"]
+    assert sup.housekeeping(now) == 0
+
+
+async def test_a_torn_down_deploy_retries_the_same_gpu_on_another_provider(tmp_path):
+    from anywhere.catalog import Catalog
+
+    brev = FakeBrev(fail_types={"g4dn.xlarge"})
+    sup, store, _ = make(tmp_path, brev)
+    sup.catalog = Catalog()
+    configured: list[str] = []
+
+    async def configure(w, remote):  # setup itself is covered elsewhere; stop once the machine is up
+        configured.append(remote.host)
+
+    sup._configure_desktop = configure
+    w = store.add(instanceType="g4dn.xlarge", gpuName="T4", provider="aws", hourlyCents=63)
+    sup.launch(w)
+    await drain(sup)
+    row = store.rows[1]
+    assert row["instanceType"] == "n1-standard-4:nvidia-tesla-t4:1"
+    assert row["provider"] == "gcp"
+    assert row["status"] == "configuring"
+    assert configured == [f"{instance_name(1)}-1"]
+    assert ("delete", instance_name(1)) in brev.calls
+    assert any("Trying the same GPU on GCP" in m for _, _, m in store.events)
+
+
+async def test_no_fallback_without_a_same_gpu_offer_elsewhere(tmp_path):
+    from anywhere.catalog import Catalog
+
+    brev = FakeBrev(fail_types={"g6e.2xlarge"})
+    sup, store, _ = make(tmp_path, brev)
+    sup.catalog = Catalog()
+    sup.launch(store.add(instanceType="g6e.2xlarge", gpuName="L40S", provider="aws", kind="batch"))
+    await drain(sup)
+    assert store.rows[1]["status"] == "failed"
+
+
+async def test_a_failed_type_is_remembered_and_skipped_next_launch(tmp_path):
+    from anywhere.catalog import Catalog
+
+    catalog = Catalog()
+    brev = FakeBrev(fail_types={"g4dn.xlarge"})
+    sup, store, _ = make(tmp_path, brev)
+    sup.catalog = catalog
+
+    async def configure(w, remote): ...
+
+    sup._configure_desktop = configure
+    sup.launch(store.add(instanceType="g4dn.xlarge", gpuName="T4", provider="aws", hourlyCents=63))
+    await drain(sup)
+    assert catalog.recently_failed("g4dn.xlarge")
+    assert "g4dn.xlarge" not in {o.type for o in catalog.offers()}
+
+    # A plan made before the failure goes straight to the working machine.
+    brev.calls.clear()
+    sup.launch(store.add(id=2, instanceType="g4dn.xlarge", gpuName="T4", provider="aws", hourlyCents=63))
+    await drain(sup)
+    assert store.rows[2]["instanceType"] == "n1-standard-4:nvidia-tesla-t4:1"
+    assert [c for c in brev.calls if c[0] == "create"] == [("create", instance_name(2))]
+
+
+async def test_reconcile_keeps_a_machine_launched_under_a_fallback_name(tmp_path):
+    # Seen live: the reconciler deleted a booting GCP fallback because its name
+    # (anywhere-<id>-1) wasn't the default instance name.
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    store.add(status="provisioning")
+    fallback = f"{instance_name(1)}-1"
+    sup.vault.update(1, instance=fallback)
+    brev.instances[fallback] = "DEPLOYING"
+    await sup.reconcile(await store.workloads())
+    await sup.reconcile(await store.workloads())
+    assert fallback in brev.instances
+    assert ("delete", fallback) not in brev.calls
+
+
+def test_benched_machine_types_survive_a_restart(tmp_path):
+    from anywhere.catalog import Catalog
+
+    path = tmp_path / "benched.json"
+    first = Catalog()
+    first.persist_to(path)
+    first.mark_failed("g4dn.xlarge")
+    second = Catalog()
+    second.persist_to(path)
+    assert second.recently_failed("g4dn.xlarge")
+    assert not second.recently_failed("g5.xlarge")
+
+
+async def test_reconcile_leaves_other_deployments_machines_alone(tmp_path):
+    # Seen live: another control plane on the same Brev org deleted our booting
+    # machines. Each deployment now owns only its own prefix.
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.instance_prefix = "awmine"
+    brev.instances = {"anywhere-1": "RUNNING", "awtheirs-2": "RUNNING", "awmine-dead": "RUNNING"}
+    await sup.reconcile(await store.workloads())
+    await sup.reconcile(await store.workloads())
+    assert set(brev.instances) == {"anywhere-1", "awtheirs-2"}
+
+
+def test_site_prefix_is_stable_and_valid(tmp_path):
+    from anywhere.brev import NAME_RE, site_prefix
+
+    first = site_prefix(tmp_path)
+    assert first == site_prefix(tmp_path)
+    assert not first.startswith("anywhere")
+    assert NAME_RE.match(instance_name(0xFFFFFFFFFFFF, first) + "-1")
+
+
+async def test_reach_refreshes_until_brev_writes_the_host(tmp_path, monkeypatch):
+    # Seen live on a resume: the first refresh after "Machine is up" wrote an empty
+    # ssh_config, and the supervisor waited on an alias that didn't exist.
+    import anywhere.supervisor as sup_mod
+
+    monkeypatch.setattr(sup_mod, "_until", _fast_until)
+    brev = FakeBrev()
+    refreshes = []
+
+    async def refresh_ssh(attempts=8):
+        refreshes.append(attempts)
+
+    brev.refresh_ssh = refresh_ssh
+    brev.has_ssh_host = lambda name: len(refreshes) >= 3
+    sup, store, _ = make(tmp_path, brev)
+    await sup._reach(store.add(), "awx-1")
+    assert len(refreshes) >= 3
+
+
+async def _fast_until(check, *, timeout, what, interval=8):
+    for _ in range(20):
+        if await check():
+            return
+    raise TimeoutError(what)

@@ -8,7 +8,7 @@ anything that was interrupted mid-provisioning, cleaning up its instance.
 Every path that can create compute has a matching cleanup path:
   * provisioning/configuration errors → save what we can → delete the instance
   * the budget guard → save → stop (desktops) or delete (batch)
-  * reconciliation → delete `anywhere-*` instances no workload owns
+  * reconciliation → delete this deployment's instances (`<instance_prefix>-*`) no workload owns
 """
 
 from __future__ import annotations
@@ -18,24 +18,26 @@ import base64
 import contextlib
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from . import budget
-from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
+from . import budget, savings, sharing
+from .brev import BrevCLI, BrevDeployFailed, BrevError, Instance, ProvisioningDisabled, instance_name
+from .catalog import Catalog, Offer
 from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
-from .remote import Remote, RemoteError
+from .remote import Remote, RemoteError, end_process
 from .stdb import ReducerRejected
 from .storage import Storage, StorageUnavailable
 from .store import Store
@@ -47,10 +49,31 @@ log = structlog.get_logger()
 JOB_DIR = "~/workspace/anywhere/job"
 #: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
 STARTING_POLL_LIMIT = 6
+#: run.log bytes one poll reads (see `poll_command`).
+LOG_CHUNK = 12000
+#: Back-to-back polls allowed to read the rest of run.log once a job has ended.
+MAX_LOG_DRAINS = 200
 #: How often the guard looks for orphaned Brev instances.
+#: Idle-stop savings older than this stop counting toward the total and are dropped.
+IDLE_STOP_RETENTION_DAYS = 90
 RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
 PROJECTS_DIR = "~/workspace/anywhere/projects"
+
+#: Opens ~/Projects/scene.blend when one was restored, and installs the autosave.
+#: Runs as the desktop user through Cua's shell.
+BLENDER_LAUNCH = (
+    "cat > /tmp/anywhere_autosave.py <<'ANYWHERE_PY'\n"
+    + resources.files("anywhere.environments").joinpath("blender-autosave.py").read_text()
+    + "\nANYWHERE_PY\n"
+    "cd ~/Projects && f=; [ -f scene.blend ] && f=scene.blend; "
+    "DISPLAY=:1 nohup blender $f --python /tmp/anywhere_autosave.py >/tmp/blender.log 2>&1 &"
+)
+#: Flag the autosave, then give Blender a moment to write before the archive.
+SAVE_NOW = (
+    "(docker exec anywhere-desktop touch /tmp/anywhere-save-now 2>/dev/null"
+    " || sudo -n docker exec anywhere-desktop touch /tmp/anywhere-save-now) && sleep 5"
+)
 
 #: Blender's published checksum for the pinned release (download.blender.org).
 BLENDER_SHA256 = {"4.5.15": "0d2b8bb2efe97e6c8eb57de6b7322f8800e1984e3125b60decca5f6771e4773e"}
@@ -69,7 +92,7 @@ def render(template: str, **values: str) -> str:
     return out
 
 
-Notify = Callable[[dict, str, str], Awaitable[None]]
+Notify = Callable[..., Awaitable[None]]  # (workload, kind, body, attachment=None)
 
 
 @dataclass
@@ -85,6 +108,13 @@ class Supervisor:
     poll_seconds: float = 10
     #: Integration readiness mirrored to the platform row (Anywhere wires in live checks).
     integrations: Callable[[], dict[str, bool]] | None = None
+    #: Where a launch looks for a same-GPU machine from another provider when Brev
+    #: can't deliver the planned one. None disables the fallback.
+    catalog: Catalog | None = None
+    #: Brev instance names start with `<instance_prefix>-`. Each deployment gets its own
+    #: (see `site_prefix`), because the reconciler deletes unowned machines under its
+    #: prefix: two control planes sharing a Brev org and a prefix delete each other's.
+    instance_prefix: str = "anywhere"
 
     def __post_init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
@@ -160,8 +190,59 @@ class Supervisor:
         except Exception as exc:  # telemetry must never break a workflow
             log.warning("supervisor.event_failed", error=str(exc))
 
+    def _boot_progress(self, w: dict):
+        """Turn Brev's boot stages into activity lines, so a 5 to 10 minute wait isn't silent."""
+
+        async def report(inst: Instance) -> None:
+            if message := boot_stage(inst):
+                await self._event(w, message)
+
+        return report
+
+    async def _switch_machine(self, w: dict, alt: Offer) -> None:
+        await self.store.switch_workload_machine(w["id"], alt.type, alt.gpu_name, alt.provider, alt.hourly_cents)
+        w.update(instanceType=alt.type, gpuName=alt.gpu_name, provider=alt.provider, hourlyCents=alt.hourly_cents)
+
+    async def _reach(self, w: dict, name: str) -> Remote:
+        """Refresh Brev's SSH config until it has this machine, then wait for SSH."""
+        remote = self.remote(w)
+        await self.brev.refresh_ssh()
+
+        async def ready() -> bool:
+            if not self.brev.has_ssh_host(name):
+                with contextlib.suppress(BrevError):
+                    await self.brev.refresh_ssh(attempts=1)
+                if not self.brev.has_ssh_host(name):
+                    return False
+            return await remote.reachable()
+
+        await _until(ready, timeout=8 * 60, what="SSH access")
+        return remote
+
+    def _fallback(self, w: dict, tried: list[str]) -> Offer | None:
+        """The cheapest same-GPU machine from a provider we haven't tried, or None.
+        One retry at most: a second failure is more likely the setup than capacity."""
+        if self.catalog is None or len(tried) > 1:
+            return None
+        failed = {o.provider for t in tried if (o := self.catalog.lookup(t))} | {w.get("provider")}
+        options = [
+            o
+            for o in self.catalog.offers()
+            if o.type not in tried
+            and o.gpu_name == w["gpuName"]
+            and o.provider not in failed
+            and o.stoppable >= bool(w.get("stoppable"))
+            and (o.desktop_ready or w["kind"] != "desktop")
+        ]
+        return min(options, key=lambda o: o.price_per_hour, default=None)
+
+    def _instance(self, workload_id: int) -> str:
+        """The Brev instance a workload runs on. Usually `instance_name(id)`, but a
+        launch that fell back to another provider records a suffixed name."""
+        return self.vault.get(workload_id).get("instance") or instance_name(workload_id)
+
     def remote(self, w: dict) -> Remote:
-        name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+        name = self._instance(w["id"])
         return self.remote_factory(name)
 
     # ── Entry points ──────────────────────────────────────────────────────
@@ -185,25 +266,55 @@ class Supervisor:
 
     async def _launch(self, w: dict) -> None:
         async with self._lock(w["id"]):
-            name = instance_name(w["id"])
+            name = instance_name(w["id"], self.instance_prefix)
             self.vault.update(w["id"], instance=name, owner=w["owner"])
             plan = json.loads(w["planJson"])
             try:
                 await self._transition(w, Status.PROVISIONING, f"Requesting a {w['gpuName']} from Brev")
-                with _script(render(_env("boot.sh"), PREPULL_IMAGE=self._prepull(w))) as boot:
-                    created = await self.brev.create(name, w["instanceType"], boot)
-                if created.dry_run:
-                    await self._event(w, "Dry run: Brev accepted this request. No machine was created.", "success")
-                    await self._transition(w, Status.CANCELLED, "Dry run complete — nothing was billed")
-                    await self.notify(
-                        w, "status", "Dry run complete: Brev validated the plan. Switch to live mode to run it."
-                    )
-                    return
-                await self._event(w, f"Machine requested ({w['instanceType']}). Waiting for it to boot…")
-                await self.brev.wait_for(name, want="RUNNING", timeout=25 * 60)
-                await self.brev.refresh_ssh()
-                remote = self.remote(w)
-                await _until(remote.reachable, timeout=6 * 60, what="SSH access")
+                tried: list[str] = []
+                # Planned before Brev failed this type? Skip straight to a machine that works.
+                if self.catalog is not None and self.catalog.recently_failed(w["instanceType"]):
+                    alt = self._fallback(w, [w["instanceType"]])
+                    if alt is not None:
+                        await self._event(
+                            w,
+                            f"Using a {alt.gpu_name} on {alt.provider.upper()}; {w['provider'].upper()} couldn't deliver one recently.",
+                        )
+                        await self._switch_machine(w, alt)
+                while True:
+                    created = await self.brev.create(name, w["instanceType"])
+                    if created.dry_run:
+                        await self._event(w, "Dry run: Brev accepted this request. No machine was created.", "success")
+                        await self._transition(w, Status.CANCELLED, "Dry run complete, nothing was billed")
+                        await self.notify(
+                            w, "status", "Dry run complete: Brev validated the plan. Switch to live mode to run it."
+                        )
+                        return
+                    await self._event(w, f"Machine requested ({w['instanceType']}). Waiting for it to boot…")
+                    try:
+                        await self.brev.wait_for(
+                            name, want="RUNNING", timeout=25 * 60, on_change=self._boot_progress(w)
+                        )
+                        break
+                    except BrevDeployFailed:
+                        tried.append(w["instanceType"])
+                        if self.catalog is not None:
+                            self.catalog.mark_failed(w["instanceType"])
+                        alt = self._fallback(w, tried)
+                        if alt is None:
+                            raise
+                        with contextlib.suppress(Exception):
+                            await self.brev.delete(name)
+                        name = f"{instance_name(w['id'], self.instance_prefix)}-{len(tried)}"
+                        self.vault.update(w["id"], instance=name)
+                        await self._event(
+                            w,
+                            f"{w['provider'].upper()} couldn't deliver the {w['gpuName']}. "
+                            f"Trying the same GPU on {alt.provider.upper()} at ${alt.price_per_hour:.2f}/hr.",
+                            "warn",
+                        )
+                        await self._switch_machine(w, alt)
+                remote = await self._reach(w, name)
 
                 await self._transition(w, Status.CONFIGURING, "Setting up the environment")
                 if w["kind"] == "desktop":
@@ -223,9 +334,6 @@ class Supervisor:
             await self.notify(w, "status", f"Your {w['title']} is ready.")
         else:
             self._start_monitor(w)
-
-    def _prepull(self, w: dict) -> str:
-        return self.settings.desktop_image if w["kind"] == "desktop" else "hello-world"
 
     async def _run_streamed(self, w: dict, remote: Remote, script: str, path: str, timeout: float) -> None:
         """Run a pushed script detached and mirror its `::step::` markers into events."""
@@ -289,9 +397,15 @@ class Supervisor:
         await self._restore_project(w, remote)
         await self._start_desktop(w, remote)
 
+    async def ensure_desktop_services(self, w: dict) -> None:
+        """Re-run the idempotent start script: starts any desktop service that's missing."""
+        result = await self.remote(w).run("bash -s", input=_env("desktop-start.sh").encode(), timeout=300)
+        if "::ready::" not in result.stdout:
+            raise RemoteError("The desktop's services didn't come up")
+
     async def _start_desktop(self, w: dict, remote: Remote) -> None:
         await self._event(w, "Starting the desktop session")
-        result = await remote.run("bash -s", input=_env("desktop-start.sh").encode(), timeout=150)
+        result = await remote.run("bash -s", input=_env("desktop-start.sh").encode(), timeout=300)
         if "::ready::" not in result.stdout:
             raise RemoteError("Desktop services did not report ready")
         await self._transition(w, Status.RUNNING, "Desktop is live")
@@ -301,7 +415,7 @@ class Supervisor:
         if plan.get("intent", {}).get("application") == "blender":
             with contextlib.suppress(Exception):
                 async with connect_screen(remote, self.vault.agent_token(w["id"])) as screen:
-                    await screen.shell("cd ~/Projects && DISPLAY=:1 nohup blender >/tmp/blender.log 2>&1 &", timeout=10)
+                    await screen.shell(BLENDER_LAUNCH, timeout=15)
                 await self._event(w, "Blender is open")
 
     # ── Projects ──────────────────────────────────────────────────────────
@@ -326,6 +440,10 @@ class Supervisor:
             await self._event(w, "Object storage isn't configured; files stay on the machine's disk only.", "warn")
             return None
         pid, key = self._project(w)
+        if w["kind"] == "desktop":
+            # Ask Blender's autosave (blender-autosave.py) to write the open scene first.
+            with contextlib.suppress(Exception):
+                await remote.run(SAVE_NOW, timeout=20, check=False)
         proc = remote.popen(f"tar -czf - -C {PROJECTS_DIR} .", stdout=subprocess.PIPE)
         size = await self.storage.upload_stream(proc, key, "application/gzip")
         await self.store.upsert_project(pid, w["owner"], w["title"], "blender", key, size, True)
@@ -362,14 +480,16 @@ class Supervisor:
                         w, f"Couldn't upload a snapshot ({exc}); files remain on the stopped disk.", "warn"
                     )
             await self._transition(w, Status.STOPPING, reason)
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             await self._settle_usage(w)
             try:
                 if w["stoppable"] and w["kind"] == "desktop":
                     await self.brev.stop(name)
                     await self.brev.wait_for(name, want="STOPPED", timeout=10 * 60)
                     await self._transition(w, Status.STOPPED, reason)
-                    await self.notify(w, "status", f"{w['title']} stopped. Your files are saved — resume anytime.")
+                    await self.notify(
+                        w, "status", f"{w['title']} stopped. Your files are saved, so you can resume anytime."
+                    )
                 else:
                     await self.brev.delete(name)
                     await self._transition(w, Status.TERMINATED, reason)
@@ -377,17 +497,49 @@ class Supervisor:
                 await self._event(w, f"Stopping failed: {exc}. Deleting the machine instead.", "error")
                 await self._force_delete(w, name, "Deleted after a failed stop")
 
+    def _record_idle_stop(self, w: dict, segment_start: datetime | None) -> None:
+        now = _now()
+        rec = savings.record(now, segment_start, self.settings.max_session_hours, w)
+        self.vault.section_put(savings.SECTION, f"{w['id']}:{int(now.timestamp())}", rec)
+
+    def idle_savings(self, owner: str, now: datetime) -> tuple[float, list[dict]]:
+        """What idle auto-stops saved this owner: the total, and each stop (newest first)."""
+        stops = sorted(
+            (rec for _, rec in self.vault.section_items(savings.SECTION) if rec["owner"] == owner),
+            key=lambda r: r["stopped_at"],
+            reverse=True,
+        )
+        rows = [
+            {
+                "id": str(r["workload_id"]),
+                "title": r["title"],
+                "gpu": r["gpu"],
+                "hourly_cents": r["hourly_cents"],
+                "stopped_at": r["stopped_at"],
+                "limit_at": r["limit_at"],
+                "resumed_at": r.get("resumed_at"),
+                "saved_cents": round(savings.saved_cents(r, now), 4),
+                "counting": savings.still_counting(r, now),
+            }
+            for r in stops
+        ]
+        return round(sum(savings.saved_cents(r, now) for r in stops), 4), rows
+
+    def _close_idle_stops(self, wid: int) -> None:
+        for key, rec in self.vault.section_items(savings.SECTION):
+            if rec["workload_id"] == wid and not rec.get("resumed_at"):
+                self.vault.section_update(savings.SECTION, key, resumed_at=_now().isoformat())
+
     async def _resume(self, w: dict) -> None:
+        self._close_idle_stops(int(w["id"]))
         async with self._lock(w["id"]):
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             try:
                 await self._transition(w, Status.PROVISIONING, "Resuming your machine")
                 await self._event(w, BOOT_RESUME)
                 await self.brev.start(name)
-                await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60)
-                await self.brev.refresh_ssh()
-                remote = self.remote(w)
-                await _until(remote.reachable, timeout=6 * 60, what="SSH access")
+                await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60, on_change=self._boot_progress(w))
+                remote = await self._reach(w, name)
                 await self._transition(w, Status.CONFIGURING, "Reconnecting the desktop")
                 await self._start_desktop(w, remote)
             except Exception as exc:
@@ -401,7 +553,7 @@ class Supervisor:
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
             await self.shots.close(w["id"])
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             if w["status"] == Status.RUNNING and w["kind"] == "desktop":
                 await self._transition(w, Status.SAVING, "Saving before deleting")
                 with contextlib.suppress(Exception):
@@ -437,14 +589,23 @@ class Supervisor:
             await self._transition(w, final, reason)
 
     async def _fail(self, w: dict, exc: Exception) -> None:
-        message = str(exc).strip().splitlines()[0][:300] if str(exc).strip() else exc.__class__.__name__
+        lines = str(exc).strip().splitlines()
+        message = lines[0][:300] if lines else exc.__class__.__name__
         log.error("supervisor.failed", workload=w["id"], error=repr(exc))
         await self._event(w, message, "error")
+        if len(lines) > 1:
+            # Setup failures carry the script's last output (the actual curl or apt error).
+            # Keep it on the machine's log; the machine itself is about to be deleted.
+            await _safe(
+                self.store.append_logs(
+                    w["id"], "Last output before the failure:\n" + "\n".join(lines[1:])[-4000:] + "\n"
+                )
+            )
         if asyncio.current_task() is not self._agents.get(w["id"]):
             await self.stop_agent(w["id"])
         await self.vnc.close(w["id"])
         await self.shots.close(w["id"])
-        name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+        name = self._instance(w["id"])
         await self._settle_usage(w)
         with contextlib.suppress(ReducerRejected):
             await self._transition(w, Status.FAILED, message)
@@ -456,6 +617,9 @@ class Supervisor:
     # ── Batch ─────────────────────────────────────────────────────────────
 
     async def _configure_batch(self, w: dict, remote: Remote, plan: dict) -> None:
+        if plan.get("requirements", {}).get("environment") == "blender-render":
+            await self._configure_render(w, remote, plan)
+            return
         inputs = plan.get("inputs", {})
         cfg = TrainConfig.model_validate(inputs["train_config"])
         key = inputs["dataset_key"]
@@ -486,15 +650,27 @@ class Supervisor:
         failures = 0
         dead_polls = 0
         starting_polls = 0
+        source = json.loads(w["planJson"]).get("inputs", {}).get("source_workload_id")
+        polls = 0
+        drains = 0
         while True:
-            await asyncio.sleep(self.poll_seconds)
+            if not drains:
+                await asyncio.sleep(self.poll_seconds)
+            polls += 1
+            # A render copies its frames back to the desktop it came from: don't let that
+            # desktop idle-stop before the frames arrive.
+            if source and not self.settings.storage_ready and polls % 6 == 1:
+                src = await _quiet(self.store.workload(int(source)))
+                if src and src["status"] == Status.RUNNING:
+                    await _safe(self.store.record_usage(int(source), int(src["accruedCents"]), touch=True))
+            read_from = log_offset
             try:
                 res = await remote.run(poll_command(log_offset, metric_lines), timeout=60)
                 failures = 0
             except RemoteError as exc:
                 failures += 1
                 if failures >= 6:
-                    await self._fail(w, RemoteError(f"Lost contact with the training machine: {exc}"))
+                    await self._fail(w, RemoteError(f"Lost contact with the machine: {exc}"))
                     return
                 continue
             poll = parse_poll(res.stdout, log_offset)
@@ -523,11 +699,18 @@ class Supervisor:
             v = self.vault.get(w["id"])
             if (v.get("log_offset"), v.get("metric_lines")) != (log_offset, metric_lines):
                 self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
+            # The job has ended but run.log still holds more than one poll's worth:
+            # read the rest right away. Otherwise the tail (the traceback, on a
+            # failure) would never reach the log view before the machine is deleted.
+            if poll.status and poll.offset - read_from >= LOG_CHUNK and drains < MAX_LOG_DRAINS:
+                drains += 1
+                continue
+            drains = 0
             if poll.status == "succeeded":
                 await self._finish_batch(w, remote)
                 return
             if poll.status.startswith("failed"):
-                await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "Training failed"))
+                await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "The job failed"))
                 return
             # The runner died without writing a status (OOM kill, reboot), the job
             # directory vanished, or the runner never started: don't bill forever.
@@ -539,10 +722,13 @@ class Supervisor:
             else:
                 dead_polls = 0
             if dead_polls >= 3:
-                await self._fail(w, RemoteError("The training process stopped unexpectedly. See the log for details."))
+                await self._fail(w, RemoteError("The job stopped unexpectedly. See the log for details."))
                 return
 
     async def _finish_batch(self, w: dict, remote: Remote) -> None:
+        if json.loads(w["planJson"]).get("requirements", {}).get("environment") == "blender-render":
+            await self._finish_render(w, remote)
+            return
         async with self._lock(w["id"]):
             await self._event(w, "Training finished. Saving outputs")
             try:
@@ -565,9 +751,155 @@ class Supervisor:
                 await self._fail(w, exc)
                 return
             await self._settle_usage(w)
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             await self._force_delete(w, name, "Machine released after training", final=None)
         await self.notify(w, "status", f"{w['title']} finished. Your adapter and samples are ready to download.")
+
+    # ── Render jobs ───────────────────────────────────────────────────────
+
+    async def _configure_render(self, w: dict, remote: Remote, plan: dict) -> None:
+        inputs = plan.get("inputs", {})
+        intent = plan.get("intent", {})
+        src = await self.store.workload(int(inputs["source_workload_id"]))
+        if not src or src["owner"] != w["owner"]:
+            raise RemoteError("The desktop with your scene is gone")
+        await remote.run(f"rm -rf {JOB_DIR} && mkdir -p {JOB_DIR}/project")
+        if src["status"] == Status.RUNNING:
+            await self._event(w, f"Copying your project from {src['title']}")
+            await _relay(
+                self.remote(src),
+                f"tar -czf - -C {PROJECTS_DIR} --exclude=./renders .",
+                remote,
+                f"tar -xzf - -C {JOB_DIR}/project",
+            )
+        else:
+            _, key = self._project(src)
+            if not self.settings.storage_ready or not await self.storage.head(key):
+                raise RemoteError(
+                    f"{src['title']} isn't running and has no saved copy of its files; start it and try again"
+                )
+            await self._event(w, f"Copying the saved copy of {src['title']}'s project")
+            proc = remote.popen(f"tar -xzf - -C {JOB_DIR}/project --exclude=./renders", stdin=subprocess.PIPE)
+            await self.storage.download_stream(key, proc)
+        blend = inputs.get("blend_path")
+        if not blend:
+            found = await remote.run(
+                f"cd {JOB_DIR}/project && find . -name '*.blend' -printf '%T@ %P\\n'", check=False, timeout=30
+            )
+            blend = pick_blend(found.stdout, inputs.get("scene"))
+        if not BLEND_PATH.match(blend) or ".." in blend.split("/"):
+            raise RemoteError(f"Rename {blend} to use only letters, numbers, spaces and - _ . (no quotes)")
+        version = self.settings.blender_version
+        runner = render(
+            _env("render-run.sh"), BLENDER_VERSION=version, BLENDER_SHA256=BLENDER_SHA256.get(version, ""), BLEND=blend
+        )
+        chunk = inputs.get("chunk") or {}
+        cfg = {
+            "frames": int(intent.get("render_frames") or 1),
+            "offset": int(chunk.get("offset") or 0),
+            "samples": intent.get("render_samples"),
+        }
+        await remote.write_file(f"{JOB_DIR}/config.json", json.dumps(cfg).encode())
+        await remote.write_file(f"{JOB_DIR}/render-frames.py", _env("render-frames.py").encode())
+        await remote.write_file(f"{JOB_DIR}/run.sh", runner.encode(), mode="0755")
+        await remote.run(
+            f"cd {JOB_DIR} && rm -f status metrics.jsonl run.log pid && (nohup bash run.sh </dev/null >/dev/null 2>&1 &)"
+        )
+        self.vault.update(w["id"], log_offset=0, metric_lines=0, blend=blend)
+        frames = cfg["frames"]
+        what = (
+            f"frames {cfg['offset'] + 1}–{cfg['offset'] + frames} of {chunk['total']}"
+            if chunk
+            else f"{frames} frame{'s' if frames != 1 else ''}"
+        )
+        await self._transition(w, Status.RUNNING, f"Rendering {what} of {blend}")
+        await self._event(w, BOOT_RENDERING)
+        await self.notify(
+            w, "status", f"Rendering started on a {w['gpuName']}. I'll message you when the frames are ready."
+        )
+
+    async def _finish_render(self, w: dict, remote: Remote) -> None:
+        async with self._lock(w["id"]):
+            await self._event(w, "Rendering finished. Saving your frames")
+            inputs = json.loads(w["planJson"]).get("inputs", {})
+            source = inputs.get("source_workload_id")
+            chunk = inputs.get("chunk") or {}
+            # Every part of a split render lands in the farm's folder, so the frames merge.
+            folder = int(chunk.get("farm_id") or w["id"])
+            try:
+                if self.settings.storage_ready:
+                    key = Storage.artifact_key(w["owner"], w["id"], "frames.tar.gz")
+                    proc = remote.popen(f"tar -czf - -C {JOB_DIR} renders", stdout=subprocess.PIPE)
+                    size = await self.storage.upload_stream(proc, key, "application/gzip")
+                    await self.store.add_artifact(new_id(), w["id"], "Rendered frames", key, "application/gzip", size)
+                    where = "Your frames are ready to download."
+                    if not int(chunk.get("offset") or 0):
+                        await self._save_preview(w, remote)
+                else:
+                    src = await self.store.workload(int(source)) if source else None
+                    if not src or src["status"] != Status.RUNNING:
+                        raise RemoteError(
+                            "Couldn't save the frames: object storage isn't set up and the desktop "
+                            "they came from is no longer running"
+                        )
+                    dest = f"{PROJECTS_DIR}/renders/{folder}"
+                    await _relay(
+                        remote,
+                        f"tar -czf - -C {JOB_DIR}/renders .",
+                        self.remote(src),
+                        f"mkdir -p {dest} && tar -xzf - -C {dest}",
+                    )
+                    where = f"Your frames are in ~/Projects/renders/{folder} on {src['title']}."
+                    await self._event(w, f"Frames saved to ~/Projects/renders/{folder} on {src['title']}", "success")
+                await self._transition(w, Status.SUCCEEDED, "Render complete")
+            except Exception as exc:
+                await self._fail(w, exc)
+                return
+            await self._settle_usage(w)
+            name = self._instance(w["id"])
+            await self._force_delete(w, name, "Machine released after rendering", final=None)
+        if not chunk:
+            await self.notify(w, "status", f"{w['title']} finished. {where}", attachment=self._preview(w))
+            return
+        # A split render reports once: when its last part is done.
+        parts = await self._farm_parts(w["owner"], int(chunk["farm_id"]))
+        if parts and all(p["status"] == Status.SUCCEEDED for p in parts):
+            first = next((p for p in parts if not _chunk(p).get("offset")), None)
+            await self.notify(
+                w,
+                "status",
+                f"All {chunk['total']} frames are rendered across {len(parts)} GPUs. {where}",
+                attachment=self._preview(first) if first else None,
+            )
+
+    async def _save_preview(self, w: dict, remote: Remote) -> None:
+        """Keep a JPEG of the first frame (render-frames.py writes it) to text back as a picture."""
+        key = Storage.artifact_key(w["owner"], w["id"], "first-frame.jpg")
+        try:
+            proc = remote.popen(f"cat {JOB_DIR}/preview.jpg", stdout=subprocess.PIPE)
+            size = await self.storage.upload_stream(proc, key, "image/jpeg")
+        except Exception as exc:
+            log.info("render.preview_missing", workload=w["id"], error=str(exc)[:200])
+            return
+        if size:
+            await self.store.add_artifact(new_id(), w["id"], "First frame", key, "image/jpeg", size)
+            self.vault.update(w["id"], preview=key)
+
+    def _preview(self, w: dict) -> str | None:
+        return self.vault.get(w["id"]).get("preview")
+
+    async def _farm_parts(self, owner: str, farm_id: int) -> list[dict]:
+        """Every part of one split render. All parts share the owner, so read only
+        that owner's workloads instead of every user's."""
+        parts = []
+        for w in await _quiet(self.store.workloads_for(owner)) or []:
+            try:
+                chunk = json.loads(w["planJson"]).get("inputs", {}).get("chunk") or {}
+            except (ValueError, TypeError):
+                continue
+            if int(chunk.get("farm_id") or 0) == farm_id:
+                parts.append(w)
+        return parts
 
     # ── Desktop agent ─────────────────────────────────────────────────────
 
@@ -584,9 +916,12 @@ class Supervisor:
 
     async def stop_agent(self, wid: int) -> None:
         if (t := self._agents.get(wid)) and not t.done():
-            t.cancel()
+            # Cancel once: a second cancel (a double click, or Stop racing Take over) would
+            # interrupt the run while it records its final status, leaving it "running".
+            if not t.cancelling():
+                t.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
+                await asyncio.shield(t)
 
     # ── Accounting & guard ────────────────────────────────────────────────
 
@@ -644,12 +979,21 @@ class Supervisor:
 
     async def _telemetry_loop(self) -> None:
         while True:
-            for w in list(self._sampling.values()):
-                try:
-                    await self.sample_gpu(w)
-                except Exception as exc:  # telemetry must never break anything else
-                    log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
-            await asyncio.sleep(self.settings.gpu_telemetry_seconds)
+            started = asyncio.get_running_loop().time()
+            sampling = [w for w in self._sampling.values() if not self.busy(w["id"])]
+            # Forget machines that stopped, so a resumed one re-sends its VRAM total.
+            self._gpu_total_sent &= set(self._sampling)
+            # All machines at once: one slow or unreachable machine (8 s timeout)
+            # used to delay every other machine's reading by that much.
+            await asyncio.gather(*(self._sample_quietly(w) for w in sampling))
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(max(1.0, self.settings.gpu_telemetry_seconds - elapsed))
+
+    async def _sample_quietly(self, w: dict) -> None:
+        try:
+            await self.sample_gpu(w)
+        except Exception as exc:  # telemetry must never break anything else
+            log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
 
     async def sample_gpu(self, w: dict) -> list[dict]:
         """One `nvidia-smi` reading from a running machine, stored as `gpu.*` metric points.
@@ -673,7 +1017,7 @@ class Supervisor:
             try:
                 await self.tick()
             except Exception as exc:
-                log.warning("guard.tick_failed", error=str(exc))
+                log.warning("guard.tick_failed", error=repr(exc), exc_info=True)
             await asyncio.sleep(self.settings.budget_tick_seconds)
 
     async def tick(self) -> None:
@@ -723,6 +1067,8 @@ class Supervisor:
             if action:
                 log.info("guard.action", workload=w["id"], action=action.action, reason=action.reason)
                 await self._event(w, f"{action.reason}. Stopping to protect your budget.", "warn")
+                if action.reason.startswith("Idle"):
+                    self._record_idle_stop(w, start)
                 if action.action == "save_and_stop":
                     self.stop(w, action.reason)
                 else:
@@ -749,7 +1095,20 @@ class Supervisor:
         loop_now = asyncio.get_running_loop().time()
         if loop_now - self._last_reconcile >= RECONCILE_SECONDS:
             self._last_reconcile = loop_now
+            self.housekeeping()
             await self.reconcile(workloads)
+
+    def housekeeping(self, now: datetime | None = None) -> int:
+        """Drop vault records nothing will read again. Every vault write rewrites (and
+        fsyncs) the whole file, so these used to make every later write slower."""
+        now = now or _now()
+        dropped = self.vault.purge_records(sharing.SECTION, lambda r: not sharing.live(r, now))
+        # The bridge fetches a text's picture seconds after sending the text.
+        day_ago = (now - timedelta(days=1)).isoformat()
+        dropped += self.vault.purge_records("notification_attachments", lambda r: (r.get("at") or "") < day_ago)
+        kept = (now - timedelta(days=IDLE_STOP_RETENTION_DAYS)).isoformat()
+        dropped += self.vault.purge_records(savings.SECTION, lambda r: r["stopped_at"] < kept)
+        return dropped
 
     async def reconcile(self, workloads: list[dict]) -> None:
         """Delete Anywhere instances that no billable workload owns."""
@@ -765,15 +1124,15 @@ class Supervisor:
         # is approved, mid-operation, or has a vault entry as owned, and only delete
         # an instance that is still unowned on the next pass as well.
         owned = {
-            instance_name(w["id"])
+            self._instance(w["id"])
             for w in workloads
             if w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])
         }
-        owned |= {instance_name(wid) for wid, t in self._tasks.items() if not t.done()}
+        owned |= {self._instance(wid) for wid, t in self._tasks.items() if not t.done()}
         candidates = {
             inst.name
             for inst in instances
-            if inst.name.startswith("anywhere-") and inst.name not in owned and inst.status != "DELETING"
+            if inst.name.startswith(f"{self.instance_prefix}-") and inst.name not in owned and inst.status != "DELETING"
         }
         confirmed = candidates & self._orphan_candidates
         self._orphan_candidates = candidates - confirmed
@@ -781,7 +1140,7 @@ class Supervisor:
             return
         fresh = {w["id"]: w for w in await self.store.workloads()}
         for name in sorted(confirmed):
-            w = next((w for w in fresh.values() if instance_name(w["id"]) == name), None)
+            w = next((w for w in fresh.values() if self._instance(w["id"]) == name), None)
             if w and (w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])):
                 continue
             log.warning("reconcile.orphan", instance=name)
@@ -827,7 +1186,7 @@ class Poll:
     alive: str
 
 
-def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
+def poll_command(log_offset: int, metric_lines: int, chunk: int = LOG_CHUNK) -> str:
     """One SSH round trip that returns new log bytes, complete new metric lines,
     the status file and whether the runner is alive, between unambiguous markers.
 
@@ -850,7 +1209,7 @@ def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
     )
 
 
-def parse_poll(out: str, log_offset: int = 0, chunk: int = 12000) -> Poll:
+def parse_poll(out: str, log_offset: int = 0, chunk: int = LOG_CHUNK) -> Poll:
     """Parse `poll_command` output. `log_offset` is the offset the command read from."""
     if "::missing::" in out and "::log::" not in out:
         return Poll(False, log_offset, "", [], "", "")
@@ -885,6 +1244,44 @@ def parse_poll(out: str, log_offset: int = 0, chunk: int = 12000) -> Poll:
 BOOT_READY = "Desktop is live"
 BOOT_RESUME = "Restarting the machine"
 BOOT_TRAINING = "Training started"
+BOOT_RENDERING = "Rendering started"
+
+
+def _chunk(w: dict) -> dict:
+    try:
+        return json.loads(w["planJson"]).get("inputs", {}).get("chunk") or {}
+    except (ValueError, TypeError):
+        return {}
+
+
+_FILLER = {"my", "the", "a", "scene", "file", "blend", "project", "render"}
+
+
+def pick_blend(listing: str, scene: str | None) -> str:
+    """Choose a .blend from `find -printf '%T@ %P'` output: the one whose path best matches
+    the name the user gave (ties go to the newest), or the newest when no name was given."""
+    files = []
+    for line in listing.splitlines():
+        ts, _, path = line.strip().partition(" ")
+        if path.endswith(".blend") and not path.startswith("renders/"):
+            with contextlib.suppress(ValueError):
+                files.append((float(ts), path))
+    if not files:
+        raise RemoteError("There's no saved .blend in ~/Projects on that desktop")
+    files.sort(reverse=True)
+    words = [t for t in re.findall(r"[a-z0-9]+", (scene or "").lower()) if t not in _FILLER]
+    if not words:
+        return files[0][1]
+    scored = [(sum(t in path.lower() for t in words), ts, path) for ts, path in files]
+    best = max(scored)
+    if best[0] == 0:
+        names = ", ".join(p.rsplit("/", 1)[-1] for _, p in files[:6])
+        raise RemoteError(f"I couldn't find a scene called “{scene}”. Saved scenes: {names}")
+    return best[2]
+
+
+#: A .blend path relative to ~/Projects that is safe to put in a script (no quotes or `$`).
+BLEND_PATH = re.compile(r"^[\w .@+-]+(/[\w .@+-]+)*\.blend$")
 
 GPU_QUERY = (
     "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw "
@@ -912,7 +1309,7 @@ def parse_gpu_query(stdout: str) -> dict[str, float] | None:
 
 
 def metric_points(rows: list[str]) -> list[dict]:
-    """Translate train.py's JSONL rows into `add_metrics` points."""
+    """Translate the runners' JSONL rows (train.py, render-frames.py) into `add_metrics` points."""
     points = []
     for line in rows:
         try:
@@ -921,8 +1318,14 @@ def metric_points(rows: list[str]) -> list[dict]:
             continue
         if not isinstance(row, dict):
             continue
+        if "frame" in row and row.get("total"):
+            done, total = int(row.get("done", 0) or 0), max(int(row["total"]), 1)
+            points.append({"name": "progress", "step": done, "value": done / total})
+            if isinstance(row.get("seconds"), int | float):
+                points.append({"name": "seconds_per_frame", "step": done, "value": float(row["seconds"])})
+            continue
         step = int(row.get("step", 0) or 0)
-        for name in ("loss", "eval_loss", "learning_rate", "grad_norm"):
+        for name in ("loss", "eval_loss", "learning_rate", "grad_norm", "epoch"):
             value = row.get(name)
             if isinstance(value, int | float) and not isinstance(value, bool):
                 points.append({"name": name, "step": step, "value": float(value)})
@@ -950,6 +1353,50 @@ async def _until(check: Callable[[], Awaitable[bool]], *, timeout: float, what: 
     raise TimeoutError(f"Timed out waiting for {what}")
 
 
+#: Upper bound for copying a project between two machines.
+RELAY_TIMEOUT = 60 * 60
+
+
+async def _relay(src: Remote, src_cmd: str, dst: Remote, dst_cmd: str, *, timeout: float = RELAY_TIMEOUT) -> None:
+    """Stream one machine's command output into another machine's command (via this host).
+
+    If either side dies, or the copy runs past `timeout`, both processes are killed:
+    a receiver that exits mid-copy used to leave the sender blocked on a full pipe
+    (and the copy waiting on it) forever."""
+    a = src.popen(src_cmd, stdout=subprocess.PIPE)
+    b = dst.popen(dst_cmd, stdin=subprocess.PIPE)
+
+    def run() -> tuple[int, int]:
+        try:
+            shutil.copyfileobj(a.stdout, b.stdin, 1 << 20)  # type: ignore[arg-type]
+        except (BrokenPipeError, OSError, ValueError):
+            a.kill()  # the receiver is gone: stop the sender instead of letting it block
+        finally:
+            with contextlib.suppress(Exception):
+                b.stdin.close()  # type: ignore[union-attr]
+        return a.wait(), b.wait()
+
+    try:
+        ra, rb = await asyncio.wait_for(asyncio.to_thread(run), timeout)
+    except TimeoutError as exc:
+        raise RemoteError("Copying between machines took too long") from exc
+    finally:
+        # Kills anything still running (on timeout this also unblocks the copy thread),
+        # reaps both processes and closes their pipes and stderr files.
+        for proc in (a, b):
+            end_process(proc)
+    if ra or rb:
+        raise RemoteError(f"Copying between machines failed (exit {ra}/{rb})")
+
+
+async def _quiet(coro: Awaitable[Any]) -> Any:
+    try:
+        return await coro
+    except Exception as exc:
+        log.warning("supervisor.lookup_failed", error=str(exc))
+        return None
+
+
 async def _safe(coro: Awaitable[Any]) -> None:
     try:
         await coro
@@ -962,3 +1409,19 @@ def _now() -> datetime:
 
 
 __all__ = ["Supervisor", "StorageUnavailable", "render"]
+
+
+#: Brev's instance statuses in the words the activity feed uses.
+_BOOT_STAGES = {
+    "DEPLOYING": "Brev is allocating the GPU",
+    "STARTING": "Machine is starting",
+    "STOPPED": "Machine is stopped",
+    "STOPPING": "Machine is stopping",
+}
+
+
+def boot_stage(inst: Instance) -> str | None:
+    """One activity line per boot stage, or None when there's nothing new to say."""
+    if inst.status == "RUNNING":
+        return "Machine is up, waiting for its shell" if not inst.ready else "Machine is up"
+    return _BOOT_STAGES.get(inst.status)

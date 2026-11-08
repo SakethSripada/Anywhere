@@ -8,7 +8,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { ApiError, useApi } from "@/lib/api";
 import { useNow } from "@/lib/data";
 import { bytes, centsRange, clock, compact, duration, ms } from "@/lib/format";
-import { parsePlan } from "@/lib/plan";
+import { frameTime, parsePlan } from "@/lib/plan";
 import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE } from "@/lib/workloads";
@@ -40,6 +40,7 @@ const PRETTY: Record<string, string> = {
   learning_rate: "Learning rate",
   grad_norm: "Grad norm",
   tokens_per_sec: "Tokens / s",
+  seconds_per_frame: "Seconds / frame",
 };
 const pretty = (n: string) => PRETTY[n] ?? n.replace(/_/g, " ");
 
@@ -72,12 +73,19 @@ function Overview({ w }: { w: Workload }) {
 
   // Progress: the trainer reports it directly; otherwise estimate from epochs.
   const progressPt = series.get("progress")?.at(-1);
-  const epochs = plan?.intent.epochs ?? null;
+  // The trainer's epoch count: the request's, or the default the control plane picked for the dataset.
+  const configEpochs = plan?.inputs?.train_config?.epochs;
+  const epochs = typeof configEpochs === "number" ? configEpochs : (plan?.intent.epochs ?? null);
   const epochPt = series.get("epoch")?.at(-1);
   const progress = w.status === "succeeded" ? 1 : progressPt ? progressPt.value : epochs && epochPt ? epochPt.value / epochs : null;
   const elapsed = w.startedAt && now ? (live ? now : ms(w.updatedAt)) - ms(w.startedAt) : 0;
   const eta = live && progress && progress > 0.02 && progress < 1 ? (elapsed * (1 - progress)) / progress : null;
   const tps = series.get("tokens_per_sec")?.at(-1);
+  const render = plan?.requirements.environment === "blender-render";
+  const perFrame = series.get("seconds_per_frame") ?? [];
+  const framesTotal = plan?.intent.render_frames ?? 1;
+  const framesDone = progressPt ? Math.round(progressPt.value * framesTotal) : 0;
+  const estRow = plan?.render_time?.rows.find((r) => r.gpu === w.gpuName) ?? plan?.render_time?.rows[0];
 
   return (
     <div className="@container mx-auto flex max-w-[1400px] flex-col gap-4 p-4 lg:p-5">
@@ -106,9 +114,23 @@ function Overview({ w }: { w: Workload }) {
           ) : null}
         </div>
         <dl className="grid grid-cols-2 border-t @2xl:grid-cols-5 [&>div]:border-b [&>div]:px-4 [&>div]:py-3 @2xl:[&>div]:border-b-0 @2xl:[&>div:not(:last-child)]:border-r [&>div:nth-child(odd)]:border-r">
-          <Kpi label="Training loss" value={latest ? latest.value.toFixed(4) : "-"} sub={latest && prior && prior !== latest ? <Delta from={prior.value} to={latest.value} /> : "Waiting for metrics"} />
-          <Kpi label="Step" value={latest ? latest.step.toLocaleString() : "-"} sub={epochPt && epochs ? `epoch ${epochPt.value.toFixed(1)} of ${epochs}` : (plan?.requirements.method?.toUpperCase() ?? "")} />
-          <Kpi label="Throughput" value={tps ? compact(Math.round(tps.value)) : "-"} sub={tps ? "tokens / s" : "not reported"} />
+          {render ? (
+            <>
+              <Kpi label="Frames" value={`${framesDone} of ${framesTotal}`} sub={framesDone ? "rendered" : "Waiting for the first frame"} />
+              <Kpi
+                label="Per frame"
+                value={perFrame.length ? frameTime(perFrame.at(-1)!.value / 60) : "-"}
+                sub={estRow ? `est. ${frameTime(estRow.minutes_low)}–${frameTime(estRow.minutes_high)}` : "measured"}
+              />
+              <Kpi label="GPU" value={`NVIDIA ${w.gpuName}`} sub="shuts down when done" />
+            </>
+          ) : (
+            <>
+              <Kpi label="Training loss" value={latest ? latest.value.toFixed(4) : "-"} sub={latest && prior && prior !== latest ? <Delta from={prior.value} to={latest.value} /> : "Waiting for metrics"} />
+              <Kpi label="Step" value={latest ? latest.step.toLocaleString() : "-"} sub={epochPt && epochs ? `epoch ${epochPt.value.toFixed(1)} of ${epochs}` : (plan?.requirements.method?.toUpperCase() ?? "")} />
+              <Kpi label="Throughput" value={tps ? compact(Math.round(tps.value)) : "-"} sub={tps ? "tokens / s" : "not reported"} />
+            </>
+          )}
           <Kpi label="Runtime" value={elapsed ? duration(elapsed) : "-"} sub={plan ? `est. ${duration(plan.selected.estimate.hours_low * 3_600_000)}–${duration(plan.selected.estimate.hours_high * 3_600_000)}` : ""} />
           <Kpi label="Spent" value={<LiveCost w={w} />} sub={`est. ${centsRange(w.estLowCents, w.estHighCents)}`} />
         </dl>
@@ -125,7 +147,15 @@ function Overview({ w }: { w: Workload }) {
               <Spec label="Rate" value={`$${(w.hourlyCents / 100).toFixed(2)}/hr`} />
               <Spec label="Instance" value={w.instanceType} mono />
               <Spec label="Provider" value={`Brev · ${w.provider.toUpperCase()}`} />
-              {plan?.inputs && <Spec label="Dataset" value={`${plan.inputs.dataset_name} · ${plan.inputs.dataset_rows.toLocaleString()} rows`} wide />}
+              {plan?.inputs?.dataset_name && <Spec label="Dataset" value={`${plan.inputs.dataset_name} · ${(plan.inputs.dataset_rows ?? 0).toLocaleString()} rows`} wide />}
+              {plan?.inputs?.source_title && <Spec label="Scene" value={`${plan.inputs.blend_path ?? "newest .blend"} · from ${plan.inputs.source_title}`} wide />}
+              {plan?.inputs?.chunk && (
+                <Spec
+                  label="Split render"
+                  value={`Part ${plan.inputs.chunk.index + 1} of ${plan.inputs.chunk.count} · frames ${plan.inputs.chunk.offset + 1}–${plan.inputs.chunk.offset + plan.inputs.chunk.frames} of ${plan.inputs.chunk.total}`}
+                  wide
+                />
+              )}
             </dl>
           </section>
           <section className="rounded-xl border bg-card">

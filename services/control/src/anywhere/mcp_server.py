@@ -239,7 +239,7 @@ def _principal(ctx: Context) -> Principal:
     return principal
 
 
-async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
+async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30, timeout: float = CALL_TIMEOUT):
     """Authorize, rate-limit, time-box and translate errors for one tool call.
 
     Users and agents only ever see a short, safe message. Internals (stack traces,
@@ -262,7 +262,7 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
             raise ToolError("Anywhere isn't connected to its database yet. Try again later.")
         if not await _active(app, p.owner):
             raise ToolError("This Anywhere account isn't active, so its agent tokens are paused.")
-        result = await asyncio.wait_for(fn(app, p), CALL_TIMEOUT)
+        result = await asyncio.wait_for(fn(app, p), timeout)
     except ToolError:
         raise
     except ActionError as exc:
@@ -400,12 +400,44 @@ How to use it well:
 
 
 class ProposeIn(BaseModel):
-    kind: Literal["desktop", "fine_tune"] = Field(description="An interactive desktop, or a fine-tuning job.")
+    kind: Literal["desktop", "fine_tune", "render"] = Field(
+        description="An interactive desktop, a fine-tuning job, or a render job (renders a desktop's saved Blender scene "
+        "on a fast GPU, then shuts down)."
+    )
     summary: str = Field(min_length=3, max_length=500, description="One sentence restating the user's goal.")
     application: Application | None = Field(None, description="Desktop application. Defaults to a terminal.")
     model_params_billions: float | None = Field(None, ge=0, le=1000, description="Model size, e.g. 7 for 7B.")
     epochs: int | None = Field(None, ge=1, le=20)
-    session_hours: float | None = Field(None, ge=0, le=24, description="How long the user expects to work.")
+    session_hours: float | None = Field(
+        None, ge=0, le=24, description="How long the user will work at the desktop. Leave empty unless they said."
+    )
+    session_hours_stated: bool = Field(False, description="True only if the user explicitly gave session_hours.")
+    scene_complexity: Literal["simple", "detailed", "heavy"] | None = Field(
+        None,
+        description="Blender scenes: simple, detailed (dense props/textures), or heavy (interiors, fog, many lights).",
+    )
+    render_width: int | None = Field(None, ge=16, le=16384)
+    render_height: int | None = Field(None, ge=16, le=16384)
+    render_samples: int | None = Field(None, ge=1, le=65536)
+    render_frames: int | None = Field(None, ge=1, le=10000, description="Frames to render (render jobs).")
+    render_machines: int | None = Field(
+        None,
+        ge=1,
+        le=8,
+        description="Render jobs: split the frames across this many GPUs at once (faster, similar cost).",
+    )
+    render_from_workload_id: int | None = Field(
+        None,
+        ge=1,
+        le=2**53,
+        description="Render jobs: the desktop whose ~/Projects holds the scene (running, or stopped with saved files).",
+    )
+    blend_path: str | None = Field(
+        None, max_length=300, description="Render jobs: the .blend inside ~/Projects. Defaults to the newest one."
+    )
+    scene: str | None = Field(
+        None, max_length=80, description='Render jobs: the scene\'s name ("alley") when the .blend path is not known.'
+    )
     preference: Preference | None = None
     max_budget_usd: float | None = Field(None, ge=0, le=1000)
     dataset_upload_id: int | None = Field(None, ge=1, le=2**53, description="Upload id of a dataset, for fine-tuning.")
@@ -516,11 +548,18 @@ def build_server() -> MCPServer:
         you may approve it after the user agrees; otherwise the user approves it in the web app."""
 
         async def run(app: Anywhere, p: Principal):
-            data = request.model_dump(exclude={"dataset_upload_id"})
+            data = request.model_dump(exclude={"dataset_upload_id", "render_from_workload_id", "blend_path", "scene"})
             intent = Intent.model_validate(data)
             cid = await _conversation(app, p)
             result = await app.propose(
-                p.owner, cid, intent, request.dataset_upload_id, auto_approve="spend" in p.scopes
+                p.owner,
+                cid,
+                intent,
+                request.dataset_upload_id,
+                auto_approve="spend" in p.scopes,
+                render_from=request.render_from_workload_id,
+                blend_path=request.blend_path,
+                scene=request.scene,
             )
             if result.get("ok") and result.get("workload_id"):
                 w = await app.store.workload(int(result["workload_id"]))
@@ -640,6 +679,26 @@ def build_server() -> MCPServer:
 
         return await _call(ctx, "control", "operate_desktop", run, limit=10)
 
+    @server.tool(title="Estimate render time", annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+    async def estimate_render(
+        ctx: Context,
+        workload_id: WorkloadId,
+        blend_path: Annotated[
+            str | None, Field(max_length=300, description="A .blend inside ~/Projects; default newest.")
+        ] = None,
+        samples: Annotated[int | None, Field(ge=1, le=65536, description="Override the scene's sample count.")] = None,
+        frames: Annotated[int, Field(ge=1, le=10000, description="How many frames you plan to render.")] = 1,
+    ) -> dict:
+        """Measure how long a saved Blender scene takes to render on this desktop's GPU.
+
+        Runs two quick, small test renders and extrapolates to the full frame (takes about a
+        minute). Also estimates the time on other GPUs. Use it before quoting render times."""
+
+        async def run(app: Anywhere, p: Principal):
+            return await app.estimate_render(p.owner, workload_id, blend_path, samples, frames)
+
+        return await _call(ctx, "read", "estimate_render", run, limit=6, timeout=660)
+
     @server.tool(
         title="Stop the desktop agent", annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True)
     )
@@ -648,8 +707,7 @@ def build_server() -> MCPServer:
 
         async def run(app: Anywhere, p: Principal):
             await _owned(app, p, workload_id)
-            await app.supervisor.stop_agent(workload_id)
-            await app.store.set_controller(workload_id, "user")
+            await app.halt_agent(p.owner, workload_id)
             return {"ok": True}
 
         return await _call(ctx, "control", "stop_desktop_agent", run)

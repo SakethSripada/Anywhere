@@ -8,6 +8,7 @@ import { Trace, type TraceRow } from "@/components/bui/trace";
 import { useElapsed } from "@/components/bui/loader";
 import { ACTION_VERB, parseDetail } from "@/lib/agent";
 import { useApi } from "@/lib/api";
+import { ReplayButton } from "./agent-replay";
 import { parseOutput, type ToolCall } from "@/lib/chat";
 import { useWorkload } from "@/lib/data";
 import { duration, ms } from "@/lib/format";
@@ -30,6 +31,7 @@ const LABELS: Record<string, Labels> = {
   resume_desktop: { running: "Resuming", done: "Resumed", failed: "Couldn’t resume", icon: "play" },
   save_project: { running: "Saving", done: "Saved", failed: "Couldn’t save", icon: "save" },
   delete_workload: { running: "Deleting", done: "Deleted", failed: "Couldn’t delete", icon: "trash" },
+  stop_desktop_agent: { running: "Stopping the desktop agent", done: "Stopped the desktop agent", failed: "Couldn’t stop the desktop agent", icon: "stop" },
   operate_desktop: { running: "Working in the desktop", done: "Worked in the desktop", failed: "Desktop task stopped", icon: "cursor" },
 };
 
@@ -110,7 +112,7 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
   const done =
     run.status === "paused"
       ? "Paused, you took over"
-      : run.status === "failed"
+      : run.status === "failed" || run.status === "stopped"
         ? `Stopped after ${acts} action${acts === 1 ? "" : "s"}`
         : `Worked${took ? ` for ${took}` : ""} · ${acts} action${acts === 1 ? "" : "s"}`;
 
@@ -126,12 +128,15 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
           <div className="flex flex-col gap-2 pt-1 pb-1">
             {/* The thumbnail sits inside the collapsed area, so only fetch it once the trace is open. */}
             <LatestShot steps={steps} enabled={expanded} />
-            {run.result && run.status !== "running" && <p className={run.status === "done" ? "text-[12.5px] text-ink-2" : "text-[12.5px] text-red"}>{run.result}</p>}
-            {linkMachines && (
-              <Link href={`/w/${workload.id}`} className="w-fit text-[12px] text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink-2 hover:decoration-current">
-                {working ? "Watch live" : "Open desktop"}
-              </Link>
-            )}
+            {run.result && run.status !== "running" && <p className={run.status === "failed" ? "text-[12.5px] text-red" : "text-[12.5px] text-ink-2"}>{run.result}</p>}
+            <div className="flex items-center gap-4">
+              {linkMachines && (
+                <Link href={`/w/${workload.id}`} className="w-fit text-[12px] text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink-2 hover:decoration-current">
+                  {working ? "Watch live" : "Open desktop"}
+                </Link>
+              )}
+              {!working && steps.some((s) => s.screenshotKey) && <ReplayButton workloadId={workload.id} runId={runId} />}
+            </div>
           </div>
         )}
       />

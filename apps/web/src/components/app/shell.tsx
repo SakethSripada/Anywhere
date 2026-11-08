@@ -1,14 +1,21 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, ViewTransition, type ReactNode } from "react";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useAccount } from "@/lib/data";
 import { useSession } from "@/lib/stdb";
 import { Onboarding } from "./onboarding";
+import { isPublicPath } from "./providers";
 import { AppSidebar } from "./sidebar";
 
 export function Shell({ children }: { children: ReactNode }) {
+  const path = usePathname();
+  if (isPublicPath(path)) return <>{children}</>;
+  return <AppShell>{children}</AppShell>;
+}
+
+function AppShell({ children }: { children: ReactNode }) {
   const session = useSession();
   const { account, ready } = useAccount();
   const router = useRouter();

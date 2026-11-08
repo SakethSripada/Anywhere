@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.routing import Route
 
-from . import budget
+from . import budget, sharing
 from .agent import Agent, TurnContext
 from .auth import Identity, require_bridge
 from .brev import BrevCLI
@@ -39,7 +39,7 @@ from .photon import PhotonClient, PhotonError, normalize_phone
 from .planner import SUPPORTED_APPS, Application, Intent, Preference
 from .stdb import ReducerRejected, SpacetimeClient
 from .storage import Storage, StorageUnavailable, safe_filename
-from .store import Store
+from .store import Store, plain_dashes
 from .training import DatasetError, inspect_dataset
 from .vault import Vault
 
@@ -160,7 +160,7 @@ def rate_limit(key: str, limit: int, window: float = 60) -> None:
     while q and q[0] < now - window:
         q.popleft()
     if len(q) >= limit:
-        raise HTTPException(429, "Slow down a little — try again in a moment")
+        raise HTTPException(429, "Slow down a little and try again in a moment")
     q.append(now)
 
 
@@ -236,8 +236,18 @@ class ActivateIn(BaseModel):
     code: str = Field(min_length=1, max_length=128)
 
 
+class ShareIn(BaseModel):
+    hours: float = Field(4, ge=0.25, le=24)
+
+
 class GoalIn(BaseModel):
     goal: str = Field(min_length=1, max_length=2000)
+
+
+class RenderEstimateIn(BaseModel):
+    blend_path: str | None = Field(None, max_length=300)
+    samples: int | None = Field(None, ge=1, le=65536)
+    frames: int = Field(1, ge=1, le=10000)
 
 
 class UploadIn(BaseModel):
@@ -291,6 +301,11 @@ def _routes():
         return {"offers": [o.public() for o in app.catalog.offers()]}
 
     # Account ---------------------------------------------------------------
+
+    @r.get("/v1/costs")
+    async def costs(owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"costs:{owner}", 60)
+        return await app.costs(owner)
 
     @r.post("/v1/account/activate")
     async def activate(body: ActivateIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
@@ -362,13 +377,35 @@ def _routes():
         "delete": lambda a, o, w: a.terminate(o, w),
     }
 
-    @r.post("/v1/workloads/{workload_id}/{action}")
-    async def workload_action(workload_id: int, action: str, owner: str = Identity, app: Anywhere = Depends(anywhere)):
-        if action not in actions:
-            raise HTTPException(404, "Unknown action")
-        rate_limit(f"action:{owner}", 30)
-        await actions[action](app, owner, workload_id)
-        return {"ok": True}
+    # One route per action, not `/{action}`: a catch-all path here would also capture
+    # POSTs meant for later routes like /share and /render-estimate.
+    def action_route(name: str):
+        async def workload_action(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+            rate_limit(f"action:{owner}", 30)
+            await actions[name](app, owner, workload_id)
+            return {"ok": True}
+
+        return workload_action
+
+    for name in actions:
+        r.add_api_route(f"/v1/workloads/{{workload_id}}/{name}", action_route(name), methods=["POST"])
+
+    @r.post("/v1/workloads/{workload_id}/render-estimate")
+    async def render_estimate(
+        workload_id: int, body: RenderEstimateIn, owner: str = Identity, app: Anywhere = Depends(anywhere)
+    ):
+        rate_limit(f"render-estimate:{owner}", 6)
+        return await app.estimate_render(owner, workload_id, body.blend_path, body.samples, body.frames)
+
+    @r.get("/v1/workloads/{workload_id}/agent-runs/{run_id}/replay")
+    async def agent_replay(workload_id: int, run_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"replay:{owner}", 60)
+        return await app.replay(owner, workload_id, run_id)
+
+    @r.post("/v1/workloads/{workload_id}/agent-runs/{run_id}/timelapse")
+    async def agent_timelapse(workload_id: int, run_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"timelapse:{owner}", 6)
+        return await app.replay_gif(owner, workload_id, run_id)
 
     @r.post("/v1/workloads/{workload_id}/agent/run")
     async def agent_run(workload_id: int, body: GoalIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
@@ -380,10 +417,11 @@ def _routes():
         return {"run_id": run_id}
 
     @r.post("/v1/workloads/{workload_id}/agent/stop")
-    async def agent_stop(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
-        await app.owned(owner, workload_id)
-        await app.supervisor.stop_agent(workload_id)
-        await app.store.set_controller(workload_id, "user")
+    async def agent_stop(
+        workload_id: int, pause: bool = False, owner: str = Identity, app: Anywhere = Depends(anywhere)
+    ):
+        # pause=true is the user taking over: the run can be handed back and resumed.
+        await app.halt_agent(owner, workload_id, pause=pause)
         return {"ok": True}
 
     @r.post("/v1/workloads/{workload_id}/agent/resume")
@@ -425,6 +463,66 @@ def _routes():
         except Exception as exc:
             log.warning("vnc.proxy_failed", workload=workload_id, error=str(exc))
             await ws.close(code=1011)
+
+    # Watch links -----------------------------------------------------------
+
+    @r.post("/v1/workloads/{workload_id}/share")
+    async def create_share(workload_id: int, body: ShareIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"share:{owner}", 10)
+        made = await app.create_share(owner, workload_id, body.hours)
+        await _drop_watchers(made.pop("replaced"))
+        return made
+
+    @r.get("/v1/workloads/{workload_id}/share")
+    async def share_status(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        return await app.share_status(owner, workload_id)
+
+    @r.delete("/v1/workloads/{workload_id}/share")
+    async def revoke_share(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        await _drop_watchers(await app.revoke_share(owner, workload_id))
+        return {"ok": True}
+
+    @r.get("/v1/watch/{token}")
+    async def watch(token: str, app: Anywhere = Depends(anywhere)):
+        rate_limit(f"watch:{sharing.digest(token)}", 240)
+        try:
+            return await app.watch_view(token)
+        except ActionError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @r.websocket("/v1/watch/{token}/vnc")
+    async def watch_vnc(ws: WebSocket, token: str):
+        app: Anywhere = ws.app.state.anywhere
+        try:
+            rec, w = await app.watched(token)
+        except ActionError:
+            await ws.close(code=4404)
+            return
+        key = sharing.digest(token)
+        viewers = _watchers.setdefault(key, set())
+        if w["status"] != Status.RUNNING or len(viewers) >= MAX_WATCHERS:
+            await ws.close(code=4429 if w["status"] == Status.RUNNING else 4404)
+            return
+        await ws.accept(subprotocol="binary" if "binary" in ws.scope.get("subprotocols", []) else None)
+        viewers.add(ws)
+        try:
+            port = await app.supervisor.vnc.watch.port_for(int(w["id"]), app.supervisor.remote(w))
+            async with websockets.connect(
+                f"ws://127.0.0.1:{port}/websockify", subprotocols=["binary"], max_size=None, open_timeout=15
+            ) as upstream:
+                # Watching doesn't count as using the desktop, so it still idle-stops.
+                await asyncio.wait_for(_relay(ws, upstream, _no_touch), timeout=sharing.seconds_left(rec))
+        except (WebSocketDisconnect, websockets.ConnectionClosed, TimeoutError):
+            with contextlib.suppress(Exception):
+                await ws.close(code=1001)
+        except Exception as exc:
+            log.warning("watch.proxy_failed", workload=w["id"], error=str(exc))
+            with contextlib.suppress(Exception):
+                await ws.close(code=1011)
+        finally:
+            viewers.discard(ws)
+            if not viewers:
+                _watchers.pop(key, None)
 
     # Uploads & files -------------------------------------------------------
 
@@ -565,6 +663,14 @@ def _routes():
             "deep_link_base": f"{app.settings.spectrum_api_base}/users/{assignment.user_id}/redirect",
         }
 
+    @r.get("/v1/bridge/notifications/{notification_id}/attachment", dependencies=[Depends(require_bridge)])
+    async def notification_attachment(notification_id: int, app: Anywhere = Depends(anywhere)):
+        """A picture to send after a notification's text (e.g. a render's first frame)."""
+        att = app.vault.section_get("notification_attachments", str(notification_id))
+        if not att or not app.settings.storage_ready:
+            raise HTTPException(404, "No attachment")
+        return {"url": app.storage.presign_get(att["key"], 900), "name": att["name"], "mime_type": "image/jpeg"}
+
     @r.post("/v1/bridge/inbound", dependencies=[Depends(require_bridge)])
     async def inbound(body: InboundIn, request: Request, app: Anywhere = Depends(anywhere)):
         if body.message_id in _seen_inbound:
@@ -576,7 +682,7 @@ def _routes():
             try:
                 await app.store.link_handle(handle, code, "imessage")
                 return {
-                    "reply": "You're linked. Text me anything you'd like to get done — like “start a Blender desktop”."
+                    "reply": "You're linked. Text me anything you'd like to get done, like “start a Blender desktop”."
                 }
             except ReducerRejected as exc:
                 return {"reply": f"I couldn't link this number: {_clean_reducer_error(str(exc))}."}
@@ -594,10 +700,18 @@ def _routes():
             await app.store.upsert_conversation(cid, owner, "Messages", "imessage")
             app.vault.update(0, **{f"imessage:{owner}": cid})
         await app.store.append_message(cid, "user", "text", body.text, 0, "imessage")
-        reply = await _agent_turn(
-            app, request.app.state.agent, TurnContext(owner, cid, "imessage"), body.text, post=True
-        )
-        return {"reply": reply}
+        ctx = TurnContext(owner, cid, "imessage")
+        reply = await _agent_turn(app, request.app.state.agent, ctx, body.text, post=True)
+        # Pictures the agent took this turn (send_screenshot) go out right after the reply.
+        attachments = [
+            {
+                "name": f"screenshot-{i + 1}.jpg",
+                "mime_type": "image/jpeg",
+                "data_base64": base64.b64encode(jpeg).decode(),
+            }
+            for i, jpeg in enumerate(ctx.attachments)
+        ]
+        return {"reply": reply, "attachments": attachments}
 
     return r
 
@@ -610,7 +724,7 @@ async def _agent_turn(app: Anywhere, agent: Agent, ctx: TurnContext, text: str, 
     try:
         async with entry[0]:
             try:
-                reply = await agent.respond(ctx, text)
+                reply = plain_dashes(await agent.respond(ctx, text))
                 kind = "text"
             except ModelUnavailable as exc:
                 reply, kind = f"The Nemotron agent isn't configured yet ({exc}).", "error"
@@ -627,6 +741,21 @@ async def _agent_turn(app: Anywhere, agent: Agent, ctx: TurnContext, text: str, 
         entry[1] -= 1
         if entry[1] == 0:
             _turn_locks.pop(ctx.conversation_id, None)
+
+
+#: Open watch-link streams by link digest, so turning a link off disconnects them.
+_watchers: dict[str, set[WebSocket]] = {}
+MAX_WATCHERS = 12
+
+
+async def _drop_watchers(key: str | None) -> None:
+    for ws in list(_watchers.pop(key, set()) if key else ()):
+        with contextlib.suppress(Exception):
+            await ws.close(code=4403)
+
+
+async def _no_touch() -> None:
+    return None
 
 
 async def _relay(client: WebSocket, upstream, touch) -> None:

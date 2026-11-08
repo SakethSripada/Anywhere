@@ -62,6 +62,10 @@ What the control plane does:
 6. Every desktop and job has its own page (`/w/{id}`): the live screen or the job's metrics and logs, plus an agent panel that continues that machine's conversation with the agent focused on it. Every agent tool call streams into the chat as it happens. "Make a low-poly tree" starts the operator loop: screenshot → Nemotron vision picks one action → Cua executes it → verify. Each step streams into `agent_step`. **Take over** stops the run and makes the stream interactive. **Hand to agent** resumes it.
 7. **Stop** copies `~/Projects` to S3 before stopping the machine. Billing pauses, and **Resume** restores it.
 
+### Watch links
+
+Share on a running desktop makes a link anyone can open without an account to watch the desktop and the agent's steps live. The stream comes from a second VNC server started with `-viewonly -nosel`, so the desktop itself refuses input and the clipboard isn't shared. Links last 1 h to 1 day, only their hash is stored, a new link replaces the old one, and turning one off disconnects everyone watching. Watching doesn't keep a desktop from idle-stopping.
+
 ### Safety and budget
 
 - `PROVISIONING_MODE` defaults to `disabled`. `dry_run` validates with Brev without billing, and only `live` creates machines.
@@ -73,10 +77,19 @@ What the control plane does:
   - reconciles orphaned Brev instances;
   - recovers in-flight work after a restart.
 - Spend recorded in SpacetimeDB is monotonic: a stale writer can never lower it.
+- **Cost meter and savings** (Machines page, `GET /v1/costs`): spend on running machines ticks every tenth of a second from each machine's exact billing start. "Saved by auto-stop" counts what idle desktops would have kept billing after the guard stopped them, but only until you resumed them or the session limit would have stopped them anyway.
 - Every failed launch is cleaned up. Projects are saved before any stop or delete.
 - Provider keys live only on the server. Browsers authenticate with their SpacetimeDB token, which the control plane verifies with SpacetimeDB.
 
 ---
+
+## Render time and render jobs
+
+- **Before a machine exists**, every Blender plan carries a per-GPU *minutes per frame* range (plan card → Render time). It comes from [Blender Open Data](https://opendata.blender.org) medians for Blender 4.5 with OptiX: per-scene samples per minute, with the benchmark's monster / junkshop / classroom scenes standing in for simple / detailed / heavy scenes. The frame size of the benchmark scenes isn't published, so ~1080p is assumed and the range is widened. Data and assumptions are in `services/control/src/anywhere/render_bench.py`.
+- **On a running desktop**, `estimate_render` (Insights → Render time, the agent, MCP, `POST /v1/workloads/{id}/render-estimate`) times two quick test renders of the newest `.blend` in `~/Projects`, after a warm-up. It splits fixed per-frame overhead from per-sample cost and extrapolates to the full frame and sample count, then scales to other GPUs by benchmark ratios.
+- **Render jobs** (`kind: "render"`) copy a desktop's `~/Projects` to a GPU picked by measured render speed, render the frames with the pinned Blender, and shut the machine down. The project comes live from the desktop if it's running, or from its last saved copy in object storage if it's stopped. A scene can be named loosely ("render my alley scene" matches `Alley Night v2.blend`), and with no desktop named the running one (or the most recently used one with saved files) is used. When it finishes, linked phones get a text with the first frame attached. Frames are uploaded as an artifact when object storage is set up, and otherwise copied back to the desktop's `~/Projects/renders/<job>`. The desktop is kept from idle-stopping until they arrive.
+- **Split renders** (`render_machines`, up to 8): approving one creates a render job per GPU, each with an even share of the frames (e.g. 240 frames on 4 GPUs = 60 each). All of them launch at once, and their frames merge into one `~/Projects/renders/<farm>` folder, keeping their real frame numbers. A single message goes out when the last part finishes. Wall-clock time drops roughly N×, while the cost stays about the same, since each machine bills only for its share plus setup. Approval needs room for all N machines under `MAX_CONCURRENT_INSTANCES`, and long single-GPU renders get a tip to split.
+- **Desktop plans price time at the machine, not render time.** They start as a 1 h session, billed only while running. A session length the agent guessed is shown as a low-confidence range; only a length the user stated is "high confidence".
 
 ## Capability status
 
@@ -98,6 +111,7 @@ What the control plane does:
 | Desktop on Brev (Cua Linux image, Blender, x11vnc/websockify) | Built | Not yet run on a Brev GPU. Xvfb has no hardware GL, so viewport rendering is software and Cycles renders use the GPU via CUDA/OptiX |
 | Cua computer-use operator | **Tested** | Fakes for screen and model. The screen adapter and `desktop-start.sh` were run against the real `ghcr.io/trycua/linux:24.04` container locally (screenshots, input, shell, noVNC), without a GPU |
 | noVNC stream through the ticketed proxy | Built | Needs a running desktop |
+| Watch-only share links (view-only VNC, public watch page) | Built | Live stream needs a running desktop |
 | S3 projects, uploads, artifacts | Built | Needs bucket credentials (R2 recommended) |
 | LoRA/QLoRA training job, metrics, artifacts | **Tested** | Config and dataset inspection tested; GPU run pending |
 | Photon iMessage bridge (inbound, outbound, linking) | Built | Typechecks; needs a Photon project |
@@ -217,7 +231,7 @@ The control plane is also an [MCP](https://modelcontextprotocol.io) server at `/
 
 | Permission | Tools |
 |---|---|
-| `read` | `get_account`, `get_catalog`, `list_workloads`, `get_workload` (status, spend and the desktop agent's latest steps), `get_desktop_screenshot` |
+| `read` | `get_account`, `get_catalog`, `list_workloads`, `get_workload` (status, spend and the desktop agent's latest steps), `get_desktop_screenshot`, `estimate_render` (a measured test render; up to ~11 min) |
 | `plan` | `propose_workload`, `cancel_plan` |
 | `control` | `stop_workload`, `save_project`, `delete_workload` (needs `confirm: true`), `operate_desktop`, `stop_desktop_agent` |
 | `spend` | `approve_workload`, `resume_desktop` |

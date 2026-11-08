@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from anywhere.brev import BrevError, CreateResult, Instance, ProvisioningDisabled
+from anywhere.brev import BrevDeployFailed, BrevError, CreateResult, Instance, ProvisioningDisabled
 from anywhere.config import ProvisioningMode
 from anywhere.lifecycle import IllegalTransition, can_transition
 from anywhere.remote import Result
@@ -57,6 +57,11 @@ class FakeStore:
 
     async def add_event(self, wid, level, message):
         self.events.append((wid, level, message))
+
+    async def switch_workload_machine(self, id, instance_type, gpu_name, provider, hourly_cents):
+        row = self.rows[id]
+        assert row["status"] == "provisioning"
+        row.update(instanceType=instance_type, gpuName=gpu_name, provider=provider, hourlyCents=hourly_cents)
 
     async def record_usage(self, id, cents, touch=False):
         self.rows[id]["accruedCents"] = max(cents, self.rows[id]["accruedCents"])
@@ -124,15 +129,19 @@ class FakeStore:
 
 
 class FakeBrev:
-    def __init__(self, *, mode=ProvisioningMode.LIVE, fail_wait=False, api_key="bak-test"):
+    def __init__(self, *, mode=ProvisioningMode.LIVE, fail_wait=False, api_key="bak-test", fail_types=()):
         self.mode = mode
         self.api_key = api_key
         self.fail_wait = fail_wait
+        #: Instance types whose deploy Brev "tears down" (BrevDeployFailed).
+        self.fail_types = set(fail_types)
+        self.types: dict[str, str] = {}
         self.instances: dict[str, str] = {}
         self.calls: list[tuple] = []
 
-    async def create(self, name, itype, script):
+    async def create(self, name, itype):
         self.calls.append(("create", name))
+        self.types[name] = itype
         if not self.api_key or self.mode == ProvisioningMode.DISABLED:
             raise ProvisioningDisabled("Provisioning is disabled")
         if self.mode == ProvisioningMode.DRY_RUN:
@@ -140,13 +149,18 @@ class FakeBrev:
         self.instances[name] = "DEPLOYING"
         return CreateResult(name, False, "")
 
-    async def wait_for(self, name, *, want="RUNNING", timeout=0, interval=0):
+    async def wait_for(self, name, *, want="RUNNING", timeout=0, interval=0, on_change=None):
         if self.fail_wait:
             raise BrevError("capacity unavailable")
+        if self.types.get(name) in self.fail_types:
+            raise BrevDeployFailed(f"Brev is deleting {name}; the deploy didn't succeed")
         self.instances[name] = want
         return Instance(name, "id", want, "READY", "", "")
 
-    async def refresh_ssh(self): ...
+    async def refresh_ssh(self, attempts=8): ...
+
+    def has_ssh_host(self, name):
+        return True
 
     async def get(self, name):
         s = self.instances.get(name)

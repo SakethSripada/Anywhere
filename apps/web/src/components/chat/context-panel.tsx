@@ -44,6 +44,22 @@ export function ContextPanel({ conversationId }: { conversationId: bigint | null
   );
 }
 
+function approvalSteps(w: Workload): string[] {
+  if (w.kind === "desktop")
+    return ["Anywhere reserves the GPU on NVIDIA Brev", "It installs the desktop and your apps", "You open it here and work in the browser", "Stop any time, your files are saved first"];
+  const plan = parsePlan(w.planJson);
+  if (plan?.requirements.environment === "blender-render") {
+    const n = plan.machines ?? 1;
+    return [
+      n > 1 ? `Anywhere reserves ${n} GPUs on NVIDIA Brev at once` : "Anywhere reserves the GPU on NVIDIA Brev",
+      `It copies your scene from ${plan.inputs?.source_title ?? "your desktop"}${n > 1 ? " to each machine" : ""}`,
+      n > 1 ? "Each GPU renders its share of the frames; watch them come in" : "Watch frames come in; ask the agent anything",
+      "Frames are saved and the machines shut down",
+    ];
+  }
+  return ["Anywhere reserves the GPU on NVIDIA Brev", "It downloads your dataset and starts training", "Watch loss and logs live; ask the agent anything", "Results are saved and the machine shuts down"];
+}
+
 function Entry({ w, primary }: { w: Workload; primary: boolean }) {
   if (w.status === "planned")
     return (
@@ -53,10 +69,7 @@ function Entry({ w, primary }: { w: Workload; primary: boolean }) {
           <div className="px-1">
             <div className="mb-2 text-xs font-medium text-muted-foreground">What happens when you approve</div>
             <ol className="flex flex-col gap-2 text-[13px]">
-              {(w.kind === "desktop"
-                ? ["Anywhere reserves the GPU on NVIDIA Brev", "It installs the desktop and your apps", "You open it here and work in the browser", "Stop any time, your files are saved first"]
-                : ["Anywhere reserves the GPU on NVIDIA Brev", "It downloads your dataset and starts training", "Watch loss and logs live; ask the agent anything", "Results are saved and the machine shuts down"]
-              ).map((t, i) => (
+              {approvalSteps(w).map((t, i) => (
                 <li key={t} className="flex gap-2.5">
                   <span className="grid size-5 shrink-0 place-items-center rounded-full border bg-background text-[11px] font-medium text-muted-foreground tabular">{i + 1}</span>
                   <span className="pt-px text-foreground/80">{t}</span>

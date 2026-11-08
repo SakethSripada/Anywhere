@@ -84,6 +84,13 @@ def main() -> None:
     )
     if quant is not None:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    else:
+        # Gradient checkpointing with a frozen base model: unless the embeddings'
+        # output requires grad, checkpointed layers return tensors without a grad_fn
+        # and the first backward() fails ("element 0 of tensors does not require
+        # grad"). prepare_model_for_kbit_training does this for QLoRA; plain LoRA
+        # needs it explicitly.
+        model.enable_input_require_grads()
     model = get_peft_model(
         model,
         LoraConfig(
@@ -127,6 +134,14 @@ def main() -> None:
             "labels": padded("labels", -100),
         }
 
+    # Log every step on short runs, so a tiny job still draws a loss curve, and
+    # evaluate a few times per run instead of every 50 steps (which a short run
+    # never reaches).
+    train_rows = len(split["train"]) if split else len(tokenized)
+    total_steps = math.ceil(train_rows / (cfg["batch_size"] * cfg["grad_accum"])) * cfg["epochs"]
+    logging_steps = max(1, min(5, total_steps // 20))
+    eval_steps = max(1, min(50, total_steps // 5))
+
     args = TrainingArguments(
         output_dir=str(out / "checkpoints"),
         num_train_epochs=cfg["epochs"],
@@ -135,16 +150,20 @@ def main() -> None:
         learning_rate=cfg["learning_rate"],
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
-        logging_steps=5,
+        logging_steps=logging_steps,
         eval_strategy="steps" if split else "no",
-        eval_steps=50,
+        eval_steps=eval_steps,
         save_strategy="steps",
         save_steps=200,
         save_total_limit=1,
         bf16=bf16,
         fp16=not bf16,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to=[],
+        # Progress bars rewrite one line with carriage returns many times a second,
+        # which floods the streamed log; print each logged step as a line instead.
+        disable_tqdm=True,
     )
     trainer = Trainer(
         model=model,

@@ -48,3 +48,96 @@ def test_config_is_clamped_to_allowlisted_models():
     profile = inspect_dataset("t.jsonl", data, len(data))
     cfg = build_config(params_b=7, epochs=None, profile=profile, dataset_path="data.jsonl", vram_gb=24)
     assert cfg.method == "qlora" and cfg.max_seq_len == 2048 and cfg.epochs == 3
+
+
+def test_lora_training_script_keeps_gradients_flowing_through_checkpointed_layers():
+    # Plain LoRA (the default for models up to 1.5B) freezes the embeddings; with
+    # gradient checkpointing on, the first backward() fails unless the inputs are
+    # made to require grad or non-reentrant checkpointing is used. Torch isn't
+    # installed here, so check the vetted script's source.
+    from importlib import resources
+
+    src = resources.files("anywhere.environments").joinpath("train.py").read_text()
+    compile(src, "train.py", "exec")
+    assert "model.enable_input_require_grads()" in src
+    assert '"use_reentrant": False' in src
+
+
+def _run_batch_script(tmp_path, python_body: str) -> tuple[str, str]:
+    import os
+    import shutil
+    import subprocess
+    from importlib import resources
+
+    if not shutil.which("bash"):
+        pytest.skip("bash is not available")
+    job = tmp_path / "home" / "workspace" / "anywhere" / "job"
+    job.mkdir(parents=True)
+    (job / "run.sh").write_text(resources.files("anywhere.environments").joinpath("batch-run.sh").read_text())
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    stubs = {
+        "nvidia-smi": 'echo "Tesla T4, 15360 MiB"',
+        "uv": 'if [ "$1" = venv ]; then mkdir -p .venv/bin && : > .venv/bin/activate; fi',
+        "python": python_body,
+    }
+    for name, body in stubs.items():
+        (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_ / name).chmod(0o755)
+    env = {"HOME": str(tmp_path / "home"), "PATH": f"{bin_}:/usr/bin:/bin"}
+    subprocess.run(["bash", "run.sh"], cwd=job, env=env, capture_output=True, timeout=60, check=False)
+    assert os.path.exists(job / "pid")
+    return (job / "status").read_text().strip(), (job / "run.log").read_text()
+
+
+def test_batch_runner_reports_the_python_error_and_logs_it_before_the_status(tmp_path):
+    status, log = _run_batch_script(
+        tmp_path,
+        'echo "Traceback (most recent call last):"\n'
+        'echo "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB" >&2\nexit 1',
+    )
+    assert status == (
+        "failed: Training exited with an error (exit 1): "
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB"
+    )
+    assert "::error::" in log and "Traceback" in log
+
+
+def test_batch_runner_marks_success_after_the_last_step(tmp_path):
+    status, log = _run_batch_script(tmp_path, "echo trained")
+    assert status == "succeeded"
+    assert log.rstrip().endswith("::step:: Done")
+
+
+def test_a_large_dataset_whose_first_megabyte_ends_mid_character_is_profiled():
+    row = json.dumps({"prompt": "café crème", "response": "très bien"}, ensure_ascii=False).encode() + b"\n"
+    data = row * 200_000
+    head = data[: 1024 * 1024]
+    while head[-1:] == b"\n" or head[-1] < 0x80:  # end the sample inside a multi-byte character
+        head = head[:-1]
+    profile = inspect_dataset("big.jsonl", head, len(data))
+    assert profile.schema_ == "prompt_response"
+    assert profile.rows == pytest.approx(200_000, rel=0.01)
+
+
+def test_every_epoch_count_the_planner_accepts_builds_a_config():
+    data = jsonl([{"prompt": "q", "response": "a"}] * 10)
+    profile = inspect_dataset("t.jsonl", data, len(data))
+    cfg = build_config(params_b=None, epochs=20, profile=profile, dataset_path="data.jsonl", vram_gb=16)
+    assert cfg.epochs == 20
+
+
+def test_json_strings_with_unicode_line_separators_are_one_row():
+    data = (json.dumps({"text": "one two"}, ensure_ascii=False) + "\n").encode() * 3
+    assert inspect_dataset("t.jsonl", data, len(data)).rows == 3
+
+
+def test_the_sample_fine_tune_dataset_plans_the_smallest_lora_run():
+    from pathlib import Path
+
+    path = Path(__file__).parents[3] / "examples" / "datasets" / "short-answers.jsonl"
+    data = path.read_bytes()
+    profile = inspect_dataset(path.name, data, len(data))
+    assert profile.schema_ == "prompt_response" and profile.rows == 60
+    cfg = build_config(params_b=0.5, epochs=5, profile=profile, dataset_path="data.jsonl", vram_gb=16)
+    assert cfg.base_model == "Qwen/Qwen2.5-0.5B-Instruct" and cfg.method == "lora"

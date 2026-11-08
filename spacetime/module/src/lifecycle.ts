@@ -118,3 +118,31 @@ export const CONVERSATION_BUMP_MICROS = 10_000_000n;
 export function shouldBumpConversation(updatedAtMicros: bigint, nowMicros: bigint): boolean {
   return nowMicros - updatedAtMicros >= CONVERSATION_BUMP_MICROS;
 }
+
+/** GPU readings kept per workload and series in what browsers download: an hour at the 10 s default. */
+export const GPU_POINTS_PER_SERIES = 360;
+
+/**
+ * Trim GPU telemetry (`gpu.*` metric points) to the newest `cap` readings per
+ * workload and series, keeping training metrics (loss, progress) whole. Rows must be
+ * in insertion (id) order; the result keeps that order.
+ */
+export function newestTelemetry<T extends { id: bigint; workloadId: bigint; name: string }>(
+  rows: T[],
+  cap: number = GPU_POINTS_PER_SERIES,
+): T[] {
+  const counts = new Map<string, number>();
+  const keep = new Array<boolean>(rows.length);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (!r.name.startsWith("gpu.")) {
+      keep[i] = true;
+      continue;
+    }
+    const key = `${r.workloadId}:${r.name}`;
+    const n = counts.get(key) ?? 0;
+    counts.set(key, n + 1);
+    keep[i] = n < cap;
+  }
+  return rows.filter((_, i) => keep[i]);
+}

@@ -9,13 +9,14 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ApiError, useApi } from "@/lib/api";
-import { useWorkload } from "@/lib/data";
+import { useWorkload, useWorkloads } from "@/lib/data";
 import { centsRange, hoursRange } from "@/lib/format";
 import { approach, CONFIDENCE, parsePlan, type Offer } from "@/lib/plan";
 import { cn } from "@/lib/utils";
 import { ACTIVE, href } from "@/lib/workloads";
 import { StatusText } from "../machines/status";
 import { GpuCompare } from "./gpu-compare";
+import { RenderTimeTable } from "./render-time";
 
 function useActions(id: bigint) {
   const api = useApi();
@@ -40,6 +41,10 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
   const { workload: w, ready } = useWorkload(workloadId);
   const { busy, act } = useActions(workloadId);
   const [compare, setCompare] = useState(false);
+  const [renderOpen, setRenderOpen] = useState(false);
+  const { workloads } = useWorkloads();
+  // "Stop a machine first" is only true while another one is on; approval re-checks it live.
+  const othersOn = workloads.some((o) => o.id !== workloadId && ACTIVE.has(o.status));
 
   if (!w) return ready ? null : <Skeleton className="h-40 w-full max-w-xl rounded-2xl" />;
   const plan = parsePlan(w.planJson);
@@ -67,21 +72,31 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
         </div>
         <div className="mt-0.5 flex items-baseline justify-between gap-4 text-[13px] text-muted-foreground">
           <span className="truncate">
-            NVIDIA {offer.gpu} · {offer.vram_gb} GB · {hoursRange(est.hours_low, est.hours_high)}
+            {(plan.machines ?? 1) > 1 ? `${plan.machines}× ` : ""}NVIDIA {offer.gpu} · {offer.vram_gb} GB · {hoursRange(est.hours_low, est.hours_high)}
           </span>
           <span className="shrink-0 tabular">${offer.price_per_hour.toFixed(2)}/hr</span>
         </div>
         <p className="mt-3 text-sm leading-6 text-foreground/80">
           {approach(plan)}.{plan.outputs.length > 0 && ` You’ll get ${lowerList(plan.outputs)}.`}
         </p>
-        {plan.inputs && (
+        {plan.inputs?.dataset_name && (
           <p className="mt-1 text-[13px] text-muted-foreground">
-            Training on {plan.inputs.dataset_name} ({plan.inputs.dataset_rows.toLocaleString()} rows)
+            Training on {plan.inputs.dataset_name} ({(plan.inputs.dataset_rows ?? 0).toLocaleString()} rows)
           </p>
+        )}
+        {plan.requirements.mode === "interactive" && (
+          <p className="mt-1 text-[13px] text-muted-foreground">Billed only while it runs. Stop any time and resume later.</p>
         )}
         {planned &&
           blockers.map((b) => (
             <p key={b} className="mt-3 text-[13px] text-destructive">
+              {b}
+            </p>
+          ))}
+        {planned &&
+          othersOn &&
+          (plan.policy?.waits ?? []).map((b) => (
+            <p key={b} className="mt-3 text-[13px] text-warning">
               {b}
             </p>
           ))}
@@ -112,6 +127,20 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
               <ChevronDown className={cn("size-3.5 transition-transform", compare && "rotate-180")} />
             </button>
           )}
+          {!!plan.render_time?.rows.length && (
+            <button
+              type="button"
+              aria-expanded={renderOpen}
+              onClick={() => setRenderOpen((o) => !o)}
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2 py-1 text-[13px] whitespace-nowrap transition-colors hover:text-foreground",
+                renderOpen ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              Render time
+              <ChevronDown className={cn("size-3.5 transition-transform", renderOpen && "rotate-180")} />
+            </button>
+          )}
           <div className="ml-auto flex items-center gap-2">
             {planned ? (
               <>
@@ -119,7 +148,7 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
                   Cancel
                 </Button>
                 <Button size="sm" disabled={!!busy || blockers.length > 0} onClick={() => act("approve")}>
-                  {busy === "approve" ? "Approving…" : "Approve"}
+                  {busy === "approve" ? "Approving…" : (plan.machines ?? 1) > 1 ? `Approve ${plan.machines} GPUs` : "Approve"}
                 </Button>
               </>
             ) : (
@@ -164,6 +193,12 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
         </CollapsibleContent>
       </Collapsible>
       {compare && <GpuCompare plan={plan} />}
+      {renderOpen && plan.render_time && (
+        <div className="border-t px-5 py-4">
+          <h4 className="mb-2 text-[13px] font-medium">How long a frame takes</h4>
+          <RenderTimeTable data={plan.render_time} chosen={plan.selected.offer.gpu} />
+        </div>
+      )}
     </article>
   );
 }
@@ -182,7 +217,7 @@ export function PlanRow({ workloadId }: { workloadId: bigint }) {
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-medium">{w.title}</div>
         <div className="truncate text-xs text-muted-foreground tabular">
-          NVIDIA {plan.selected.offer.gpu} · {centsRange(est.cost_low_cents, est.cost_high_cents)} · {hoursRange(est.hours_low, est.hours_high)}
+          {(plan.machines ?? 1) > 1 ? `${plan.machines}× ` : ""}NVIDIA {plan.selected.offer.gpu} · {centsRange(est.cost_low_cents, est.cost_high_cents)} · {hoursRange(est.hours_low, est.hours_high)}
         </div>
       </div>
       {w.status === "planned" ? (
