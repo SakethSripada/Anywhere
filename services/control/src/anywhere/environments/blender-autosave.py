@@ -751,46 +751,82 @@ def _is_daylight(world):
 
 @_lenient
 def _render_still(path="/tmp/anywhere-render.jpg", samples=24, width=960, height=540):
-    """Render the camera view on the GPU with Cycles to a JPEG; returns the path."""
+    """Render the camera view on the GPU with Cycles to a JPEG, exposed automatically; returns the path."""
     scene = bpy.context.scene
     before = scene.render.engine
     try:
         _gpu(scene)
-        # Crisp, not smeared: more samples where the image needs them (adaptive), a narrow
-        # pixel filter, and OpenImageDenoise guided by albedo and normals, which keeps edges
-        # and surface detail that the plain denoiser blurred away at low sample counts.
         c = scene.cycles
-        c.samples = max(int(samples), 48)
-        c.use_adaptive_sampling = True
-        c.adaptive_threshold = 0.02
-        c.filter_width = 1.0
-        c.use_denoising = True
-        try:
-            c.denoiser = "OPENIMAGEDENOISE"
-            c.denoising_input_passes = "RGB_ALBEDO_NORMAL"
-            c.denoising_prefilter = "ACCURATE"
-            c.denoising_use_gpu = True
-        except (AttributeError, TypeError):
-            pass
-        scene.render.resolution_x, scene.render.resolution_y = int(width), int(height)
-        scene.render.resolution_percentage = 100
-        scene.render.image_settings.file_format = "JPEG"
-        scene.render.image_settings.quality = 93
-        scene.render.filepath = path
-        # Filmic colour with real contrast: daylight on pale subjects blew out to white
-        # under the default transform (seen on a white airplane over green hills).
+        r = scene.render
         vs = scene.view_settings
+        # Filmic colour with real contrast (the default transform blew pale subjects out to white).
         try:
             vs.view_transform = "AgX"
             vs.look = "AgX - Medium High Contrast"
         except TypeError:
             pass
-        vs.exposure = -0.6 if (scene.world and _is_daylight(scene.world)) else 0.0
         scene.frame_set(scene.frame_start)  # the orbit's opening view, which text faces
+        r.image_settings.file_format = "JPEG"
+        r.image_settings.quality = 93
+        r.resolution_percentage = 100
+        c.use_adaptive_sampling = True
+        c.filter_width = 1.0
+        c.use_denoising = True
+        try:
+            # OpenImageDenoise guided by albedo and normals keeps edges and detail the plain
+            # denoiser smeared. On the CPU: its GPU path left streaks on the T4.
+            c.denoiser = "OPENIMAGEDENOISE"
+            c.denoising_input_passes = "RGB_ALBEDO_NORMAL"
+            c.denoising_prefilter = "ACCURATE"
+            c.denoising_use_gpu = False
+        except (AttributeError, TypeError):
+            pass
+
+        _unfight_ground(scene)
+
+        # Auto exposure: a tiny linear (EXR) preview, measured before tone mapping, sets exposure
+        # so the median lands near mid-grey whatever lighting the script chose. A JPEG probe
+        # saturated in bright worlds and could not see how far over they were.
+        vs.exposure = 0.0
+        r.resolution_x, r.resolution_y = 320, 180
+        c.samples, c.adaptive_threshold = 16, 0.1
+        fmt = r.image_settings.file_format
+        r.image_settings.file_format = "OPEN_EXR"
+        probe = "/tmp/anywhere-probe.exr"
+        r.filepath = probe
+        bpy.ops.render.render(write_still=True)
+        r.image_settings.file_format = fmt
+        try:
+            img = bpy.data.images.load(probe, check_existing=False)
+            px = img.pixels[:]
+            bpy.data.images.remove(img)
+            lum = [0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2] for i in range(0, len(px), 16)]
+            lum.sort()
+            mid = lum[len(lum) // 2] if lum else 0.18  # median: a few bright sky pixels don't decide
+            if mid > 1e-5:
+                vs.exposure = max(-8.0, min(3.0, _math.log2(0.3 / mid)))
+        except Exception as exc:
+            print("anywhere exposure probe:", exc)
+
+        r.resolution_x, r.resolution_y = int(width), int(height)
+        c.samples, c.adaptive_threshold = max(int(samples), 48), 0.02
+        r.filepath = path
         bpy.ops.render.render(write_still=True)
     finally:
         scene.render.engine = before
     return path
+
+
+def _unfight_ground(scene):
+    """Drop flat ground planes a hair below anything resting at the same height. Coplanar
+    faces (a terrain's flat base on the ground plane) z-fight in Cycles as horizontal streaks."""
+    for o in scene.objects:
+        if o.type != "MESH" or o.get("anywhere_unfought") or o.dimensions.z > 1e-3:
+            continue
+        if max(o.dimensions.x, o.dimensions.y) < 20:
+            continue
+        o.location.z -= 0.02
+        o["anywhere_unfought"] = True
 
 
 def _gpu(scene):
