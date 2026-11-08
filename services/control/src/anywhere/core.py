@@ -4,6 +4,7 @@ messaging bridge. Every way of spending money funnels through `propose` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -49,6 +50,9 @@ class Anywhere:
         self.readiness = Readiness(self.settings)
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
         self.supervisor.integrations = self.readiness.integrations
+        #: Serialises "check the budget and concurrency cap, then start a machine" so
+        #: two approvals (or an auto-approve racing a manual one) can't both pass.
+        self._admission = asyncio.Lock()
 
     # ── Notifications ─────────────────────────────────────────────────────
 
@@ -86,7 +90,14 @@ class Anywhere:
                 int(w["accruedCents"]) for w in workloads if w["owner"] == owner and w["createdAt"] >= month
             ),
             platform_cents=sum(int(w["accruedCents"]) for w in workloads),
-            active_instances=sum(1 for w in workloads if w["status"] in BILLABLE),
+            # An approved plan, or a stopped desktop whose resume has started, is about
+            # to provision, so it already takes a slot.
+            active_instances=sum(
+                1
+                for w in workloads
+                if w["status"] in BILLABLE | {Status.APPROVED}
+                or (w["status"] == Status.STOPPED and self.supervisor.busy(w["id"]))
+            ),
             account_active_kinds=tuple(
                 w["kind"] for w in workloads if w["owner"] == owner and w["status"] in BILLABLE | {Status.STOPPED}
             ),
@@ -243,9 +254,20 @@ class Anywhere:
         }
 
     async def approve(self, owner: str, workload_id: int) -> dict:
+        async with self._admission:
+            return await self._approve(owner, workload_id)
+
+    async def _approve(self, owner: str, workload_id: int) -> dict:
         w = await self.owned(owner, workload_id)
         if w["status"] != Status.PLANNED:
             raise ActionError(f"This plan is already {w['status']}")
+        # A plan can sit for a while before it's approved; make sure Brev still
+        # lists its machine type so `brev create` isn't asked for one it can't make.
+        await self.refresh_prices()
+        if not self.catalog.available(w["instanceType"]):
+            raise ActionError(
+                f"Brev isn't offering {w['instanceType']} right now. Ask me for a new plan and I'll pick another machine."
+            )
         acct = await self.account(owner)
         decision = budget.evaluate(
             kind=w["kind"],
@@ -283,6 +305,10 @@ class Anywhere:
         self.supervisor.stop(w)
 
     async def resume(self, owner: str, workload_id: int) -> None:
+        async with self._admission:
+            await self._resume(owner, workload_id)
+
+    async def _resume(self, owner: str, workload_id: int) -> None:
         w = await self.owned(owner, workload_id)
         if w["status"] != Status.STOPPED:
             raise ActionError("Only stopped desktops can be resumed")
@@ -327,9 +353,10 @@ class Anywhere:
         await self.store.start_agent_run(run_id, w["id"], goal)
         status, result = "failed", ""
         shots = 0
+        last_touch = float("-inf")
 
         async def record(kind: str, summary: str, detail: str, jpeg: bytes | None) -> None:
-            nonlocal shots
+            nonlocal shots, last_touch
             key = ""
             if jpeg and self.settings.storage_ready:
                 shots += 1
@@ -341,7 +368,12 @@ class Anywhere:
             if kind == "observe" and not key:
                 return
             await self.store.add_agent_step(run_id, kind, summary, detail, key)
-            await self.store.record_usage(w["id"], int(w.get("accruedCents", 0)), touch=True)
+            # Activity only feeds the 20-minute idle check, so one touch every 30 s
+            # is plenty; each one rewrites the workload row for every subscriber.
+            now = asyncio.get_running_loop().time()
+            if now - last_touch >= 30:
+                last_touch = now
+                await self.store.record_usage(w["id"], int(w.get("accruedCents", 0)), touch=True)
 
         async def has_control() -> bool:
             current = await self.store.workload(w["id"])

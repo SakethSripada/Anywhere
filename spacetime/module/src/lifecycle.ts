@@ -86,3 +86,35 @@ export function validatePreferences(input: {
 }
 
 export const CONTROLLERS = ["agent", "user"] as const;
+
+/* ── Write coalescing ──────────────────────────────────────────────────── */
+
+/** Every workload row write fans out to each subscribed browser, so activity
+ *  "touches" closer together than this are coalesced into one. */
+export const TOUCH_INTERVAL_MICROS = 30_000_000n;
+
+/**
+ * What a `record_usage` call should change, or `null` when it changes nothing.
+ * Spend is monotonic (a stale writer can never lower it), and a touch only
+ * moves `lastActiveAt` when the previous one is at least TOUCH_INTERVAL old.
+ */
+export function usageUpdate(
+  current: { accruedCents: number; lastActiveAtMicros?: bigint },
+  accruedCents: number,
+  touch: boolean,
+  nowMicros: bigint,
+): { accruedCents: number; touch: boolean } | null {
+  const next = accruedCents > current.accruedCents ? accruedCents : current.accruedCents;
+  const last = current.lastActiveAtMicros;
+  const doTouch = touch && (last === undefined || nowMicros - last >= TOUCH_INTERVAL_MICROS);
+  if (next === current.accruedCents && !doTouch) return null;
+  return { accruedCents: next, touch: doTouch };
+}
+
+/** Conversation `updatedAt` only orders the sidebar; bumps closer together than
+ *  this (tool calls, results, status lines in one turn) are skipped. */
+export const CONVERSATION_BUMP_MICROS = 10_000_000n;
+
+export function shouldBumpConversation(updatedAtMicros: bigint, nowMicros: bigint): boolean {
+  return nowMicros - updatedAtMicros >= CONVERSATION_BUMP_MICROS;
+}

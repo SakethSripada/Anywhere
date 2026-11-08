@@ -13,6 +13,7 @@ import contextlib
 import shlex
 import socket
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -28,6 +29,22 @@ SSH_OPTS = [
     "-o",
     "ServerAliveCountMax=3",
 ]
+
+#: Commands share one SSH connection per host, so the frequent short polls (log
+#: tails, reachability, job status) skip a full handshake each time. `%C` keeps
+#: the socket path short and unique per host/user.
+MUX_OPTS = [
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    "ControlPath=/tmp/anywhere-ssh-%C",
+    "-o",
+    "ControlPersist=5m",
+]
+
+#: Port forwards must not ride a shared master: a forward requested through a mux
+#: client lives in the master and outlives the client, so closing it would leak.
+NO_MUX_OPTS = ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
 
 
 class RemoteError(Exception):
@@ -46,7 +63,7 @@ class Remote:
         self.host = host
 
     def _argv(self, command: str) -> list[str]:
-        return ["ssh", *SSH_OPTS, self.host, "--", command]
+        return ["ssh", *SSH_OPTS, *MUX_OPTS, self.host, "--", command]
 
     async def run(
         self, command: str, *, timeout: float = 120, input: bytes | None = None, check: bool = True
@@ -59,8 +76,11 @@ class Remote:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(input), timeout)
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.CancelledError) as exc:
             proc.kill()
+            await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RemoteError(f"Remote command timed out after {timeout:.0f}s") from exc
         result = Result(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
         if check and result.code != 0:
@@ -78,8 +98,16 @@ class Remote:
             return False
 
     def popen(self, command: str, *, stdin: int | None = None, stdout: int | None = None) -> subprocess.Popen:
-        """Blocking process handle for streaming large tarballs to/from object storage."""
-        return subprocess.Popen(self._argv(command), stdin=stdin, stdout=stdout, stderr=subprocess.PIPE)
+        """Blocking process handle for streaming large tarballs to/from object storage.
+
+        stderr goes to a temporary file rather than a pipe: nobody reads it while the
+        transfer runs, and a full pipe (tar warnings on many files) would block the
+        process mid-stream. `stderr_tail()` reads it afterwards.
+        """
+        errfile = tempfile.TemporaryFile()  # noqa: SIM115 -- closed by end_process()
+        proc = subprocess.Popen(self._argv(command), stdin=stdin, stdout=stdout, stderr=errfile)
+        proc.anywhere_stderr = errfile  # type: ignore[attr-defined]
+        return proc
 
     @contextlib.asynccontextmanager
     async def tunnel(self, remote_port: int) -> AsyncIterator[int]:
@@ -88,6 +116,7 @@ class Remote:
         proc = await asyncio.create_subprocess_exec(
             "ssh",
             *SSH_OPTS,
+            *NO_MUX_OPTS,
             "-o",
             "ExitOnForwardFailure=yes",
             "-N",
@@ -105,6 +134,27 @@ class Remote:
                 proc.terminate()
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(proc.wait(), 5)
+
+
+def stderr_tail(proc: subprocess.Popen, limit: int = 400) -> str:
+    """The end of a `Remote.popen` process's stderr."""
+    f = getattr(proc, "anywhere_stderr", None)
+    if f is None:
+        return proc.stderr.read().decode(errors="replace")[-limit:] if proc.stderr else ""
+    f.seek(0)
+    return f.read().decode(errors="replace")[-limit:]
+
+
+def end_process(proc: subprocess.Popen) -> None:
+    """Kill (if still running) and reap a streaming process, and close its files."""
+    if proc.poll() is None:
+        proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=10)
+    for f in (proc.stdin, proc.stdout, getattr(proc, "anywhere_stderr", None)):
+        if f is not None:
+            with contextlib.suppress(Exception):
+                f.close()
 
 
 def quote_path(path: str) -> str:

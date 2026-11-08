@@ -23,6 +23,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from .config import Settings
+from .remote import end_process, stderr_tail
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -123,13 +124,17 @@ class Storage:
 
         def _upload() -> int:
             assert proc.stdout is not None
-            counter = _CountingReader(proc.stdout)
-            self.client.upload_fileobj(counter, self.bucket, key, ExtraArgs={"ContentType": content_type})
-            code = proc.wait(timeout=60)
-            if code != 0:
-                err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-                raise RuntimeError(f"source process exited {code}: {err[-400:]}")
-            return counter.count
+            try:
+                counter = _CountingReader(proc.stdout)
+                self.client.upload_fileobj(counter, self.bucket, key, ExtraArgs={"ContentType": content_type})
+                code = proc.wait(timeout=60)
+                if code != 0:
+                    raise RuntimeError(f"source process exited {code}: {stderr_tail(proc)}")
+                return counter.count
+            finally:
+                # On any failure the remote tar would otherwise block forever on a
+                # full pipe, leaving an ssh process behind.
+                end_process(proc)
 
         return await asyncio.to_thread(_upload)
 
@@ -138,12 +143,14 @@ class Storage:
 
         def _download() -> None:
             assert proc.stdin is not None
-            self.client.download_fileobj(self.bucket, key, proc.stdin)
-            proc.stdin.close()
-            code = proc.wait(timeout=120)
-            if code != 0:
-                err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-                raise RuntimeError(f"sink process exited {code}: {err[-400:]}")
+            try:
+                self.client.download_fileobj(self.bucket, key, proc.stdin)
+                proc.stdin.close()
+                code = proc.wait(timeout=120)
+                if code != 0:
+                    raise RuntimeError(f"sink process exited {code}: {stderr_tail(proc)}")
+            finally:
+                end_process(proc)
 
         await asyncio.to_thread(_download)
 

@@ -76,7 +76,10 @@ SNAPSHOT: tuple[Offer, ...] = (
     Offer("g2-standard-4:nvidia-l4:1", "gcp", "L4", 1, 24, 4, 16, 0.8454, True, 7, True, "Creator"),
     Offer("g2-standard-8:nvidia-l4:1", "gcp", "L4", 1, 24, 8, 32, 1.0243, True, 7, True, "Creator Plus"),
     Offer("g5.xlarge", "aws", "A10G", 1, 24, 4, 16, 1.2072, True, 7, True, "Performance"),
-    Offer("l40s-48gb.1x", "crusoe", "L40S", 1, 48, 8, 147, 1.74, True, 7, False, "Large model"),
+    # Nearest stable match for the old Crusoe l40s-48gb.1x (same L40S 48 GB GPU and
+    # 8 vCPUs). Crusoe capacity appears in and drops out of Brev's feed, while AWS g6e is
+    # listed consistently and is stoppable.
+    Offer("g6e.2xlarge", "aws", "L40S", 1, 48, 8, 64, 2.6905, True, 7, False, "Large model"),
 )
 
 
@@ -85,14 +88,22 @@ class Catalog:
 
     def __init__(self, offers: tuple[Offer, ...] = SNAPSHOT, ttl_seconds: int = 600):
         self._offers = {o.type: o for o in offers}
+        #: Types missing from the last successful live feed. Brev doesn't list them
+        #: right now, so they are never offered or provisioned until they come back.
+        self._unavailable: set[str] = set()
         self._ttl = ttl_seconds
         self._refreshed_at = 0.0
 
     def offers(self) -> list[Offer]:
-        return list(self._offers.values())
+        return [o for t, o in self._offers.items() if t not in self._unavailable]
 
     def get(self, instance_type: str) -> Offer | None:
+        if instance_type in self._unavailable:
+            return None
         return self._offers.get(instance_type)
+
+    def available(self, instance_type: str) -> bool:
+        return instance_type in self._offers and instance_type not in self._unavailable
 
     def mark_checked(self) -> None:
         """Record a refresh attempt so a failing CLI isn't retried on every request."""
@@ -106,7 +117,8 @@ class Catalog:
         """Overlay prices from `brev search gpu --json`. Returns entries updated.
 
         Only types already in the catalog are touched; Brev cannot widen what we
-        are willing to provision.
+        are willing to provision. A well-formed feed also narrows it: any catalog type
+        the feed doesn't list (or marks unavailable) is withheld until it reappears.
         """
         try:
             rows = json.loads(search_json)
@@ -115,13 +127,22 @@ class Catalog:
             return 0
         if isinstance(rows, dict):
             rows = rows.get("items") or rows.get("instances") or []
+        if not isinstance(rows, list) or not rows:
+            log.warning("catalog.live_empty")
+            return 0
         now = datetime.now(UTC)
         updated = 0
+        listed: set[str] = set()
         for row in rows:
+            if not isinstance(row, dict):
+                continue
             offer = self._offers.get(row.get("type", ""))
             price = row.get("price_per_hour")
             if offer is None or not isinstance(price, int | float) or price <= 0:
                 continue
+            if row.get("is_available", row.get("available", True)) is False:
+                continue
+            listed.add(offer.type)
             self._offers[offer.type] = replace(
                 offer,
                 price_per_hour=float(price),
@@ -130,5 +151,12 @@ class Catalog:
                 price_as_of=now,
             )
             updated += 1
+        if listed:
+            # An entirely unrecognised feed is more likely a format change than every
+            # machine vanishing, so only narrow when at least one known type matched.
+            gone = set(self._offers) - listed
+            if gone != self._unavailable:
+                log.info("catalog.availability", unavailable=sorted(gone))
+            self._unavailable = gone
         self._refreshed_at = time.monotonic()
         return updated
