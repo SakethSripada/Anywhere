@@ -73,7 +73,9 @@ function Overview({ w }: { w: Workload }) {
 
   // Progress: the trainer reports it directly; otherwise estimate from epochs.
   const progressPt = series.get("progress")?.at(-1);
-  const epochs = plan?.intent.epochs ?? null;
+  // The trainer's epoch count: the request's, or the default the control plane picked for the dataset.
+  const configEpochs = plan?.inputs?.train_config?.epochs;
+  const epochs = typeof configEpochs === "number" ? configEpochs : (plan?.intent.epochs ?? null);
   const epochPt = series.get("epoch")?.at(-1);
   const progress = w.status === "succeeded" ? 1 : progressPt ? progressPt.value : epochs && epochPt ? epochPt.value / epochs : null;
   const elapsed = w.startedAt && now ? (live ? now : ms(w.updatedAt)) - ms(w.startedAt) : 0;
