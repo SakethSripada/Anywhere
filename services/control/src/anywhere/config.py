@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     #: Demo mode: texts from numbers nobody has linked act as this account (an identity
     #: hex), each sender in their own thread, instead of being told to link the number.
     imessage_guest_owner: str | None = None
+    #: SSH host of a GPU box running environments/gen3d-server.py (text to 3D model). When set,
+    #: scene builds generate the subject as a real 3D model instead of stacking primitives.
+    gen3d_host: str | None = None
     #: Shared secret the messaging bridge uses to call this service.
     messaging_bridge_secret: SecretStr | None = None
 

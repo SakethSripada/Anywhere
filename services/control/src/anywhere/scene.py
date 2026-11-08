@@ -146,8 +146,66 @@ def extract_code(text: str) -> str:
     return text.removeprefix("```python").removeprefix("```").removesuffix("```").strip()
 
 
-async def write_script(settings: Settings, request: str, previous: str = "", error: str = "") -> str:
+SUBJECT_PROMPT = """Decide whether this 3D render request has ONE main subject that a text-to-3D model should
+generate (an object, vehicle, creature, character, building or product). Reply with ONLY JSON:
+{"object": "<the subject in under 12 words, with its key colours and materials>", "height": <its real height in metres>}
+or {"object": ""} when the request is a landscape, a city, space, abstract art, text, or a whole scene with no single subject.
+Examples: "a pirate ship on the ocean at sunset" -> {"object": "a wooden pirate ship with black sails and cannons", "height": 14}
+"a neon city at night" -> {"object": ""}"""
+
+
+async def pick_subject(settings: Settings, request: str) -> tuple[str, float] | None:
+    reply = await coder(settings).ainvoke([SystemMessage(SUBJECT_PROMPT), HumanMessage(request)])
+    text = _THINK.sub("", reply.content if isinstance(reply.content, str) else str(reply.content))
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return None
+    obj = str(data.get("object") or "").strip()
+    if not obj:
+        return None
+    try:
+        height = float(data.get("height") or 6)
+    except (TypeError, ValueError):
+        height = 6.0
+    return obj, max(0.5, min(height, 120.0))
+
+
+async def gen3d(settings: Settings, prompt: str) -> bytes | None:
+    """A textured mesh of `prompt` from the GPU box's gen3d server, or None."""
+    if not settings.gen3d_host:
+        return None
+    from .remote import Remote
+
+    cmd = (
+        "curl -sf -m 100 -X POST http://127.0.0.1:7860/generate -H 'Content-Type: application/json' "
+        "--data-binary @- | base64 -w0"
+    )
+    try:
+        res = await Remote(settings.gen3d_host).run(cmd, input=json.dumps({"prompt": prompt}).encode(), timeout=120)
+        glb = base64.b64decode(res.stdout.strip())
+        return glb if glb[:4] == b"glTF" else None
+    except Exception as exc:
+        log.warning("scene.gen3d_failed", error=str(exc)[:200])
+        return None
+
+
+async def write_script(
+    settings: Settings, request: str, previous: str = "", error: str = "", hero: tuple[str, float] | None = None
+) -> str:
     messages = [SystemMessage(SCENE_PROMPT), HumanMessage(f"Build this: {request}")]
+    if hero:
+        messages.append(
+            HumanMessage(
+                f"A detailed, textured 3D model of '{hero[0]}' is being generated for you. Place it with "
+                f"hero = kit.hero(height={hero[1]:g}, location=(0, 0, 0)) and build only the setting around it "
+                "(sky, ground or water, a few props, lighting). Do NOT build the subject from primitives. "
+                "Pass subject=hero to kit.orbit_camera."
+            )
+        )
     if error:
         messages.append(
             HumanMessage(
@@ -161,6 +219,9 @@ async def write_script(settings: Settings, request: str, previous: str = "", err
 
 
 MODEL_PATH = "/tmp/anywhere-model.glb"
+#: Where the generated subject goes on the desktop machine: the projects folder the container mounts
+#: at /projects (kit.hero's default path). Relative to the SSH user's home.
+HERO_FILE = "workspace/anywhere/projects/hero.glb"
 #: Rendered pictures and their links stay valid this long (R2 allows up to 7 days).
 LINK_SECONDS = 6 * 24 * 3600
 
@@ -234,12 +295,23 @@ async def build(
             await app.send_text(owner, handle, f"I couldn't build that one: {reason}")
 
     try:
-        async with connect_screen(app.supervisor.remote(w), app.vault.agent_token(wid)) as screen:
-            code = await write_script(app.settings, request)
+        remote = app.supervisor.remote(w)
+        hero = await pick_subject(app.settings, request) if app.settings.gen3d_host else None
+        # Generate the subject's 3D model while the setting's script is being written.
+        gen = asyncio.create_task(gen3d(app.settings, hero[0])) if hero else None
+        code = await write_script(app.settings, request, hero=hero)
+        model = await gen if gen else None
+        await remote.run(f"rm -f {HERO_FILE}", timeout=20, check=False)
+        if model:
+            await remote.write_file(HERO_FILE, model)
+        elif hero:
+            log.info("scene.no_model", workload=wid)
+            hero = None
+        async with connect_screen(remote, app.vault.agent_token(wid)) as screen:
             outcome = await run_in_blender(screen, code)
             if not outcome.startswith("ok"):
                 log.info("scene.retry", workload=wid, error=outcome[-300:])
-                code = await write_script(app.settings, request, previous=code, error=outcome)
+                code = await write_script(app.settings, request, previous=code, error=outcome, hero=hero)
                 outcome = await run_in_blender(screen, code)
             if not outcome.startswith("ok"):
                 await fail(outcome.splitlines()[-1][:200])
@@ -248,10 +320,13 @@ async def build(
             await post("status", f"Built {title} live in {built:.0f}s. Rendering on the GPU…")
             jpeg = await _render(screen)
             glb = b""
-            exported = await run_in_blender(screen, _EXPORT)
-            if exported.startswith("ok"):
-                _, b64 = await screen.shell(f"base64 -w0 {MODEL_PATH}", timeout=60)
-                glb = base64.b64decode(b64.strip())
+            if model:
+                glb = model  # the generated subject itself: textured, and frames well on a phone
+            else:
+                exported = await run_in_blender(screen, _EXPORT)
+                if exported.startswith("ok"):
+                    _, b64 = await screen.shell(f"base64 -w0 {MODEL_PATH}", timeout=60)
+                    glb = base64.b64decode(b64.strip())
         stamp = int(time.time())
         key = f"renders/{owner}/{wid}/{stamp}.jpg"
         await app.storage.put_bytes(key, jpeg, "image/jpeg")

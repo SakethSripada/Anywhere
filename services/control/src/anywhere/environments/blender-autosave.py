@@ -886,7 +886,64 @@ def _planet(
     return made
 
 
+@_lenient
+def _hero(path="/projects/hero.glb", height=8.0, location=(0, 0, 0), rotation=0.0, roughness=0.55, metallic=0.0):
+    """Place the generated 3D model of the subject: upright, `height` metres tall, standing on
+    location, coloured from its baked vertex colours. Returns the object."""
+    import os as _os
+
+    if not _os.path.exists(path):
+        raise FileNotFoundError("no generated model to place; build the subject from kit primitives instead")
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=path)
+    new = [o for o in bpy.data.objects if o not in before]
+    meshes = [o for o in new if o.type == "MESH"]
+    if not meshes:
+        raise RuntimeError("the generated model had no mesh")
+    for o in new:
+        if o.type != "MESH":
+            o.parent = None
+    obj = meshes[0]
+    if len(meshes) > 1:
+        with bpy.context.temp_override(active_object=obj, selected_editable_objects=meshes):
+            bpy.ops.object.join()
+    for o in new:
+        if o.name in bpy.data.objects and o.type != "MESH":
+            bpy.data.objects.remove(o, do_unlink=True)
+    obj.name = "Hero"
+    obj.parent = None
+    bpy.context.view_layer.update()
+    dims = obj.dimensions
+    s = float(height) / max(dims.z, 1e-4)
+    obj.scale = (obj.scale[0] * s, obj.scale[1] * s, obj.scale[2] * s)
+    obj.rotation_euler.z += float(rotation)
+    x, y, z = _vec(location)
+    obj.location = (x, y, z)
+    bpy.context.view_layer.update()
+    pts = [obj.matrix_world @ mathutils_Vector(c) for c in obj.bound_box]
+    cx = (min(p.x for p in pts) + max(p.x for p in pts)) / 2
+    cy = (min(p.y for p in pts) + max(p.y for p in pts)) / 2
+    obj.location = (obj.location.x + x - cx, obj.location.y + y - cy, obj.location.z + z - min(p.z for p in pts))
+    mesh = obj.data
+    for poly in mesh.polygons:
+        poly.use_smooth = True
+    m = bpy.data.materials.new("HeroMat")
+    m.use_nodes = True
+    b = m.node_tree.nodes["Principled BSDF"]
+    b.inputs["Roughness"].default_value = roughness
+    b.inputs["Metallic"].default_value = metallic
+    names = [a.name for a in getattr(mesh, "color_attributes", [])]
+    if names:
+        col = m.node_tree.nodes.new("ShaderNodeVertexColor")
+        col.layer_name = names[0]
+        m.node_tree.links.new(col.outputs["Color"], b.inputs["Base Color"])
+    mesh.materials.clear()
+    mesh.materials.append(m)
+    return obj
+
+
 kit.show = _show
+kit.hero = _hero
 kit.play = _play
 
 for _name, _fn in {

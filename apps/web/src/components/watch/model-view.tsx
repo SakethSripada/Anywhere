@@ -25,7 +25,12 @@ export function ModelView({ token }: { token: string }) {
   }, [token]);
 
   return (
-    <main className="flex h-dvh flex-col bg-[#0b0b0d] text-white">
+    <main
+      className="flex h-dvh flex-col text-white"
+      // The backdrop lives on the page, not on <model-viewer>: iOS Safari doesn't always paint a
+      // custom element's own background, which left the model floating on nothing.
+      style={{ background: "radial-gradient(120% 90% at 50% 35%, #2a2f3a 0%, #14161c 55%, #0b0b0d 100%)" }}
+    >
       <Script type="module" src="https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js" strategy="afterInteractive" />
       <header className="flex shrink-0 items-baseline gap-3 px-5 pt-5 pb-3">
         <span className="text-[15px] font-semibold tracking-[-0.01em]">Anywhere</span>
@@ -39,11 +44,15 @@ export function ModelView({ token }: { token: string }) {
           "camera-controls": true,
           "auto-rotate": true,
           "touch-action": "pan-y",
-          "shadow-intensity": "1",
-          exposure: "1.1",
+          "shadow-intensity": "1.2",
+          "shadow-softness": "0.8",
+          exposure: "1.25",
+          "tone-mapping": "neutral",
           "environment-image": "neutral",
+          "camera-orbit": "35deg 72deg auto",
+          "interaction-prompt": "auto",
           ar: true,
-          style: { flex: 1, width: "100%", background: "radial-gradient(circle at 50% 40%, #1d1d24, #0b0b0d)" },
+          style: { flex: 1, width: "100%", minHeight: 0, background: "transparent", ["--poster-color" as string]: "transparent" },
         })}
       <footer className="shrink-0 px-5 py-4 text-center text-[12px] text-white/50">Drag to spin · pinch to zoom · built live on an NVIDIA GPU</footer>
     </main>
