@@ -5,106 +5,156 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Anywhere design tokens — infrastructure-console style.
+ * Anywhere design tokens — GPU console.
  *
- * Dark-first, pure neutral greys (no tint), hairline dividers, dense type.
- * One accent, mint green, marks what is live or selected; it never fills
- * large areas. Primary actions are monochrome pills. Flat surfaces; shadows
- * only on things that float.
+ * Near-black canvas, layered greys for depth (canvas → panel → raised),
+ * hairline borders, dense type. Two semantic accents only:
+ *   brand (green)  — live, healthy, you
+ *   agent (violet) — the AI operator: its cursor, its turn, its voice
+ * Everything else is monochrome. Shadows only on things that float.
  */
 
 :root {
-  --radius: 0.5rem;
+  --radius: 0.625rem;
 
-  --background: #ffffff;
-  --foreground: #0b0b0b;
+  --background: #fbfbfa;
+  --foreground: #0c0c0d;
   --card: #ffffff;
-  --card-foreground: #0b0b0b;
+  --card-foreground: #0c0c0d;
   --popover: #ffffff;
-  --popover-foreground: #0b0b0b;
-  --primary: #111111;
-  --primary-foreground: #ffffff;
-  --secondary: #f2f2f2;
-  --secondary-foreground: #111111;
-  --muted: #f4f4f4;
-  --muted-foreground: #6b6b6b;
-  --faint: #9a9a9a;
-  --accent: #f0f0f0;
-  --accent-foreground: #0b0b0b;
-  --subtle: #fafafa;
-  --border: #e8e8e8;
-  --input: #e0e0e0;
-  --ring: #16a34a;
+  --popover-foreground: #0c0c0d;
+  --primary: #121214;
+  --primary-foreground: #fafafa;
+  --secondary: #f1f1f0;
+  --secondary-foreground: #121214;
+  --muted: #f3f3f2;
+  --muted-foreground: #66666d;
+  --faint: #9c9ca3;
+  --accent: #efefee;
+  --accent-foreground: #0c0c0d;
+  --subtle: #f7f7f6;
+  --raised: #ffffff;
+  --border: #e6e6e4;
+  --border-strong: #d6d6d3;
+  --input: #dededb;
+  --ring: #6d5dfc;
 
-  --brand: #15924a;
-  --success: #15924a;
+  --brand: #13a454;
+  --brand-foreground: #ffffff;
+  --agent: #6d5dfc;
+  --agent-soft: color-mix(in oklab, #6d5dfc 10%, transparent);
+  --success: #13a454;
   --warning: #b7791f;
-  --destructive: #d23a3a;
+  --destructive: #d93636;
   --info: #2b7fd1;
 
-  --sidebar: #fafafa;
-  --sidebar-foreground: #0b0b0b;
-  --sidebar-primary: #111111;
+  --sidebar: #f6f6f5;
+  --sidebar-foreground: #0c0c0d;
+  --sidebar-primary: #121214;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #efefef;
-  --sidebar-accent-foreground: #0b0b0b;
-  --sidebar-border: #ebebeb;
-  --sidebar-ring: #16a34a;
+  --sidebar-accent: #ebebea;
+  --sidebar-accent-foreground: #0c0c0d;
+  --sidebar-border: #e6e6e4;
+  --sidebar-ring: #6d5dfc;
 
-  --chart-1: #15924a;
-  --chart-2: #2b7fd1;
+  --chart-1: #13a454;
+  --chart-2: #6d5dfc;
   --chart-3: #b7791f;
   --chart-4: #8a8a8a;
-  --chart-5: #d23a3a;
+  --chart-5: #d93636;
 
-  --screen: #0b0b0b;
+  --screen: #050506;
+  --terminal: #0b0b0c;
+
+  /* Beautiful UI primitives (beautifului.dev, MIT) */
+  --ink: oklch(24.7% 0.006 258.361);
+  --ink-2: oklch(50.6% 0.01 264.477);
+  --ink-3: oklch(69.5% 0.009 264.505);
+  --field: oklch(96.1% 0.001 286.375);
+  --line: oklch(94.6% 0.003 264.542);
+  --line-strong: oklch(91.2% 0.005 258.326);
+  --hover: oklch(97% 0.002 247.839);
+  --hover-2: oklch(93.3% 0.003 247.86);
+  --inset: oklch(97.9% 0.002 247.839);
+  --green: oklch(60.3% 0.155 150.883);
+  --green-tint: oklch(95.8% 0.017 159.118);
+  --red: oklch(62.1% 0.192 23.042);
+  --red-tint: oklch(95.6% 0.017 17.462);
+  --shadow-hairline: 0 0 0 1px var(--line);
+  --shadow-btn: 0 0 0 1px var(--line-strong), 0 0 4px 0 #0000000a;
+  --shadow-overlay: 0 0 0 1px var(--line), 0 25px 50px 0 #0000000d, 0 12px 24px 0 #0000000a, 0 6px 12px 0 #00000008;
 }
 
 .dark {
-  --background: #141414;
-  --foreground: #ececec;
-  --card: #181818;
-  --card-foreground: #ececec;
-  --popover: #1b1b1b;
-  --popover-foreground: #ececec;
-  --primary: #ececec;
-  --primary-foreground: #111111;
-  --secondary: #222222;
-  --secondary-foreground: #ececec;
-  --muted: #1e1e1e;
-  --muted-foreground: #9d9d9d;
-  --faint: #6e6e6e;
-  --accent: #222222;
+  --background: #0a0a0b;
+  --foreground: #ececee;
+  --card: #111113;
+  --card-foreground: #ececee;
+  --popover: #161618;
+  --popover-foreground: #ececee;
+  --primary: #ececee;
+  --primary-foreground: #0d0d0f;
+  --secondary: #1b1b1e;
+  --secondary-foreground: #ececee;
+  --muted: #161618;
+  --muted-foreground: #8e8e96;
+  --faint: #5c5c64;
+  --accent: #1c1c1f;
   --accent-foreground: #ffffff;
-  --subtle: #171717;
-  --border: #262626;
-  --input: #2f2f2f;
-  --ring: #5fd38b;
+  --subtle: #0e0e10;
+  --raised: #18181b;
+  --border: #1f1f23;
+  --border-strong: #2b2b30;
+  --input: #2a2a2f;
+  --ring: #8f84ff;
 
-  --brand: #5fd38b;
-  --success: #5fd38b;
-  --warning: #e6b450;
-  --destructive: #f06a6a;
+  --brand: #4ade80;
+  --brand-foreground: #052e14;
+  --agent: #8f84ff;
+  --agent-soft: color-mix(in oklab, #8f84ff 14%, transparent);
+  --success: #4ade80;
+  --warning: #f0b84f;
+  --destructive: #f26b6b;
   --info: #6aaef0;
 
-  --sidebar: #101010;
-  --sidebar-foreground: #ececec;
-  --sidebar-primary: #ececec;
-  --sidebar-primary-foreground: #111111;
-  --sidebar-accent: #1c1c1c;
+  --sidebar: #08080a;
+  --sidebar-foreground: #ececee;
+  --sidebar-primary: #ececee;
+  --sidebar-primary-foreground: #0d0d0f;
+  --sidebar-accent: #17171a;
   --sidebar-accent-foreground: #ffffff;
-  --sidebar-border: #1f1f1f;
-  --sidebar-ring: #5fd38b;
+  --sidebar-border: #18181c;
+  --sidebar-ring: #8f84ff;
 
-  --chart-1: #5fd38b;
-  --chart-2: #6aaef0;
-  --chart-3: #e6b450;
-  --chart-4: #7a7a7a;
-  --chart-5: #f06a6a;
+  --chart-1: #4ade80;
+  --chart-2: #8f84ff;
+  --chart-3: #f0b84f;
+  --chart-4: #7a7a82;
+  --chart-5: #f26b6b;
+
+  --screen: #030304;
+  --terminal: #08080a;
+
+  --ink: #ececee;
+  --ink-2: #a3a3ab;
+  --ink-3: #6b6b74;
+  --field: #18181b;
+  --line: #222226;
+  --line-strong: #2d2d32;
+  --hover: #161619;
+  --hover-2: #1e1e22;
+  --inset: #0e0e10;
+  --green: oklch(70.5% 0.154 153.814);
+  --green-tint: oklch(70.5% 0.154 153.814 / 0.14);
+  --red: oklch(66.6% 0.18 21.433);
+  --red-tint: oklch(66.6% 0.18 21.433 / 0.14);
+  --shadow-hairline: 0 0 0 1px var(--line);
+  --shadow-btn: 0 0 0 1px oklch(100% 0 0 / 0.08), 0 1px 2px oklch(0% 0 0 / 0.3);
+  --shadow-overlay: 0 0 0 1px oklch(100% 0 0 / 0.12), 0 8px 28px oklch(0% 0 0 / 0.4);
 }
 
 @theme inline {
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
 
   --color-background: var(--background);
@@ -123,6 +173,33 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-subtle: var(--subtle);
+  --color-raised: var(--raised);
+  --color-border-strong: var(--border-strong);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-agent: var(--agent);
+  --color-agent-soft: var(--agent-soft);
+  --color-terminal: var(--terminal);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-field: var(--field);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-hover: var(--hover);
+  --color-hover-2: var(--hover-2);
+  --color-inset: var(--inset);
+  --color-green: var(--green);
+  --color-green-tint: var(--green-tint);
+  --color-red: var(--red);
+  --color-red-tint: var(--red-tint);
+  --shadow-hairline: var(--shadow-hairline);
+  --shadow-btn: var(--shadow-btn);
+  --shadow-overlay: var(--shadow-overlay);
+  --radius-chip: 6px;
+  --radius-control: 8px;
+  --radius-card: 10px;
+  --radius-window: 14px;
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
   --color-destructive: var(--destructive);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -160,13 +237,13 @@
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    font-feature-settings: "cv11", "ss03";
+    font-feature-settings: "ss01", "cv11";
   }
   body {
     @apply bg-background text-foreground text-sm;
   }
   ::selection {
-    background: color-mix(in srgb, var(--brand) 28%, transparent);
+    background: color-mix(in srgb, var(--agent) 32%, transparent);
   }
   * {
     scrollbar-width: thin;
@@ -296,4 +373,168 @@
   transition-property: color, background-color, border-color, box-shadow, opacity, transform;
   transition-duration: 150ms;
   transition-timing-function: var(--ease-out);
+}
+
+/* ── Signature details ─────────────────────────────────────────────── */
+
+/* Section labels: small, tracked, quiet. */
+@utility eyebrow {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/* Faint dotted canvas behind the desktop stream and empty states. */
+@utility canvas-dots {
+  background-color: var(--screen);
+  background-image: radial-gradient(color-mix(in srgb, white 7%, transparent) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* The agent's presence: a slow breathing glow on whatever it is driving. */
+@utility agent-glow {
+  box-shadow:
+    inset 0 0 0 1.5px color-mix(in srgb, var(--agent) 80%, transparent),
+    inset 0 0 48px -12px color-mix(in srgb, var(--agent) 45%, transparent);
+  animation: agent-breathe 2.8s ease-in-out infinite;
+}
+
+@keyframes agent-breathe {
+  50% {
+    box-shadow:
+      inset 0 0 0 1.5px color-mix(in srgb, var(--agent) 55%, transparent),
+      inset 0 0 64px -10px color-mix(in srgb, var(--agent) 30%, transparent);
+  }
+}
+
+/* Click ripple for the agent cursor. */
+@keyframes agent-ripple {
+  from {
+    transform: translate(-50%, -50%) scale(0.3);
+    opacity: 0.9;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(2.4);
+    opacity: 0;
+  }
+}
+
+@utility agent-ripple {
+  animation: agent-ripple 900ms var(--ease-out) forwards;
+}
+
+/* Glass for floating HUDs over the desktop stream. */
+@utility glass {
+  background: color-mix(in srgb, #0c0c0e 78%, transparent);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  color: #ededef;
+}
+
+/* Gradient orb used as the agent's avatar. */
+@utility agent-orb {
+  background:
+    radial-gradient(circle at 30% 28%, rgb(255 255 255 / 0.55), transparent 42%),
+    conic-gradient(from 210deg, #8f84ff, #5b8cff, #b98bff, #8f84ff);
+}
+
+[data-slot="resizable-handle"] {
+  transition: background-color 150ms var(--ease-out);
+}
+[data-slot="resizable-handle"]:hover,
+[data-slot="resizable-handle"][data-separator="active"] {
+  background-color: var(--agent);
+}
+
+@keyframes hud-nudge {
+  20%,
+  60% {
+    transform: translateX(-5px);
+  }
+  40%,
+  80% {
+    transform: translateX(5px);
+  }
+}
+
+/* ── Beautiful UI motion (beautifului.dev, MIT) ─────────────────────── */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes pixel-on {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  18%,
+  42% {
+    opacity: 1;
+  }
+  62% {
+    opacity: 0.15;
+  }
+}
+@keyframes bui-shimmer {
+  from {
+    background-position: 150% center;
+  }
+  to {
+    background-position: -50% center;
+  }
+}
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* The shimmering status label used by Beautiful UI's Thinking and Loading State. */
+@utility bui-shimmer {
+  background-image: linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%);
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: bui-shimmer 1.4s linear infinite;
+}
+
+/* Smooth open/close for collapsible panes (toggled from code, not drags). */
+[data-animating="true"] > [data-panel] {
+  transition: flex-grow 440ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+[data-slot="resizable-panel"] {
+  overflow: hidden !important;
 }
