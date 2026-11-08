@@ -741,7 +741,7 @@ class Supervisor:
             await self.notify(w, "status", f"{w['title']} finished. {where}", attachment=self._preview(w))
             return
         # A split render reports once: when its last part is done.
-        parts = await self._farm_parts(int(chunk["farm_id"]))
+        parts = await self._farm_parts(w["owner"], int(chunk["farm_id"]))
         if parts and all(p["status"] == Status.SUCCEEDED for p in parts):
             first = next((p for p in parts if not _chunk(p).get("offset")), None)
             await self.notify(
@@ -767,9 +767,11 @@ class Supervisor:
     def _preview(self, w: dict) -> str | None:
         return self.vault.get(w["id"]).get("preview")
 
-    async def _farm_parts(self, farm_id: int) -> list[dict]:
+    async def _farm_parts(self, owner: str, farm_id: int) -> list[dict]:
+        """Every part of one split render. All parts share the owner, so read only
+        that owner's workloads instead of every user's."""
         parts = []
-        for w in await _quiet(self.store.workloads()) or []:
+        for w in await _quiet(self.store.workloads_for(owner)) or []:
             try:
                 chunk = json.loads(w["planJson"]).get("inputs", {}).get("chunk") or {}
             except (ValueError, TypeError):
