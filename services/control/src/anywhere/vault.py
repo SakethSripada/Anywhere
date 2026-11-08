@@ -11,12 +11,16 @@ import json
 import os
 import secrets
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 log = structlog.get_logger()
+
+#: A grant younger than this is never treated as unused (its code may be in flight).
+GRANT_GRACE_SECONDS = 600
 
 
 class Vault:
@@ -169,6 +173,42 @@ class Vault:
                     del entries[key]
             self._flush()
             return found
+
+    def purge_unused(self, now_ts: float, client_idle_seconds: float) -> None:
+        """Drop OAuth grants that nothing references any more (no pending code, no
+        live refresh or access token: the connection can never be used again), then
+        registered clients with no grants or pending sign-ins that were registered
+        more than `client_idle_seconds` ago. Without this, open registration fills
+        MAX_CLIENTS for good and dead grants pile up as "connected apps"."""
+        with self._lock:
+            changed = False
+            live = {
+                v.get("grant_id")
+                for section in ("oauth_codes", "oauth_refresh", "mcp_tokens")
+                for v in self._data.get(section, {}).values()
+            }
+            grants = self._data.get("oauth_grants", {})
+            recent = datetime.fromtimestamp(now_ts - GRANT_GRACE_SECONDS, UTC).isoformat()
+            for key in [
+                k for k, g in grants.items() if g.get("id") not in live and (g.get("created_at") or "") < recent
+            ]:
+                del grants[key]
+                changed = True
+            in_use = {g.get("client_id") for g in grants.values()} | {
+                v.get("client_id")
+                for section in ("oauth_requests", "oauth_codes")
+                for v in self._data.get(section, {}).values()
+            }
+            clients = self._data.get("oauth_clients", {})
+            for key in [
+                k
+                for k, c in clients.items()
+                if k not in in_use and now_ts - float(c.get("client_id_issued_at") or 0) > client_idle_seconds
+            ]:
+                del clients[key]
+                changed = True
+            if changed:
+                self._flush()
 
     def purge_expired(self, now_iso: str, now_ts: float) -> None:
         """Drop expired OAuth codes, requests, refresh tokens and access tokens."""
