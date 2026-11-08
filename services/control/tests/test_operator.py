@@ -28,7 +28,8 @@ class FakeScreen:
 
     async def move(self, x, y): ...
     async def drag(self, *a): ...
-    async def scroll(self, *a): ...
+    async def scroll(self, x, y, dy):
+        self.calls.append(("scroll", x, y, dy))
 
     async def type(self, text):
         self.calls.append(("type", text))
@@ -113,3 +114,15 @@ def test_action_schema_requires_fields():
 
     with pytest.raises(ValueError):
         Action(action="drag", x=1, y=1)
+
+
+async def test_scroll_down_is_positive_for_the_model_and_clamped():
+    _, screen, _ = await run(
+        [
+            {"action": "scroll", "x": 100, "y": 100, "dy": 2},
+            {"action": "scroll", "x": 100, "y": 100, "dy": -600},
+            {"action": "done", "text": "ok"},
+        ]
+    )
+    # Cua scrolls up for positive wheel values, so "down 2" is sent as -2.
+    assert screen.calls == [("scroll", 200, 200, -2), ("scroll", 200, 200, 10)]
