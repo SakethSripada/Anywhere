@@ -14,7 +14,7 @@
  * small service exists separately from the Python control plane.
  */
 import { createServer } from "node:http";
-import { Spectrum, type Message, type Space } from "@spectrum-ts/core";
+import { Spectrum, attachment, type Message, type Space } from "@spectrum-ts/core";
 import { imessage } from "@spectrum-ts/imessage";
 import { DbConnection, type Notification } from "@anywhere/stdb";
 
@@ -171,6 +171,11 @@ async function deliver(conn: DbConnection, n: Notification) {
     }
     health.lastOutboundAt = Date.now();
     await conn.reducers.markNotification({ id: n.id, status: "sent" });
+    // The text is out; a picture (a render's first frame) follows on a best-effort basis
+    // so a failed image never re-sends the text.
+    void sendAttachment(n).catch((err: unknown) =>
+      log("warn", "outbound.attachment_failed", { id: String(n.id), error: String(err) }),
+    );
     startedAttempt.delete(n.id);
     log("info", "outbound.sent", { id: String(n.id), handle: redact(n.handle) });
   } catch (err) {
@@ -188,6 +193,23 @@ async function deliver(conn: DbConnection, n: Notification) {
   // Schedule the retry ourselves: the re-marked row is an update, not an insert,
   // and may never reach onInsert, which used to leave it stuck until a reconnect.
   if (retry) void deliver(conn, { ...n, attempts: n.attempts + 1 });
+}
+
+type AttachmentInfo = { url: string; name: string; mime_type: string };
+
+async function sendAttachment(n: Notification) {
+  const res = await fetch(`${config.controlUrl}/v1/bridge/notifications/${n.id}/attachment`, {
+    headers: { "x-bridge-secret": config.bridgeSecret },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (res.status === 404) return;
+  if (!res.ok) throw new Error(`control plane returned ${res.status}`);
+  const info = (await res.json()) as AttachmentInfo;
+  const file = await fetch(info.url, { signal: AbortSignal.timeout(30_000) });
+  if (!file.ok) throw new Error(`storage returned ${file.status}`);
+  const bytes = Buffer.from(await file.arrayBuffer());
+  await (await spaceFor(n.handle)).send(attachment(bytes, { name: info.name, mimeType: info.mime_type }));
+  log("info", "outbound.attachment_sent", { id: String(n.id), bytes: bytes.length });
 }
 
 function connectSpacetime() {

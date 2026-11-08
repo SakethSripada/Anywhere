@@ -62,15 +62,22 @@ class Anywhere:
 
     # ── Notifications ─────────────────────────────────────────────────────
 
-    async def notify(self, w: dict, kind: str, body: str) -> None:
-        """Post a status line into the workload's conversation and to linked phones."""
+    async def notify(self, w: dict, kind: str, body: str, attachment: str | None = None) -> None:
+        """Post a status line into the workload's conversation and to linked phones.
+
+        `attachment` is a storage key (an image) the messaging bridge sends after the text."""
         try:
             await self.store.append_message(int(w["conversationId"]), "assistant", kind, body, int(w["id"]), "system")
         except Exception as exc:
             log.warning("notify.message_failed", error=str(exc))
         try:
             for handle in await self.store.handles_for(w["owner"]):
-                await self.store.enqueue_notification(new_id(), w["owner"], "imessage", handle, body)
+                nid = new_id()
+                if attachment:
+                    # The outbox row only carries text; the bridge asks for the picture by id.
+                    name = attachment.rsplit("/", 1)[-1]
+                    self.vault.section_put("notification_attachments", str(nid), {"key": attachment, "name": name})
+                await self.store.enqueue_notification(nid, w["owner"], "imessage", handle, body)
         except Exception as exc:
             log.warning("notify.imessage_failed", error=str(exc))
 
@@ -132,6 +139,25 @@ class Anywhere:
             log.info("catalog.live_unavailable", error=str(exc))
             self.catalog.mark_checked()
 
+    async def _saved_project(self, w: dict) -> bool:
+        if not self.settings.storage_ready:
+            return False
+        _, key = self.supervisor._project(w)
+        return bool(await self.storage.head(key))
+
+    async def _scene_desktop(self, owner: str) -> int | None:
+        """The desktop a render should take its scene from when none was named: a running
+        one first, else the most recently used one with a saved copy of its files."""
+        desktops = [w for w in await self.store.workloads_for(owner) if w["kind"] == "desktop"]
+        desktops.sort(key=lambda w: w.get("lastActiveAt") or w["createdAt"], reverse=True)
+        running = [w for w in desktops if w["status"] == Status.RUNNING]
+        if running:
+            return int(running[0]["id"])
+        for w in desktops:
+            if w["status"] == Status.STOPPED and await self._saved_project(w):
+                return int(w["id"])
+        return None
+
     async def propose(
         self,
         owner: str,
@@ -142,6 +168,7 @@ class Anywhere:
         auto_approve: bool = True,
         render_from: int | None = None,
         blend_path: str | None = None,
+        scene: str | None = None,
     ) -> dict:
         """Validate an intent into a plan, check policy, and record it as a workload awaiting approval.
 
@@ -165,24 +192,34 @@ class Anywhere:
             }
         source = None
         if intent.kind == "render":
-            # Renders take the project from a running desktop's ~/Projects (no storage needed).
+            # Renders copy the project from a desktop's ~/Projects: live if it's running,
+            # otherwise its last saved copy in storage (so a phone can start one).
+            if blend_path is not None and not blend_path.strip().endswith(".blend"):
+                scene, blend_path = scene or blend_path, None  # a name like "alley", not a path
             if not render_from:
-                return {
-                    "ok": False,
-                    "needs": "source",
-                    "message": "Renders copy the scene from one of your desktops. Save it in ~/Projects on a "
-                    "running desktop, then say which desktop.",
-                }
+                render_from = await self._scene_desktop(owner)
+                if not render_from:
+                    return {
+                        "ok": False,
+                        "needs": "source",
+                        "message": "Renders copy the scene from one of your desktops. Save it in ~/Projects on a "
+                        "desktop first.",
+                    }
             source = await self.owned(owner, render_from)
-            if source["kind"] != "desktop" or source["status"] != Status.RUNNING:
+            if source["kind"] != "desktop":
+                return {"ok": False, "message": "Renders copy the scene from a desktop, not a job."}
+            if source["status"] != Status.RUNNING and not await self._saved_project(source):
                 return {
                     "ok": False,
-                    "message": f"{source['title']} needs to be running so the scene can be copied from it.",
+                    "message": f"{source['title']} isn't running and has no saved copy of its files. "
+                    "Start it so the scene can be copied.",
                 }
             if blend_path is not None:
                 blend_path = blend_path.strip().lstrip("/").removeprefix("Projects/")
                 if not SAFE_PATH.match(blend_path) or ".." in blend_path.split("/"):
                     return {"ok": False, "message": "Give a .blend file inside ~/Projects, like scenes/alley.blend."}
+            if scene is not None:
+                scene = " ".join(scene.split())[:80] or None
 
         result = plan(intent, self.catalog, acct.get("preference", "balanced"))  # type: ignore[arg-type]
         if isinstance(result, Unsupported):
@@ -213,6 +250,7 @@ class Anywhere:
                 "source_workload_id": int(source["id"]),
                 "source_title": source["title"],
                 "blend_path": blend_path,
+                "scene": scene,
             }
 
         decision = budget.evaluate(
