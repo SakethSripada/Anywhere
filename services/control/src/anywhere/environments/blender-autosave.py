@@ -71,6 +71,15 @@ class kit:
             for block in list(coll):
                 if block.users == 0:
                     coll.remove(block)
+        # A fresh world too: skies used to pile up node after node across builds (17 of them),
+        # and the last build's sky leaked into lighting and exposure decisions.
+        scene = bpy.context.scene
+        w = bpy.data.worlds.new("World")
+        old, scene.world = scene.world, w
+        w.use_nodes = True
+        if old is not None and old.users == 0:
+            bpy.data.worlds.remove(old)
+        scene.view_settings.exposure = 0.0
 
     @staticmethod
     def material(name, color=(0.8, 0.8, 0.8), metallic=0.0, roughness=0.5, emission=None, strength=0.0):
@@ -729,11 +738,14 @@ def _water(size=400.0, color=(0.01, 0.05, 0.1), z=0.0):
 
 
 def _is_daylight(world):
-    """A world lit by the physical sky with the sun up (kit.sky day/noon/golden)."""
+    """A world lit by the physical sky with the sun up (kit.sky day/noon/golden): the sky that
+    actually feeds the background, not some leftover node."""
     try:
-        sky = next(n for n in world.node_tree.nodes if n.type == "TEX_SKY")
-        return sky.sun_elevation > 0.15
-    except (StopIteration, AttributeError):
+        bg = next(n for n in world.node_tree.nodes if n.type == "BACKGROUND")
+        link = bg.inputs["Color"].links[0] if bg.inputs["Color"].is_linked else None
+        sky = link.from_node if link and link.from_node.type == "TEX_SKY" else None
+        return bool(sky) and sky.sun_elevation > 0.15
+    except (StopIteration, AttributeError, IndexError):
         return False
 
 
@@ -773,7 +785,7 @@ def _render_still(path="/tmp/anywhere-render.jpg", samples=24, width=960, height
             vs.look = "AgX - Medium High Contrast"
         except TypeError:
             pass
-        vs.exposure = -0.45 if (scene.world and _is_daylight(scene.world)) else 0.0
+        vs.exposure = -0.6 if (scene.world and _is_daylight(scene.world)) else 0.0
         scene.frame_set(scene.frame_start)  # the orbit's opening view, which text faces
         bpy.ops.render.render(write_still=True)
     finally:
@@ -853,8 +865,9 @@ def _sky(time="day", rotation=0.0, strength=1.0):
     link(sky.outputs["Color"], bg.inputs["Color"])
     bg.inputs["Strength"].default_value = strength * (0.35 if elev < 15 else 0.25)
     warm = (1.0, 0.55, 0.25) if elev < 15 else (1.0, 0.95, 0.88)
+    # The physical sky already carries the sun's light; the lamp only adds crisp shadows.
     sun = _base_sun(
-        "Sun", (_math.radians(90 - elev), 0.0, float(rotation) + _math.pi / 2), warm, 4.0 if elev > 15 else 3.0
+        "Sun", (_math.radians(90 - elev), 0.0, float(rotation) + _math.pi / 2), warm, 2.0 if elev > 15 else 2.5
     )
     if hasattr(sun.data, "angle"):
         sun.data.angle = _math.radians(1.5)
