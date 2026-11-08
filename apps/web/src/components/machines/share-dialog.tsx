@@ -41,10 +41,12 @@ function ShareDialog({ w, onClose }: { w: Workload; onClose: () => void }) {
 
   useEffect(() => {
     if (!api.ready) return;
+    const ctl = new AbortController();
     api
-      .get<Status>(`/v1/workloads/${w.id}/share`)
-      .then(setStatus)
-      .catch(() => setStatus({ active: false }));
+      .get<Status>(`/v1/workloads/${w.id}/share`, { signal: ctl.signal })
+      .then((s) => !ctl.signal.aborted && setStatus(s))
+      .catch(() => !ctl.signal.aborted && setStatus({ active: false }));
+    return () => ctl.abort();
   }, [api, w.id]);
 
   async function make() {
