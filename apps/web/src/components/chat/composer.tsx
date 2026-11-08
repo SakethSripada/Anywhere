@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, Check, ChevronDown, FileText, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, Check, ChevronDown, FileText, Paperclip, Square, X } from "lucide-react";
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -35,11 +35,15 @@ export const Composer = forwardRef<
     onSubmit: (text: string, uploadIds: number[]) => Promise<void>;
     placeholder?: string;
     autoFocus?: boolean;
+    /** The agent is mid-task: an empty send button becomes Stop. */
     busy?: boolean;
+    onStop?: () => void;
+    /** What the agent is focused on, shown as a chip. */
+    context?: string;
     compact?: boolean;
     allowAttachments?: boolean;
   }
->(function Composer({ onSubmit, placeholder = "Ask Anywhere to do something…", autoFocus, busy, compact, allowAttachments = true }, ref) {
+>(function Composer({ onSubmit, placeholder = "Ask Anywhere to do something…", autoFocus, busy, onStop, context, compact, allowAttachments = true }, ref) {
   const api = useApi();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -106,9 +110,15 @@ export const Composer = forwardRef<
     }
   }
 
+  const stoppable = busy && !!onStop && !text.trim();
+
   return (
     <div
-      className="w-full rounded-2xl border bg-card transition-[border-color,box-shadow] focus-within:border-foreground/25"
+      className={cn(
+        "group/composer flex w-full cursor-text flex-col gap-2 border border-line bg-field shadow-[0_1px_2px_rgba(0,0,0,0.035)] transition-[border-color,box-shadow] duration-150 focus-within:border-line-strong",
+        compact ? "rounded-control p-2.5" : "rounded-window p-3",
+      )}
+      onClick={(e) => e.target === e.currentTarget && area.current?.focus()}
       onDragOver={(e) => allowAttachments && e.preventDefault()}
       onDrop={(e) => {
         if (!allowAttachments) return;
@@ -117,7 +127,7 @@ export const Composer = forwardRef<
       }}
     >
       {attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2 px-3 pt-3">
+        <div className="flex flex-wrap gap-2">
           {attachments.map((a) => (
             <AttachmentChip key={a.key} a={a} onRemove={() => setAttachments((p) => p.filter((x) => x.key !== a.key))} />
           ))}
@@ -134,11 +144,17 @@ export const Composer = forwardRef<
         placeholder={placeholder}
         aria-label="Message"
         className={cn(
-          "block w-full resize-none bg-transparent px-4 text-[15px] leading-6 outline-none placeholder:text-muted-foreground",
-          compact ? "min-h-11 pt-3" : "min-h-14 pt-4",
+          "block w-full resize-none bg-transparent text-ink outline-none placeholder:text-ink-3",
+          compact ? "min-h-5 text-[13px] leading-[1.45]" : "min-h-12 px-0.5 text-[15px] leading-6",
         )}
       />
-      <div className="flex items-center gap-1 px-2.5 pb-2.5">
+      <div className="flex items-center gap-1">
+        {context && (
+          <span className="inline-flex h-5.5 items-center gap-1 rounded-chip bg-card px-1.5 text-[11.5px] text-ink-2 shadow-hairline">
+            <AtSign className="size-3 text-ink-3" />
+            {context}
+          </span>
+        )}
         {allowAttachments && (
           <>
             <input
@@ -154,9 +170,7 @@ export const Composer = forwardRef<
             />
             <Tooltip>
               <TooltipTrigger
-                render={
-                  <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground" aria-label="Attach a dataset" onClick={() => fileInput.current?.click()} />
-                }
+                render={<Button variant="ghost" size="icon-sm" className="text-ink-3 hover:bg-hover-2 hover:text-ink-2" aria-label="Attach a dataset" onClick={() => fileInput.current?.click()} />}
               >
                 <Paperclip />
               </TooltipTrigger>
@@ -165,15 +179,25 @@ export const Composer = forwardRef<
             <PreferenceMenu />
           </>
         )}
-        <Button
-          size="icon-sm"
-          onClick={() => void send()}
-          disabled={!canSend && !busy}
-          aria-label={busy && !text ? "Agent is working" : "Send"}
-          className="ml-auto size-8 rounded-lg"
-        >
-          {busy && !text.trim() ? <Square className="size-3 fill-current" /> : <ArrowUp className="size-4" />}
-        </Button>
+        <span className="flex-1" />
+        <span className="hidden pr-1.5 text-[11px] text-ink-3 group-focus-within/composer:inline">{text.trim() ? "↵ send · ⇧↵ newline" : ""}</span>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                onClick={() => (stoppable ? onStop?.() : void send())}
+                disabled={!canSend && !stoppable}
+                aria-label={stoppable ? "Stop the agent" : "Send"}
+                className="flex size-7 shrink-0 items-center justify-center rounded-[8px] transition-[background-color,color,transform] duration-200 enabled:active:scale-[0.96]"
+                style={{ background: canSend || stoppable ? "var(--ink)" : "var(--line-strong)", color: canSend || stoppable ? "var(--background)" : "var(--ink-2)" }}
+              />
+            }
+          >
+            {stoppable ? <Square className="size-2.5 fill-current" /> : <ArrowUp className="size-4" strokeWidth={2.4} />}
+          </TooltipTrigger>
+          <TooltipContent>{stoppable ? "Stop the agent" : "Send"}</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   );
@@ -226,7 +250,7 @@ function PreferenceMenu() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger render={<Button variant="ghost" size="sm" className="rounded-full text-muted-foreground" />}>
+      <DropdownMenuTrigger render={<Button variant="ghost" size="sm" className="text-ink-3 hover:bg-hover-2 hover:text-ink-2" />}>
         {current.label}
         <ChevronDown className="size-3.5 opacity-60" />
       </DropdownMenuTrigger>
