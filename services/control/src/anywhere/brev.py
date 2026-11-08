@@ -27,6 +27,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,14 +235,28 @@ class BrevCLI:
             self._invalidate()
 
     async def wait_for(
-        self, name: str, *, want: str = "RUNNING", timeout: float = 1200, interval: float = 10
+        self,
+        name: str,
+        *,
+        want: str = "RUNNING",
+        timeout: float = 1200,
+        interval: float = 10,
+        on_change: Callable[[Instance], Awaitable[None]] | None = None,
     ) -> Instance:
         """Poll `brev ls` until the instance reaches a status. `brev create` may
-        return before the machine exists, so this is the source of truth."""
+        return before the machine exists, so this is the source of truth.
+        `on_change` hears each new (status, shell status) so callers can show progress."""
         deadline = asyncio.get_running_loop().time() + timeout
         last: Instance | None = None
+        seen: tuple[str, str] | None = None
         while asyncio.get_running_loop().time() < deadline:
             last = await self.get(name)
+            if last and on_change and (last.status, last.shell_status) != seen:
+                seen = (last.status, last.shell_status)
+                try:
+                    await on_change(last)
+                except Exception as exc:  # progress is cosmetic; never fail the wait over it
+                    log.warning("brev.on_change_failed", error=str(exc))
             if last and last.status == want and (want != "RUNNING" or last.ready):
                 return last
             if last and last.status == "FAILURE":
