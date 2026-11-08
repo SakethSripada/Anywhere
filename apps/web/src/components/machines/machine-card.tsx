@@ -7,7 +7,7 @@ import { useMemo } from "react";
 import { useAgentState } from "@/lib/agent";
 import { useNow } from "@/lib/data";
 import { cents } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
 import { AppLogo, appKey, appName } from "../app/app-logo";
@@ -73,9 +73,8 @@ export function DesktopPreview({ w }: { w: Workload }) {
 }
 
 export function JobPreview({ w }: { w: Workload }) {
-  const [metrics] = useTable(tables.myMetrics);
+  const mine = useShared("myMetrics").byWorkload.get(w.id) ?? NONE;
   const { loss, progress } = useMemo(() => {
-    const mine = metrics.filter((m) => m.workloadId === w.id);
     return {
       loss: mine
         .filter((m) => m.name === "loss")
@@ -83,7 +82,7 @@ export function JobPreview({ w }: { w: Workload }) {
         .map((m) => m.value),
       progress: mine.filter((m) => m.name === "progress").sort((a, b) => b.step - a.step)[0]?.value,
     };
-  }, [metrics, w.id]);
+  }, [mine]);
   const latest = loss.at(-1);
   return (
     <div className="relative flex h-full flex-col overflow-hidden rounded-[7px] bg-inset">

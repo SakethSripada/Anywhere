@@ -1,16 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { tables, useTable } from "./stdb";
+import { NONE, useShared } from "./tables";
 import { byRecent } from "./workloads";
 
 export function useAccount() {
-  const [rows, ready] = useTable(tables.myAccount);
+  const { rows, ready } = useShared("myAccount");
   return { account: rows[0] ?? null, ready };
 }
 
 export function usePlatform() {
-  const [rows, ready] = useTable(tables.platform);
+  const { rows, ready } = useShared("platform");
   const p = rows[0] ?? null;
   const integrations = useMemo<Record<string, boolean>>(() => {
     try {
@@ -23,37 +23,28 @@ export function usePlatform() {
 }
 
 export function useWorkloads() {
-  const [rows, ready] = useTable(tables.myWorkloads);
-  const workloads = useMemo(() => [...rows].filter((w) => w.status !== "terminated").sort(byRecent), [rows]);
-  return { workloads, all: rows, ready };
+  const { rows, ready, active, byId } = useShared("myWorkloads");
+  return { workloads: active, all: rows, byId, ready };
 }
 
 export function useWorkload(id: bigint | null) {
-  const { all, ready } = useWorkloads();
-  return { workload: id == null ? null : (all.find((w) => w.id === id) ?? null), ready };
+  const { byId, ready } = useShared("myWorkloads");
+  return { workload: id == null ? null : (byId.get(id) ?? null), ready };
 }
 
 export function useConversations() {
-  const [rows, ready] = useTable(tables.myConversations);
+  const { rows, ready } = useShared("myConversations");
   return { conversations: useMemo(() => [...rows].sort(byRecent), [rows]), ready };
 }
 
 export function useMessages(conversationId: bigint | null) {
-  const [rows, ready] = useTable(tables.myMessages);
-  const messages = useMemo(
-    () =>
-      conversationId == null
-        ? []
-        : rows
-            .filter((m) => m.conversationId === conversationId)
-            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-    [rows, conversationId],
-  );
+  const { byConversation, ready } = useShared("myMessages");
+  const messages = conversationId == null ? NONE : (byConversation.get(conversationId) ?? NONE);
   return { messages, ready };
 }
 
 export function useProjects() {
-  const [rows, ready] = useTable(tables.myProjects);
+  const { rows, ready } = useShared("myProjects");
   return { projects: useMemo(() => [...rows].sort(byRecent), [rows]), ready };
 }
 

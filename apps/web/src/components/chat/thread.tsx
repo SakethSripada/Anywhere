@@ -5,10 +5,11 @@ import { ArrowDown } from "lucide-react";
 import Link from "next/link";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LoadingStatus } from "@/components/bui/loader";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { agentBusy, toItems, type ChatItem } from "@/lib/chat";
-import { useNow, useWorkloads } from "@/lib/data";
+import { useNow, useWorkload } from "@/lib/data";
 import { clock, ms } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { href } from "@/lib/workloads";
 import { Markdown } from "./markdown";
@@ -43,8 +44,8 @@ export function Thread({
 }) {
   const items = useMemo(() => toItems(messages), [messages]);
   const now = useNow(1000);
-  const [runs] = useTable(tables.myAgentRuns);
-  const [events] = useTable(tables.myEvents);
+  const runs = useShared("myAgentRuns").rows;
+  const events = useShared("myEvents").rows;
 
   const stream = useMemo<StreamItem[]>(() => {
     const out: StreamItem[] = items.map((item) => ({ kind: "chat", at: itemTime(item), item }));
@@ -140,18 +141,7 @@ function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; f
     case "tools":
       return <ToolRun calls={item.calls} linkMachines={!focused} />;
     case "plan":
-      return compact ? (
-        <PlanRow workloadId={item.m.workloadId} />
-      ) : (
-        <>
-          <div className="xl:hidden">
-            <PlanCard workloadId={item.m.workloadId} />
-          </div>
-          <div className="hidden max-w-md xl:block">
-            <PlanRow workloadId={item.m.workloadId} />
-          </div>
-        </>
-      );
+      return compact ? <PlanRow workloadId={item.m.workloadId} /> : <WidePlan workloadId={item.m.workloadId} />;
     case "status":
       return <StatusLine m={item.m} focused={focused} />;
     case "error":
@@ -161,6 +151,20 @@ function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; f
     default:
       return <Markdown text={item.m.body} className={prose(compact)} />;
   }
+}
+
+/** Full card below xl, compact row at xl and up: mount only the one that shows. */
+function WidePlan({ workloadId }: { workloadId: bigint }) {
+  const xl = useMediaQuery("(min-width: 80rem)") // Tailwind's `xl`;
+  return xl ? (
+    <div className="max-w-md">
+      <PlanRow workloadId={workloadId} />
+    </div>
+  ) : (
+    <div>
+      <PlanCard workloadId={workloadId} />
+    </div>
+  );
 }
 
 function UserBubble({ text, channel, time, compact }: { text: string; channel?: string; time?: string; compact?: boolean }) {
@@ -184,8 +188,7 @@ function UserBubble({ text, channel, time, compact }: { text: string; channel?: 
 }
 
 function StatusLine({ m, focused }: { m: Message; focused: boolean }) {
-  const { all } = useWorkloads();
-  const w = all.find((x) => x.id === m.workloadId);
+  const { workload: w } = useWorkload(m.workloadId);
   return (
     <div className="flex items-baseline gap-2 text-[12.5px] text-ink-2">
       <span className="size-1.5 shrink-0 -translate-y-px rounded-full bg-green" />

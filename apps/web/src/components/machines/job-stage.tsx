@@ -9,7 +9,7 @@ import { ApiError, useApi } from "@/lib/api";
 import { useNow } from "@/lib/data";
 import { bytes, centsRange, clock, compact, duration, ms } from "@/lib/format";
 import { parsePlan } from "@/lib/plan";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE } from "@/lib/workloads";
 import { PlanCard } from "../chat/plan-card";
@@ -20,18 +20,18 @@ import { BootProgress, EventFeed, LiveCost } from "./shared";
 type Point = { step: number; value: number };
 
 function useSeries(workloadId: bigint) {
-  const [rows] = useTable(tables.myMetrics);
+  const rows = useShared("myMetrics").byWorkload.get(workloadId) ?? NONE;
   return useMemo(() => {
     const by = new Map<string, Point[]>();
     for (const r of rows) {
-      if (r.workloadId !== workloadId || !Number.isFinite(r.value)) continue;
+      if (!Number.isFinite(r.value)) continue;
       const list = by.get(r.name);
       if (list) list.push({ step: r.step, value: r.value });
       else by.set(r.name, [{ step: r.step, value: r.value }]);
     }
     for (const list of by.values()) list.sort((a, b) => a.step - b.step);
     return by;
-  }, [rows, workloadId]);
+  }, [rows]);
 }
 
 const PRETTY: Record<string, string> = {
@@ -215,8 +215,8 @@ function fileIcon(name: string) {
 
 function Outputs({ workloadId, expected, done }: { workloadId: bigint; expected: string[]; done: boolean }) {
   const api = useApi();
-  const [rows] = useTable(tables.myArtifacts);
-  const files = useMemo(() => rows.filter((a) => a.workloadId === workloadId && !a.name.startsWith("agent-")), [rows, workloadId]);
+  const rows = useShared("myArtifacts").byWorkload.get(workloadId) ?? NONE;
+  const files = useMemo(() => rows.filter((a) => !a.name.startsWith("agent-")), [rows]);
 
   async function download(key: string) {
     try {

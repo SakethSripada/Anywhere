@@ -2,7 +2,7 @@
 
 import type { AgentRun, AgentStep, Workload } from "@anywhere/stdb";
 import { useMemo } from "react";
-import { tables, useTable } from "./stdb";
+import { NONE, useShared } from "./tables";
 
 /** What the operator recorded for one action (`agent_step.detail` for kind "act"). */
 export type StepDetail = {
@@ -34,14 +34,11 @@ export function parseDetail(step: Pick<AgentStep, "detail">): StepDetail | null 
 export type Control = "agent" | "paused" | "user";
 
 export function useAgentState(w: Workload) {
-  const [runs] = useTable(tables.myAgentRuns);
-  const [steps] = useTable(tables.myAgentSteps);
-  const mine = useMemo(
-    () => runs.filter((r) => r.workloadId === w.id).sort((a, b) => Number(b.startedAt.toMillis() - a.startedAt.toMillis())),
-    [runs, w.id],
-  );
+  const runs = useShared("myAgentRuns");
+  const steps = useShared("myAgentSteps");
+  const mine = runs.byWorkload.get(w.id) ?? NONE;
   const run: AgentRun | undefined = mine[0];
-  const runSteps = useMemo(() => (run ? steps.filter((s) => s.runId === run.id).sort((a, b) => a.seq - b.seq) : []), [steps, run]);
+  const runSteps = (run && steps.byRun.get(run.id)) || NONE;
   const last = runSteps.at(-1);
   const lastAct = useMemo(() => [...runSteps].reverse().find((s) => s.kind === "act"), [runSteps]);
   const working = w.controller === "agent" && run?.status === "running";
@@ -51,8 +48,7 @@ export function useAgentState(w: Workload) {
 
 /** Every step for a workload, newest run first, for the timeline. */
 export function useAllSteps(workloadId: bigint) {
-  const [steps] = useTable(tables.myAgentSteps);
-  return useMemo(() => steps.filter((s) => s.workloadId === workloadId).sort((a, b) => (a.id < b.id ? -1 : 1)), [steps, workloadId]);
+  return useShared("myAgentSteps").byWorkload.get(workloadId) ?? NONE;
 }
 
 export const ACTION_VERB: Record<string, string> = {

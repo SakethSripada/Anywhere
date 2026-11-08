@@ -9,9 +9,9 @@ import { useElapsed } from "@/components/bui/loader";
 import { ACTION_VERB, parseDetail } from "@/lib/agent";
 import { useApi } from "@/lib/api";
 import { parseOutput, type ToolCall } from "@/lib/chat";
-import { useWorkloads } from "@/lib/data";
+import { useWorkload } from "@/lib/data";
 import { duration, ms } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 
 /*
  * Agent tool activity, Codex/Claude style: quiet rows of verb + object chip,
@@ -34,10 +34,10 @@ const LABELS: Record<string, Labels> = {
 };
 
 export function useRun(runId: bigint | null) {
-  const [runs] = useTable(tables.myAgentRuns);
-  const [steps] = useTable(tables.myAgentSteps);
-  const run = runId == null ? undefined : runs.find((r) => r.id === runId);
-  const list = useMemo(() => (runId == null ? [] : steps.filter((s) => s.runId === runId).sort((a, b) => a.seq - b.seq)), [steps, runId]);
+  const runs = useShared("myAgentRuns");
+  const steps = useShared("myAgentSteps");
+  const run = runId == null ? undefined : runs.byId.get(runId);
+  const list = (runId != null && steps.byRun.get(runId)) || NONE;
   return { run, steps: list };
 }
 
@@ -63,11 +63,10 @@ export function ToolRun({ calls, linkMachines = true }: { calls: ToolCall[]; lin
 }
 
 function ToolCallRow({ call, linkMachines }: { call: ToolCall; linkMachines: boolean }) {
-  const { all } = useWorkloads();
+  const { workload } = useWorkload(call.workloadId);
   const l = LABELS[call.name] ?? { running: call.name, done: call.name, failed: call.name, icon: "run" as const };
   const output = call.result ? parseOutput(call.result.output) : null;
   const state = !call.result ? "running" : call.result.ok ? "done" : "failed";
-  const workload = all.find((w) => w.id === call.workloadId);
   const object = objectFor(call, workload?.title);
   const message = typeof output?.message === "string" ? output.message : null;
   const args = Object.entries(call.args).filter(([, v]) => v !== null && v !== undefined && v !== "");
@@ -91,10 +90,9 @@ function ToolCallRow({ call, linkMachines }: { call: ToolCall; linkMachines: boo
 }
 
 function DesktopCall({ call, linkMachines }: { call: ToolCall; linkMachines: boolean }) {
-  const { all } = useWorkloads();
+  const { workload } = useWorkload(call.workloadId);
   const output = call.result ? parseOutput(call.result.output) : null;
   const runId = output?.run_id != null ? BigInt(String(output.run_id)) : null;
-  const workload = all.find((w) => w.id === call.workloadId);
   if (runId == null || !workload) return <ToolCallRow call={call} linkMachines={linkMachines} />;
   return <RunTrace workload={workload} runId={runId} goal={String(call.args.goal ?? "")} linkMachines={linkMachines} />;
 }
@@ -141,7 +139,7 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
   );
 }
 
-function toRows(steps: AgentStep[], working: boolean): TraceRow[] {
+function toRows(steps: readonly AgentStep[], working: boolean): TraceRow[] {
   const rows: TraceRow[] = [];
   const lastAct = [...steps].reverse().find((s) => s.kind === "act");
   for (const s of steps) {
@@ -169,7 +167,7 @@ function toRows(steps: AgentStep[], working: boolean): TraceRow[] {
   return rows;
 }
 
-function LatestShot({ steps, enabled }: { steps: AgentStep[]; enabled: boolean }) {
+function LatestShot({ steps, enabled }: { steps: readonly AgentStep[]; enabled: boolean }) {
   const shot = useLatestShot(steps, enabled);
   if (!shot) return null;
   return (
@@ -189,7 +187,7 @@ function cachedShot(key: string | null) {
   return hit && Date.now() - hit.at < SHOT_TTL ? hit.url : null;
 }
 
-function useLatestShot(steps: AgentStep[], enabled: boolean) {
+function useLatestShot(steps: readonly AgentStep[], enabled: boolean) {
   const api = useApi();
   const apiRef = useRef(api);
   useEffect(() => {
