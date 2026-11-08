@@ -719,3 +719,31 @@ async def test_a_failed_type_is_remembered_and_skipped_next_launch(tmp_path):
     await drain(sup)
     assert store.rows[2]["instanceType"] == "n1-standard-4:nvidia-tesla-t4:1"
     assert [c for c in brev.calls if c[0] == "create"] == [("create", instance_name(2))]
+
+
+async def test_reconcile_keeps_a_machine_launched_under_a_fallback_name(tmp_path):
+    # Seen live: the reconciler deleted a booting GCP fallback because its name
+    # (anywhere-<id>-1) wasn't the default instance name.
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    store.add(status="provisioning")
+    fallback = f"{instance_name(1)}-1"
+    sup.vault.update(1, instance=fallback)
+    brev.instances[fallback] = "DEPLOYING"
+    await sup.reconcile(await store.workloads())
+    await sup.reconcile(await store.workloads())
+    assert fallback in brev.instances
+    assert ("delete", fallback) not in brev.calls
+
+
+def test_benched_machine_types_survive_a_restart(tmp_path):
+    from anywhere.catalog import Catalog
+
+    path = tmp_path / "benched.json"
+    first = Catalog()
+    first.persist_to(path)
+    first.mark_failed("g4dn.xlarge")
+    second = Catalog()
+    second.persist_to(path)
+    assert second.recently_failed("g4dn.xlarge")
+    assert not second.recently_failed("g5.xlarge")

@@ -11,6 +11,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
 
@@ -62,6 +63,7 @@ class Anywhere:
         self.readiness = Readiness(self.settings, brev=self.brev, storage=self.storage)
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
         self.supervisor.catalog = self.catalog
+        self.catalog.persist_to(Path(self.settings.data_dir) / "benched-machines.json")
         self.supervisor.integrations = self.readiness.integrations
         #: Serialises "check the budget and concurrency cap, then start a machine" so
         #: two approvals (or an auto-approve racing a manual one) can't both pass.

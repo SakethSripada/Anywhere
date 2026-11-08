@@ -201,8 +201,13 @@ class Supervisor:
         ]
         return min(options, key=lambda o: o.price_per_hour, default=None)
 
+    def _instance(self, workload_id: int) -> str:
+        """The Brev instance a workload runs on. Usually `instance_name(id)`, but a
+        launch that fell back to another provider records a suffixed name."""
+        return self.vault.get(workload_id).get("instance") or instance_name(workload_id)
+
     def remote(self, w: dict) -> Remote:
-        name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+        name = self._instance(w["id"])
         return self.remote_factory(name)
 
     # ── Entry points ──────────────────────────────────────────────────────
@@ -438,7 +443,7 @@ class Supervisor:
                         w, f"Couldn't upload a snapshot ({exc}); files remain on the stopped disk.", "warn"
                     )
             await self._transition(w, Status.STOPPING, reason)
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             await self._settle_usage(w)
             try:
                 if w["stoppable"] and w["kind"] == "desktop":
@@ -491,7 +496,7 @@ class Supervisor:
     async def _resume(self, w: dict) -> None:
         self._close_idle_stops(int(w["id"]))
         async with self._lock(w["id"]):
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             try:
                 await self._transition(w, Status.PROVISIONING, "Resuming your machine")
                 await self._event(w, BOOT_RESUME)
@@ -513,7 +518,7 @@ class Supervisor:
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
             await self.shots.close(w["id"])
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             if w["status"] == Status.RUNNING and w["kind"] == "desktop":
                 await self._transition(w, Status.SAVING, "Saving before deleting")
                 with contextlib.suppress(Exception):
@@ -565,7 +570,7 @@ class Supervisor:
             await self.stop_agent(w["id"])
         await self.vnc.close(w["id"])
         await self.shots.close(w["id"])
-        name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+        name = self._instance(w["id"])
         await self._settle_usage(w)
         with contextlib.suppress(ReducerRejected):
             await self._transition(w, Status.FAILED, message)
@@ -711,7 +716,7 @@ class Supervisor:
                 await self._fail(w, exc)
                 return
             await self._settle_usage(w)
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             await self._force_delete(w, name, "Machine released after training", final=None)
         await self.notify(w, "status", f"{w['title']} finished. Your adapter and samples are ready to download.")
 
@@ -816,7 +821,7 @@ class Supervisor:
                 await self._fail(w, exc)
                 return
             await self._settle_usage(w)
-            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            name = self._instance(w["id"])
             await self._force_delete(w, name, "Machine released after rendering", final=None)
         if not chunk:
             await self.notify(w, "status", f"{w['title']} finished. {where}", attachment=self._preview(w))
@@ -1084,11 +1089,11 @@ class Supervisor:
         # is approved, mid-operation, or has a vault entry as owned, and only delete
         # an instance that is still unowned on the next pass as well.
         owned = {
-            instance_name(w["id"])
+            self._instance(w["id"])
             for w in workloads
             if w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])
         }
-        owned |= {instance_name(wid) for wid, t in self._tasks.items() if not t.done()}
+        owned |= {self._instance(wid) for wid, t in self._tasks.items() if not t.done()}
         candidates = {
             inst.name
             for inst in instances
@@ -1100,7 +1105,7 @@ class Supervisor:
             return
         fresh = {w["id"]: w for w in await self.store.workloads()}
         for name in sorted(confirmed):
-            w = next((w for w in fresh.values() if instance_name(w["id"]) == name), None)
+            w = next((w for w in fresh.values() if self._instance(w["id"]) == name), None)
             if w and (w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])):
                 continue
             log.warning("reconcile.orphan", instance=name)

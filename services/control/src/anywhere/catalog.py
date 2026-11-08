@@ -15,6 +15,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 import structlog
@@ -93,7 +94,9 @@ class Catalog:
         self._unavailable: set[str] = set()
         #: Types Brev recently failed to deliver (monotonic time they're trusted again).
         #: Brev still lists them, but planning around them wastes a 4 minute boot.
+        #: Wall-clock (epoch) seconds, so the bench survives a restart via `persist_to`.
         self._failed_until: dict[str, float] = {}
+        self._failed_path: Path | None = None
         self._ttl = ttl_seconds
         self._refreshed_at = 0.0
 
@@ -101,12 +104,27 @@ class Catalog:
         """What planning may choose: listed by Brev and not recently failed."""
         return [o for t, o in self._offers.items() if t not in self._unavailable and not self.recently_failed(t)]
 
+    def persist_to(self, path: Path) -> None:
+        """Keep benched types in `path` so a restart doesn't retry a known-bad machine."""
+        self._failed_path = path
+        try:
+            data = json.loads(path.read_text())
+            self._failed_until = {str(k): float(v) for k, v in data.items() if float(v) > time.time()}
+        except (OSError, ValueError, AttributeError):
+            self._failed_until = {}
+
     def mark_failed(self, instance_type: str, hours: float = 6) -> None:
-        self._failed_until[instance_type] = time.monotonic() + hours * 3600
+        self._failed_until[instance_type] = time.time() + hours * 3600
         log.info("catalog.deploy_failed", type=instance_type, hours=hours)
+        if self._failed_path is not None:
+            try:
+                self._failed_path.parent.mkdir(parents=True, exist_ok=True)
+                self._failed_path.write_text(json.dumps(self._failed_until))
+            except OSError as exc:
+                log.warning("catalog.persist_failed", error=str(exc))
 
     def recently_failed(self, instance_type: str) -> bool:
-        return self._failed_until.get(instance_type, 0) > time.monotonic()
+        return self._failed_until.get(instance_type, 0) > time.time()
 
     def lookup(self, instance_type: str) -> Offer | None:
         """The catalog entry regardless of availability."""
