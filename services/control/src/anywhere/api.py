@@ -240,6 +240,12 @@ class GoalIn(BaseModel):
     goal: str = Field(min_length=1, max_length=2000)
 
 
+class RenderEstimateIn(BaseModel):
+    blend_path: str | None = Field(None, max_length=300)
+    samples: int | None = Field(None, ge=1, le=65536)
+    frames: int = Field(1, ge=1, le=10000)
+
+
 class UploadIn(BaseModel):
     filename: str = Field(min_length=1, max_length=200)
     content_type: str = Field(default="application/octet-stream", max_length=100)
@@ -369,6 +375,13 @@ def _routes():
         rate_limit(f"action:{owner}", 30)
         await actions[action](app, owner, workload_id)
         return {"ok": True}
+
+    @r.post("/v1/workloads/{workload_id}/render-estimate")
+    async def render_estimate(
+        workload_id: int, body: RenderEstimateIn, owner: str = Identity, app: Anywhere = Depends(anywhere)
+    ):
+        rate_limit(f"render-estimate:{owner}", 6)
+        return await app.estimate_render(owner, workload_id, body.blend_path, body.samples, body.frames)
 
     @r.post("/v1/workloads/{workload_id}/agent/run")
     async def agent_run(workload_id: int, body: GoalIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):

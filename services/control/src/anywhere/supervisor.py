@@ -18,6 +18,7 @@ import base64
 import contextlib
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -465,6 +466,9 @@ class Supervisor:
     # ── Batch ─────────────────────────────────────────────────────────────
 
     async def _configure_batch(self, w: dict, remote: Remote, plan: dict) -> None:
+        if plan.get("requirements", {}).get("environment") == "blender-render":
+            await self._configure_render(w, remote, plan)
+            return
         inputs = plan.get("inputs", {})
         cfg = TrainConfig.model_validate(inputs["train_config"])
         key = inputs["dataset_key"]
@@ -495,15 +499,24 @@ class Supervisor:
         failures = 0
         dead_polls = 0
         starting_polls = 0
+        source = json.loads(w["planJson"]).get("inputs", {}).get("source_workload_id")
+        polls = 0
         while True:
             await asyncio.sleep(self.poll_seconds)
+            polls += 1
+            # A render copies its frames back to the desktop it came from: don't let that
+            # desktop idle-stop before the frames arrive.
+            if source and not self.settings.storage_ready and polls % 6 == 1:
+                src = await _quiet(self.store.workload(int(source)))
+                if src and src["status"] == Status.RUNNING:
+                    await _safe(self.store.record_usage(int(source), int(src["accruedCents"]), touch=True))
             try:
                 res = await remote.run(poll_command(log_offset, metric_lines), timeout=60)
                 failures = 0
             except RemoteError as exc:
                 failures += 1
                 if failures >= 6:
-                    await self._fail(w, RemoteError(f"Lost contact with the training machine: {exc}"))
+                    await self._fail(w, RemoteError(f"Lost contact with the machine: {exc}"))
                     return
                 continue
             poll = parse_poll(res.stdout, log_offset)
@@ -536,7 +549,7 @@ class Supervisor:
                 await self._finish_batch(w, remote)
                 return
             if poll.status.startswith("failed"):
-                await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "Training failed"))
+                await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "The job failed"))
                 return
             # The runner died without writing a status (OOM kill, reboot), the job
             # directory vanished, or the runner never started: don't bill forever.
@@ -548,10 +561,13 @@ class Supervisor:
             else:
                 dead_polls = 0
             if dead_polls >= 3:
-                await self._fail(w, RemoteError("The training process stopped unexpectedly. See the log for details."))
+                await self._fail(w, RemoteError("The job stopped unexpectedly. See the log for details."))
                 return
 
     async def _finish_batch(self, w: dict, remote: Remote) -> None:
+        if json.loads(w["planJson"]).get("requirements", {}).get("environment") == "blender-render":
+            await self._finish_render(w, remote)
+            return
         async with self._lock(w["id"]):
             await self._event(w, "Training finished. Saving outputs")
             try:
@@ -577,6 +593,90 @@ class Supervisor:
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             await self._force_delete(w, name, "Machine released after training", final=None)
         await self.notify(w, "status", f"{w['title']} finished. Your adapter and samples are ready to download.")
+
+    # ── Render jobs ───────────────────────────────────────────────────────
+
+    async def _configure_render(self, w: dict, remote: Remote, plan: dict) -> None:
+        inputs = plan.get("inputs", {})
+        intent = plan.get("intent", {})
+        src = await self.store.workload(int(inputs["source_workload_id"]))
+        if not src or src["owner"] != w["owner"] or src["status"] != Status.RUNNING:
+            raise RemoteError("The desktop with your scene isn't running anymore; start it and try again")
+        src_remote = self.remote(src)
+        blend = inputs.get("blend_path")
+        if not blend:
+            found = await src_remote.run(
+                f"cd {PROJECTS_DIR} && find . -name '*.blend' -not -path './renders/*' -printf '%T@ %P\\n' | sort -nr | head -1",
+                check=False,
+                timeout=30,
+            )
+            blend = found.stdout.strip().partition(" ")[2]
+        if not blend:
+            raise RemoteError("There's no saved .blend in ~/Projects on that desktop")
+        if not BLEND_PATH.match(blend) or ".." in blend.split("/"):
+            raise RemoteError(f"Rename {blend} to use only letters, numbers, spaces and - _ . (no quotes)")
+        await self._event(w, f"Copying your project from {src['title']}")
+        await remote.run(f"rm -rf {JOB_DIR} && mkdir -p {JOB_DIR}/project")
+        await _relay(
+            src_remote,
+            f"tar -czf - -C {PROJECTS_DIR} --exclude=./renders .",
+            remote,
+            f"tar -xzf - -C {JOB_DIR}/project",
+        )
+        version = self.settings.blender_version
+        runner = render(
+            _env("render-run.sh"), BLENDER_VERSION=version, BLENDER_SHA256=BLENDER_SHA256.get(version, ""), BLEND=blend
+        )
+        cfg = {"frames": int(intent.get("render_frames") or 1), "samples": intent.get("render_samples")}
+        await remote.write_file(f"{JOB_DIR}/config.json", json.dumps(cfg).encode())
+        await remote.write_file(f"{JOB_DIR}/render-frames.py", _env("render-frames.py").encode())
+        await remote.write_file(f"{JOB_DIR}/run.sh", runner.encode(), mode="0755")
+        await remote.run(
+            f"cd {JOB_DIR} && rm -f status metrics.jsonl run.log pid && (nohup bash run.sh </dev/null >/dev/null 2>&1 &)"
+        )
+        self.vault.update(w["id"], log_offset=0, metric_lines=0, blend=blend)
+        frames = cfg["frames"]
+        await self._transition(w, Status.RUNNING, f"Rendering {frames} frame{'s' if frames != 1 else ''} of {blend}")
+        await self._event(w, BOOT_RENDERING)
+        await self.notify(
+            w, "status", f"Rendering started on a {w['gpuName']}. I'll message you when the frames are ready."
+        )
+
+    async def _finish_render(self, w: dict, remote: Remote) -> None:
+        async with self._lock(w["id"]):
+            await self._event(w, "Rendering finished. Saving your frames")
+            source = json.loads(w["planJson"]).get("inputs", {}).get("source_workload_id")
+            try:
+                if self.settings.storage_ready:
+                    key = Storage.artifact_key(w["owner"], w["id"], "frames.tar.gz")
+                    proc = remote.popen(f"tar -czf - -C {JOB_DIR} renders", stdout=subprocess.PIPE)
+                    size = await self.storage.upload_stream(proc, key, "application/gzip")
+                    await self.store.add_artifact(new_id(), w["id"], "Rendered frames", key, "application/gzip", size)
+                    where = "Your frames are ready to download."
+                else:
+                    src = await self.store.workload(int(source)) if source else None
+                    if not src or src["status"] != Status.RUNNING:
+                        raise RemoteError(
+                            "Couldn't save the frames: object storage isn't set up and the desktop "
+                            "they came from is no longer running"
+                        )
+                    dest = f"{PROJECTS_DIR}/renders/{w['id']}"
+                    await _relay(
+                        remote,
+                        f"tar -czf - -C {JOB_DIR}/renders .",
+                        self.remote(src),
+                        f"mkdir -p {dest} && tar -xzf - -C {dest}",
+                    )
+                    where = f"Your frames are in ~/Projects/renders/{w['id']} on {src['title']}."
+                    await self._event(w, f"Frames saved to ~/Projects/renders/{w['id']} on {src['title']}", "success")
+                await self._transition(w, Status.SUCCEEDED, "Render complete")
+            except Exception as exc:
+                await self._fail(w, exc)
+                return
+            await self._settle_usage(w)
+            name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
+            await self._force_delete(w, name, "Machine released after rendering", final=None)
+        await self.notify(w, "status", f"{w['title']} finished. {where}")
 
     # ── Desktop agent ─────────────────────────────────────────────────────
 
@@ -894,6 +994,9 @@ def parse_poll(out: str, log_offset: int = 0, chunk: int = 12000) -> Poll:
 BOOT_READY = "Desktop is live"
 BOOT_RESUME = "Restarting the machine"
 BOOT_TRAINING = "Training started"
+BOOT_RENDERING = "Rendering started"
+#: A .blend path relative to ~/Projects that is safe to put in a script (no quotes or `$`).
+BLEND_PATH = re.compile(r"^[\w .@+-]+(/[\w .@+-]+)*\.blend$")
 
 GPU_QUERY = (
     "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw "
@@ -921,7 +1024,7 @@ def parse_gpu_query(stdout: str) -> dict[str, float] | None:
 
 
 def metric_points(rows: list[str]) -> list[dict]:
-    """Translate train.py's JSONL rows into `add_metrics` points."""
+    """Translate the runners' JSONL rows (train.py, render-frames.py) into `add_metrics` points."""
     points = []
     for line in rows:
         try:
@@ -929,6 +1032,12 @@ def metric_points(rows: list[str]) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if not isinstance(row, dict):
+            continue
+        if "frame" in row and row.get("total"):
+            done, total = int(row.get("done", 0) or 0), max(int(row["total"]), 1)
+            points.append({"name": "progress", "step": done, "value": done / total})
+            if isinstance(row.get("seconds"), int | float):
+                points.append({"name": "seconds_per_frame", "step": done, "value": float(row["seconds"])})
             continue
         step = int(row.get("step", 0) or 0)
         for name in ("loss", "eval_loss", "learning_rate", "grad_norm"):
@@ -957,6 +1066,31 @@ async def _until(check: Callable[[], Awaitable[bool]], *, timeout: float, what: 
             return
         await asyncio.sleep(interval)
     raise TimeoutError(f"Timed out waiting for {what}")
+
+
+async def _relay(src: Remote, src_cmd: str, dst: Remote, dst_cmd: str) -> None:
+    """Stream one machine's command output into another machine's command (via this host)."""
+
+    def run() -> tuple[int, int]:
+        a = src.popen(src_cmd, stdout=subprocess.PIPE)
+        b = dst.popen(dst_cmd, stdin=subprocess.PIPE)
+        try:
+            shutil.copyfileobj(a.stdout, b.stdin, 1 << 20)  # type: ignore[arg-type]
+        finally:
+            b.stdin.close()  # type: ignore[union-attr]
+        return a.wait(), b.wait()
+
+    ra, rb = await asyncio.to_thread(run)
+    if ra or rb:
+        raise RemoteError(f"Copying between machines failed (exit {ra}/{rb})")
+
+
+async def _quiet(coro: Awaitable[Any]) -> Any:
+    try:
+        return await coro
+    except Exception as exc:
+        log.warning("supervisor.lookup_failed", error=str(exc))
+        return None
 
 
 async def _safe(coro: Awaitable[Any]) -> None:

@@ -14,7 +14,7 @@ const LOGOS: Record<string, { src: string; name: string }> = {
 
 /** Which product a machine runs: its desktop app, or PyTorch for training jobs. */
 export function appKey(w: Pick<Workload, "kind" | "planJson">): string {
-  if (w.kind !== "desktop") return "pytorch";
+  if (w.kind !== "desktop") return parsePlan(w.planJson)?.requirements.environment === "blender-render" ? "blender" : "pytorch";
   return parsePlan(w.planJson)?.intent.application ?? "terminal";
 }
 

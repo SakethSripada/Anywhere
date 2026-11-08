@@ -16,6 +16,7 @@ import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 import { Composer, type ComposerHandle } from "../chat/composer";
 import { Thread } from "../chat/thread";
+import { appKey } from "../app/app-logo";
 
 export type AgentPanelHandle = { focus(text?: string): void };
 
@@ -26,9 +27,10 @@ function suggestions(w: Workload, working: boolean): string[] {
     if (working) return ["What are you doing?", "Save when you’re done"];
     return ["Model a low-poly tree in Blender", "What’s on screen?", "Save my project"];
   }
-  if (w.status === "succeeded") return ["Summarize the results", "How do I use the adapter?"];
+  const render = appKey(w) === "blender";
+  if (w.status === "succeeded") return render ? ["Where are my frames?", "How long did each frame take?"] : ["Summarize the results", "How do I use the adapter?"];
   if (w.status === "failed") return ["Why did this fail?", "Retry on a bigger GPU"];
-  return ["How’s training going?", "Any errors in the logs?", "When will it finish?"];
+  return [render ? "How’s the render going?" : "How’s training going?", "Any errors in the logs?", "When will it finish?"];
 }
 
 const STATUS: Record<OrbState, string> = {

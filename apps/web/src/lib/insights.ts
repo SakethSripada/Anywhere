@@ -33,7 +33,7 @@ export function useGpuTelemetry(workloadId: bigint): GpuSeries {
  * sync with BOOT_* in services/control/src/anywhere/supervisor.py). */
 
 const BOOT_START = ["Machine requested", "Restarting the machine"];
-const BOOT_END = ["Desktop is live", "Blender is open", "Training started"];
+const BOOT_END = ["Desktop is live", "Blender is open", "Training started", "Rendering started"];
 
 const FRIENDLY: [RegExp, string][] = [
   [/^Machine requested/, "Brev boots a new GPU machine"],
