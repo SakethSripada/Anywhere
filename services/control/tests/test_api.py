@@ -34,6 +34,7 @@ def test_commands_require_authentication(tmp_path):
             c.post("/v1/bridge/inbound", json={"handle": "+15550100", "text": "hi", "message_id": "m"}).status_code
             == 401
         )
+        assert c.get("/v1/bridge/notifications/1/attachment").status_code == 401
 
 
 def test_vnc_tickets_are_signed_scoped_and_short_lived():

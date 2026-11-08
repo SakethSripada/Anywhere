@@ -11,7 +11,7 @@ from anywhere.planner import Intent
 from anywhere.remote import RemoteError, Result
 from anywhere.stdb import SpacetimeClient
 from anywhere.storage import Storage
-from anywhere.supervisor import metric_points
+from anywhere.supervisor import metric_points, pick_blend
 from anywhere.vault import Vault
 
 from .fakes import FakeBrev
@@ -45,6 +45,10 @@ class ScriptedRemote:
             if needle in command:
                 return Result(0, out, "")
         return Result(0, "", "")
+
+    def popen(self, command, *, stdin=None, stdout=None):
+        ScriptedRemote.log.append(f"popen {command}")
+        return command
 
     async def write_file(self, path, content, mode="0644"):
         ScriptedRemote.log.append(f"write {path}")
@@ -145,6 +149,7 @@ async def test_render_jobs_need_a_running_source_desktop(app):
         "source_workload_id": 11,
         "source_title": "Blender desktop",
         "blend_path": "scenes/alley.blend",
+        "scene": None,
     }
     assert plan["render_time"]["frames"] == 3
 
@@ -244,7 +249,7 @@ async def test_render_parts_render_their_own_frames_into_one_folder(app):
     desktop(app)
     notes = []
 
-    async def notify(w, kind, body):
+    async def notify(w, kind, body, attachment=None):
         notes.append(body)
 
     app.supervisor.notify = notify
@@ -280,3 +285,110 @@ async def test_render_parts_render_their_own_frames_into_one_folder(app):
     app.store.rows[30]["status"] = "running"
     await app.supervisor._finish_batch(app.store.rows[30], app.supervisor.remote(parts[0]))
     assert any("All 6 frames are rendered across 2 GPUs" in n for n in notes)
+
+
+# ── Renders started from a phone ────────────────────────────────────────────
+
+
+class SavedStorage:
+    """Object storage holding saved projects; records what was streamed in and out."""
+
+    def __init__(self, keys=()):
+        self.keys = set(keys)
+        self.uploads: list[str] = []
+        self.downloads: list[tuple[str, str]] = []
+
+    async def head(self, key):
+        return {"ContentLength": 1} if key in self.keys else None
+
+    async def download_stream(self, key, proc):
+        self.downloads.append((key, proc))
+
+    async def upload_stream(self, proc, key, content_type):
+        self.uploads.append(key)
+        self.keys.add(key)
+        return 2048
+
+    def presign_get(self, key, expires=900, filename=None):
+        return f"https://bucket.example/{key}"
+
+
+def with_storage(app, keys=()):
+    app.settings = app.supervisor.settings = Settings(
+        _env_file=None,
+        data_dir=app.settings.data_dir,
+        spacetime_worker_token="w",
+        s3_bucket="b",
+        s3_access_key_id="k",
+        s3_secret_access_key="s",
+    )
+    app.storage = app.supervisor.storage = SavedStorage(keys)
+    return app.storage
+
+
+def test_scene_names_pick_the_matching_blend():
+    listing = "1731000300.0 scenes/city.blend\n1731000200.0 Alley Night v2.blend\n1731000100.0 renders/x.blend\n"
+    assert pick_blend(listing, "my alley scene") == "Alley Night v2.blend"
+    assert pick_blend(listing, None) == "scenes/city.blend"  # newest
+    with pytest.raises(RemoteError, match="couldn't find a scene called .forest.*city.blend"):
+        pick_blend(listing, "forest")
+    with pytest.raises(RemoteError, match="no saved .blend"):
+        pick_blend("1731000100.0 renders/x.blend\n", None)
+
+
+async def test_a_render_can_start_from_a_stopped_desktops_saved_files(app):
+    intent = Intent(kind="render", summary="render my alley scene", render_frames=1)
+    desktop(app, status="stopped")
+    with_storage(app, {Storage.project_key(ALICE, 11)})
+    # No desktop named: the one with the saved files is used, and a bare name is a scene, not a path.
+    r = await app.propose(ALICE, 1, intent, blend_path="alley", auto_approve=False)
+    assert r["ok"], r
+    inputs = json.loads(app.store.rows[r["workload_id"]]["planJson"])["inputs"]
+    assert inputs["source_workload_id"] == 11 and inputs["scene"] == "alley" and inputs["blend_path"] is None
+
+
+async def test_configure_render_restores_a_saved_project_and_finds_the_scene(app):
+    desktop(app, status="stopped")
+    storage = with_storage(app, {Storage.project_key(ALICE, 11)})
+    job = app.store.add(id=20, owner=ALICE, kind="batch", status="configuring", conversationId=1, gpuName="L4")
+    ScriptedRemote.rules = [("find .", "1731000300.0 city.blend\n1731000200.0 alley.blend\n")]
+    plan = {"intent": {"render_frames": 1}, "inputs": {"source_workload_id": 11, "blend_path": None, "scene": "alley"}}
+    await app.supervisor._configure_render(job, app.supervisor.remote(job), plan)
+    assert storage.downloads and storage.downloads[0][0] == Storage.project_key(ALICE, 11)
+    assert not app.relays  # nothing copied from a live desktop
+    assert app.vault.get(20)["blend"] == "alley.blend"
+
+
+async def test_finished_render_texts_the_first_frame(app):
+    desktop(app)
+    storage = with_storage(app)
+    sent = []
+
+    async def notify(w, kind, body, attachment=None):
+        sent.append((body, attachment))
+
+    app.supervisor.notify = notify
+    plan = {"requirements": {"environment": "blender-render"}, "inputs": {"source_workload_id": 11}}
+    job = app.store.add(id=20, owner=ALICE, kind="batch", status="running", conversationId=1, planJson=json.dumps(plan))
+    await app.supervisor._finish_batch(job, app.supervisor.remote(job))
+    preview = Storage.artifact_key(ALICE, 20, "first-frame.jpg")
+    assert preview in storage.uploads
+    assert sent[-1][1] == preview and "finished" in sent[-1][0]
+
+
+async def test_notification_pictures_reach_the_bridge(app):
+    storage = with_storage(app)
+    app.store.handles_for = lambda owner: _value(["+15550100199"])
+    queued = []
+    app.store.enqueue_notification = lambda *a: _value(queued.append(a))
+    app.store.append_message = lambda *a: _value(None)
+    w = {"id": 20, "owner": ALICE, "conversationId": 1}
+    await app.notify(w, "status", "Render finished.", attachment="users/a/workloads/20/first-frame.jpg")
+    nid = queued[0][0]
+    att = app.vault.section_get("notification_attachments", str(nid))
+    assert att == {"key": "users/a/workloads/20/first-frame.jpg", "name": "first-frame.jpg"}
+    assert storage.presign_get(att["key"]).endswith("first-frame.jpg")
+
+
+async def _value(v):
+    return v
