@@ -54,7 +54,7 @@ class Anywhere:
     storage: Storage
     vault: Vault
     catalog: Catalog = field(default_factory=Catalog)
-    #: Why a desktop-agent run is being halted from outside ("paused" or "stopped"),
+    #: Why a desktop-agent run is being halted from outside ("paused", "stopped" or "replaced"),
     #: read by the run as it unwinds so it records the right status.
     _halts: dict[int, str] = field(default_factory=dict, init=False, repr=False)
 
@@ -528,13 +528,21 @@ class Anywhere:
 
     # ── Desktop agent ─────────────────────────────────────────────────────
 
-    async def operate(self, owner: str, workload_id: int, goal: str) -> int:
+    async def operate(self, owner: str, workload_id: int, goal: str, *, replace: bool = False) -> int:
+        """Start the desktop agent on `goal`. With `replace`, a task already in
+        progress is stopped first (the user steering it from chat)."""
         w = await self.owned(owner, workload_id)
         if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
             raise ActionError("The desktop needs to be running first")
         goal = goal.strip()[:2000]
         if not goal:
             raise ActionError("Tell the agent what to do")
+        if replace and self.supervisor.agent_running(workload_id):
+            self._halts[workload_id] = "replaced"
+            try:
+                await self.supervisor.stop_agent(workload_id)
+            finally:
+                self._halts.pop(workload_id, None)
         if w["controller"] != "agent":
             await self.store.set_controller(workload_id, "agent")
         self.vault.update(workload_id, last_goal=goal)
@@ -595,7 +603,7 @@ class Anywhere:
         except asyncio.CancelledError:
             # Halted from outside: the user took over or stopped it, or the machine is stopping.
             halt = self._halts.get(int(w["id"]))
-            status = halt or "stopped"
+            status = "paused" if halt == "paused" else "stopped"
             result = {"paused": PAUSED, "stopped": "Stopped. You have the controls."}.get(halt or "", "")
             raise
         except Exception as exc:
