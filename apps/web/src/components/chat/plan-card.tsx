@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { ACTIVE, href } from "@/lib/workloads";
 import { StatusText } from "../machines/status";
 import { GpuCompare } from "./gpu-compare";
+import { RenderTimeTable } from "./render-time";
 
 function useActions(id: bigint) {
   const api = useApi();
@@ -40,6 +41,7 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
   const { workload: w, ready } = useWorkload(workloadId);
   const { busy, act } = useActions(workloadId);
   const [compare, setCompare] = useState(false);
+  const [renderOpen, setRenderOpen] = useState(false);
 
   if (!w) return ready ? null : <Skeleton className="h-40 w-full max-w-xl rounded-2xl" />;
   const plan = parsePlan(w.planJson);
@@ -74,10 +76,13 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
         <p className="mt-3 text-sm leading-6 text-foreground/80">
           {approach(plan)}.{plan.outputs.length > 0 && ` You’ll get ${lowerList(plan.outputs)}.`}
         </p>
-        {plan.inputs && (
+        {plan.inputs?.dataset_name && (
           <p className="mt-1 text-[13px] text-muted-foreground">
-            Training on {plan.inputs.dataset_name} ({plan.inputs.dataset_rows.toLocaleString()} rows)
+            Training on {plan.inputs.dataset_name} ({(plan.inputs.dataset_rows ?? 0).toLocaleString()} rows)
           </p>
+        )}
+        {plan.requirements.mode === "interactive" && (
+          <p className="mt-1 text-[13px] text-muted-foreground">Billed only while it runs. Stop any time and resume later.</p>
         )}
         {planned &&
           blockers.map((b) => (
@@ -110,6 +115,20 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
             >
               Compare
               <ChevronDown className={cn("size-3.5 transition-transform", compare && "rotate-180")} />
+            </button>
+          )}
+          {!!plan.render_time?.rows.length && (
+            <button
+              type="button"
+              aria-expanded={renderOpen}
+              onClick={() => setRenderOpen((o) => !o)}
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2 py-1 text-[13px] whitespace-nowrap transition-colors hover:text-foreground",
+                renderOpen ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              Render time
+              <ChevronDown className={cn("size-3.5 transition-transform", renderOpen && "rotate-180")} />
             </button>
           )}
           <div className="ml-auto flex items-center gap-2">
@@ -164,6 +183,12 @@ export function PlanCard({ workloadId }: { workloadId: bigint }) {
         </CollapsibleContent>
       </Collapsible>
       {compare && <GpuCompare plan={plan} />}
+      {renderOpen && plan.render_time && (
+        <div className="border-t px-5 py-4">
+          <h4 className="mb-2 text-[13px] font-medium">How long a frame takes</h4>
+          <RenderTimeTable data={plan.render_time} chosen={plan.selected.offer.gpu} />
+        </div>
+      )}
     </article>
   );
 }
