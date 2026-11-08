@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from . import budget, llm
 from .core import ActionError, Anywhere
 from .ids import new_id
-from .lifecycle import BILLABLE, Status
+from .lifecycle import BILLABLE
 from .planner import Intent
 
 log = structlog.get_logger()
@@ -77,13 +77,6 @@ IMESSAGE_RULES = """- This conversation is over iMessage: plain text only, no ma
 - "Render my alley scene": propose kind "render" with scene="alley". Leave render_from_workload_id out
   unless they named a desktop; the desktop holding their files is found for you. Say you'll text them
   when it's done, with the first frame.
-- "Show me" / "send a pic" / "what does it look like": call send_screenshot. The picture arrives right
-  after your reply, so keep the reply short ("Here's the desktop right now.").
-- A desktop task started from here is texted back automatically when it finishes, with a picture of
-  the result. So after operate_desktop, just say it's underway and you'll text when it's done.
-- "Keep me posted" / "update me every N minutes": call set_progress_updates (default 5 minutes if no
-  number was given). "Stop the updates" means every_minutes=0.
-- "How's it going?" / progress questions: call inspect_workload and answer from current_steps.
 - "Let me watch" / "send a link" / "open it on my phone": call share_watch_link and text the url. When a
   desktop you started becomes ready, offer that link."""
 
@@ -111,15 +104,6 @@ class WorkloadArg(BaseModel):
     workload_id: int
 
 
-class ScreenshotArgs(BaseModel):
-    workload_id: int
-
-
-class UpdatesArgs(BaseModel):
-    workload_id: int
-    every_minutes: int = Field(5, description="Minutes between progress texts (1-60); 0 turns updates off.")
-
-
 class OperateArgs(BaseModel):
     workload_id: int
     goal: str = Field(description="A precise, self-contained instruction for what to do on the desktop.")
@@ -132,8 +116,6 @@ class TurnContext:
     channel: str  # "web" | "imessage"
     #: Set when the user is chatting from a desktop or job page.
     focus_workload_id: int | None = None
-    #: Pictures (JPEG bytes) to send after the reply, e.g. a screenshot the user asked for over iMessage.
-    attachments: list[bytes] = field(default_factory=list)
 
 
 FOCUS = """
@@ -301,7 +283,7 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             )
         try:
             # A new goal while it works is the user steering: it replaces the current task.
-            run_id = await app.operate(ctx.owner, workload_id, goal, replace=True, channel=ctx.channel)
+            run_id = await app.operate(ctx.owner, workload_id, goal, replace=True)
             operated[workload_id] = str(run_id)
             return json.dumps(
                 {
@@ -327,47 +309,6 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
         except ActionError as exc:
             return json.dumps({"ok": False, "message": f"Could not stop the desktop agent: {exc}"})
 
-    async def send_screenshot(workload_id: int) -> str:
-        try:
-            w = await app.owned(ctx.owner, workload_id)
-        except ActionError as exc:
-            return json.dumps({"ok": False, "message": str(exc)})
-        if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
-            return json.dumps(
-                {"ok": False, "message": f"{w['title']} isn't a running desktop, so there's nothing to show."}
-            )
-        try:
-            frame = await app.supervisor.shots.frame(
-                int(w["id"]), app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))
-            )
-        except Exception as exc:
-            log.warning("agent.screenshot_failed", workload=workload_id, error=str(exc)[:300])
-            return json.dumps(
-                {"ok": False, "message": "Couldn't reach the desktop for a screenshot. Try again shortly."}
-            )
-        if len(ctx.attachments) < 3:
-            ctx.attachments.append(frame.jpeg)
-        return json.dumps(
-            {"ok": True, "workload_id": workload_id, "message": "Screenshot taken; it is sent right after your reply."}
-        )
-
-    async def set_progress_updates(workload_id: int, every_minutes: int = 5) -> str:
-        try:
-            await app.owned(ctx.owner, workload_id)
-        except ActionError as exc:
-            return json.dumps({"ok": False, "message": str(exc)})
-        minutes = app.set_progress_updates(workload_id, every_minutes)
-        if not minutes:
-            return json.dumps({"ok": True, "workload_id": workload_id, "message": "Progress updates are off."})
-        return json.dumps(
-            {
-                "ok": True,
-                "workload_id": workload_id,
-                "message": f"Texting a progress update with a screenshot every {minutes} min while the desktop "
-                "agent works, plus a message with a picture when it finishes.",
-            }
-        )
-
     async def inspect_workload(workload_id: int) -> str:
         try:
             w = await app.owned(ctx.owner, workload_id)
@@ -379,13 +320,6 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
         for p in sorted(t["metrics"], key=lambda p: p["step"]):
             latest[p["name"]] = {"step": p["step"], "value": round(float(p["value"]), 5)}
         runs = sorted(t["agent_runs"], key=lambda r: r["startedAt"], reverse=True)[:2]
-        current_steps: list[str] = []
-        if runs and runs[0]["status"] == "running":
-            try:
-                steps = await app.store.agent_step_summaries(int(runs[0]["id"]))
-                current_steps = [s["summary"] for s in steps if s["kind"] != "observe"][-8:]
-            except Exception as exc:
-                log.warning("agent.steps_failed", workload=workload_id, error=str(exc)[:200])
         return json.dumps(
             {
                 "ok": True,
@@ -403,9 +337,6 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
                 "log_tail": logs,
                 "outputs": [a["name"] for a in t["artifacts"]],
                 "agent_runs": [{"goal": r["goal"], "status": r["status"], "result": r["result"]} for r in runs],
-                "agent_working_now": app.supervisor.agent_running(int(w["id"])),
-                "current_steps": current_steps,
-                "progress_updates_every_min": int(app.vault.get(int(w["id"])).get("update_every_min") or 0),
             },
             default=str,
         )
@@ -500,31 +431,10 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
         StructuredTool.from_function(
             coroutine=inspect_workload,
             name="inspect_workload",
-            description=(
-                "Status, recent events, latest training metrics, log tail, outputs and agent runs for one workload. "
-                "current_steps lists what the desktop agent has done so far in its running task."
-            ),
+            description="Status, recent events, latest training metrics, log tail, outputs and agent runs for one workload.",
             args_schema=WorkloadArg,
         ),
-        StructuredTool.from_function(
-            coroutine=set_progress_updates,
-            name="set_progress_updates",
-            description=(
-                "Text the user a progress update with a screenshot every N minutes while the desktop agent works "
-                "on this machine. every_minutes=0 turns them off."
-            ),
-            args_schema=UpdatesArgs,
-        ),
     ]
-    if ctx.channel == "imessage":
-        tools.append(
-            StructuredTool.from_function(
-                coroutine=send_screenshot,
-                name="send_screenshot",
-                description="Text the user a live screenshot of a running desktop (sent right after your reply).",
-                args_schema=ScreenshotArgs,
-            )
-        )
     return [_recorded(app, ctx, t) for t in tools]
 
 
