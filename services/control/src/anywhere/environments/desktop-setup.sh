@@ -32,14 +32,18 @@ $DOCKER pull -q "$IMAGE"
 
 if ! $DOCKER container inspect "$NAME" >/dev/null 2>&1; then
   step "Starting the desktop"
-  $DOCKER run -d --name "$NAME" --restart unless-stopped \
+  # 6080 is the interactive VNC bridge, 6081 the view-only one for watch links.
+  if ! out=$($DOCKER run -d --name "$NAME" --restart unless-stopped \
     --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
     -e CUA_ENV_TOKEN="{{CUA_TOKEN}}" \
     --shm-size=2g \
-    -p 127.0.0.1:3211:3211 -p 127.0.0.1:6080:6080 \
+    -p 127.0.0.1:3211:3211 -p 127.0.0.1:6080:6080 -p 127.0.0.1:6081:6081 \
     -v "$ROOT/projects:/projects" \
-    "$IMAGE" >/dev/null \
-    || { echo "::error:: Docker could not start the desktop with GPU access (is the NVIDIA Container Toolkit installed?)"; exit 1; }
+    "$IMAGE" 2>&1); then
+    echo "$out"
+    echo "::error:: Docker could not start the desktop with GPU access: $(echo "$out" | tail -n 1 | cut -c1-200)"
+    exit 1
+  fi
 fi
 
 if ! $DOCKER exec "$NAME" test -f /opt/.anywhere-ready; then
