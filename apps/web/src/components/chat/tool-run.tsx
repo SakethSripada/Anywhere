@@ -8,6 +8,7 @@ import { Trace, type TraceRow } from "@/components/bui/trace";
 import { useElapsed } from "@/components/bui/loader";
 import { ACTION_VERB, parseDetail } from "@/lib/agent";
 import { useApi } from "@/lib/api";
+import { ReplayButton } from "./agent-replay";
 import { parseOutput, type ToolCall } from "@/lib/chat";
 import { useWorkload } from "@/lib/data";
 import { duration, ms } from "@/lib/format";
@@ -127,11 +128,14 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
             {/* The thumbnail sits inside the collapsed area, so only fetch it once the trace is open. */}
             <LatestShot steps={steps} enabled={expanded} />
             {run.result && run.status !== "running" && <p className={run.status === "done" ? "text-[12.5px] text-ink-2" : "text-[12.5px] text-red"}>{run.result}</p>}
-            {linkMachines && (
-              <Link href={`/w/${workload.id}`} className="w-fit text-[12px] text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink-2 hover:decoration-current">
-                {working ? "Watch live" : "Open desktop"}
-              </Link>
-            )}
+            <div className="flex items-center gap-4">
+              {linkMachines && (
+                <Link href={`/w/${workload.id}`} className="w-fit text-[12px] text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink-2 hover:decoration-current">
+                  {working ? "Watch live" : "Open desktop"}
+                </Link>
+              )}
+              {!working && steps.some((s) => s.screenshotKey) && <ReplayButton workloadId={workload.id} runId={runId} />}
+            </div>
           </div>
         )}
       />
