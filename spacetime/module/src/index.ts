@@ -304,21 +304,44 @@ export const init = spacetimedb.init((ctx) => {
 export const onConnect = spacetimedb.clientConnected((_ctx) => {});
 export const onDisconnect = spacetimedb.clientDisconnected((_ctx) => {});
 
-/** Hourly: expire link codes and trim high-volume telemetry older than 14 days. */
+/** Workloads in these states do no more work, so their bulky telemetry can age out. */
+const SETTLED_FOR_RETENTION = new Set(["stopped", "succeeded", "failed", "cancelled", "terminated"]);
+const TELEMETRY_RETENTION_MICROS = 14n * DAY_MICROS;
+const NOTIFICATION_RETENTION_MICROS = 7n * DAY_MICROS;
+
+/**
+ * Hourly: expire link codes and age out telemetry.
+ *
+ * Instead of scanning the high-volume tables (log_chunk, metric_point,
+ * agent_step), walk the small workload table and delete through the
+ * workloadId / runId indexes. Telemetry of a workload that settled more than
+ * 14 days ago is removed (its events, runs and artifacts are kept); delivered
+ * or failed notifications are removed after 7 days.
+ */
 export const runMaintenance = spacetimedb.reducer(
   { name: "run_maintenance", onSchedule: maintenance },
   { arg: maintenance.rowType },
   (ctx) => {
     const now = ctx.timestamp.microsSinceUnixEpoch;
-    for (const code of ctx.db.linkCode.iter()) {
+    for (const code of [...ctx.db.linkCode.iter()]) {
       if (code.expiresAt.microsSinceUnixEpoch < now) ctx.db.linkCode.owner.delete(code.owner);
     }
-    const cutoff = now - 14n * DAY_MICROS;
-    for (const row of ctx.db.logChunk.iter()) {
-      if (row.createdAt.microsSinceUnixEpoch < cutoff) ctx.db.logChunk.id.delete(row.id);
+
+    const telemetryCutoff = now - TELEMETRY_RETENTION_MICROS;
+    for (const w of ctx.db.workload.iter()) {
+      if (!SETTLED_FOR_RETENTION.has(w.status) || w.updatedAt.microsSinceUnixEpoch >= telemetryCutoff) continue;
+      for (const row of [...ctx.db.logChunk.workloadId.filter(w.id)]) ctx.db.logChunk.id.delete(row.id);
+      for (const row of [...ctx.db.metricPoint.workloadId.filter(w.id)]) ctx.db.metricPoint.id.delete(row.id);
+      for (const run of ctx.db.agentRun.workloadId.filter(w.id)) {
+        for (const step of [...ctx.db.agentStep.runId.filter(run.id)]) ctx.db.agentStep.id.delete(step.id);
+      }
     }
-    for (const row of ctx.db.metricPoint.iter()) {
-      if (row.createdAt.microsSinceUnixEpoch < cutoff) ctx.db.metricPoint.id.delete(row.id);
+
+    const notificationCutoff = now - NOTIFICATION_RETENTION_MICROS;
+    for (const status of ["sent", "failed"]) {
+      for (const n of [...ctx.db.notification.status.filter(status)]) {
+        if (n.createdAt.microsSinceUnixEpoch < notificationCutoff) ctx.db.notification.id.delete(n.id);
+      }
     }
   },
 );
@@ -800,10 +823,25 @@ export const myEvents = spacetimedb.view(
   (ctx) => [...ctx.db.workloadEvent.owner.filter(ctx.sender)],
 );
 
+/** The log tail shows the last few thousand lines; older chunks only cost bandwidth. */
+const LOG_VIEW_CHUNKS_PER_WORKLOAD = 300;
+
 export const myLogs = spacetimedb.view(
   { name: "my_logs", public: true },
   t.array(logChunk.rowType),
-  (ctx) => [...ctx.db.logChunk.owner.filter(ctx.sender)],
+  (ctx) => {
+    // Newest chunks per workload only: a long training job appends a chunk every
+    // 10 s, and without a cap every browser downloaded the whole history.
+    const rows = [...ctx.db.logChunk.owner.filter(ctx.sender)].sort((a, b) => (a.id > b.id ? -1 : 1));
+    const kept = new Map<bigint, number>();
+    return rows
+      .filter((r) => {
+        const n = kept.get(r.workloadId) ?? 0;
+        kept.set(r.workloadId, n + 1);
+        return n < LOG_VIEW_CHUNKS_PER_WORKLOAD;
+      })
+      .reverse();
+  },
 );
 
 export const myMetrics = spacetimedb.view(
