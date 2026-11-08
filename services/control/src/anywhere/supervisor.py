@@ -218,24 +218,40 @@ class Supervisor:
             f"rm -f {log_path}.exit; (bash {path} > {log_path} 2>&1; echo $? > {log_path}.exit) </dev/null >/dev/null 2>&1 &",
             timeout=30,
         )
-        seen = 0
+        # Only fetch what was appended since the last poll: the setup log can grow to
+        # megabytes during image pulls, and it used to be re-read in full every 5 s.
+        offset = 0
+        partial = ""
+        recent: list[str] = []
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(5)
             out = (
-                await remote.run(f"cat {log_path} 2>/dev/null; echo; cat {log_path}.exit 2>/dev/null", check=False)
+                await remote.run(
+                    # Read the exit file first: if it exists, the log is complete.
+                    f"ex=$(cat {log_path}.exit 2>/dev/null); sz=$(wc -c < {log_path} 2>/dev/null || echo 0); "
+                    f"tail -c +{offset + 1} {log_path} 2>/dev/null | head -c $((sz - {offset})); "
+                    f'echo; echo "::size::$sz"; echo "$ex"',
+                    check=False,
+                )
             ).stdout
-            lines = out.splitlines()
-            steps = [ln.split("::step::", 1)[1].strip() for ln in lines if "::step::" in ln]
-            for s in steps[seen:]:
-                await self._event(w, s)
-            seen = len(steps)
-            if errors := [ln.split("::error::", 1)[1].strip() for ln in lines if "::error::" in ln]:
-                raise RemoteError(errors[-1])
-            exit_code = lines[-1].strip() if lines else ""
+            body, _, meta = out.rpartition("\n::size::")
+            size_txt, _, exit_txt = meta.partition("\n")
+            if not size_txt.strip().isdigit():
+                continue
+            offset = max(offset, int(size_txt.strip()))
+            chunk = partial + body  # the separator consumed the newline `echo` added
+            *lines, partial = chunk.split("\n")
+            recent = (recent + lines)[-15:]
+            for ln in lines:
+                if "::step::" in ln:
+                    await self._event(w, ln.split("::step::", 1)[1].strip())
+                if "::error::" in ln:
+                    raise RemoteError(ln.split("::error::", 1)[1].strip())
+            exit_code = exit_txt.strip()
             if exit_code.isdigit():
                 if exit_code != "0":
-                    tail = "\n".join(lines[-15:-1])
+                    tail = "\n".join([*recent, partial][-15:])
                     raise RemoteError(f"{Path(path).name} exited {exit_code}\n{tail}")
                 return
         raise RemoteError(f"{Path(path).name} did not finish within {timeout / 60:.0f} minutes")
