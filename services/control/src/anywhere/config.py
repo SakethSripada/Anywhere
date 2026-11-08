@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     #: Central agent: Nemotron 3 Super (tool calling + reasoning). Both ids are in
     #: the integrate.api.nvidia.com catalog and in langchain-nvidia-ai-endpoints'
     #: model table with tool support.
-    planner_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    planner_model: str = "nvidia/nemotron-3.5-super-vl-120b-a12b"
     #: Desktop operator: Nemotron 3.5 Super VL reads screenshots (image input + tools).
     vision_model: str = "nvidia/nemotron-3.5-super-vl-120b-a12b"
     #: Reasoning before each GUI action is slower; off by default for the operator loop.
