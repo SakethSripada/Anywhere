@@ -160,7 +160,7 @@ def rate_limit(key: str, limit: int, window: float = 60) -> None:
     while q and q[0] < now - window:
         q.popleft()
     if len(q) >= limit:
-        raise HTTPException(429, "Slow down a little — try again in a moment")
+        raise HTTPException(429, "Slow down a little and try again in a moment")
     q.append(now)
 
 
@@ -677,7 +677,7 @@ def _routes():
             try:
                 await app.store.link_handle(handle, code, "imessage")
                 return {
-                    "reply": "You're linked. Text me anything you'd like to get done — like “start a Blender desktop”."
+                    "reply": "You're linked. Text me anything you'd like to get done, like “start a Blender desktop”."
                 }
             except ReducerRejected as exc:
                 return {"reply": f"I couldn't link this number: {_clean_reducer_error(str(exc))}."}
