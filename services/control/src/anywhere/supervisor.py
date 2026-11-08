@@ -36,7 +36,7 @@ from .config import ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
-from .remote import Remote, RemoteError
+from .remote import Remote, RemoteError, end_process
 from .stdb import ReducerRejected
 from .storage import Storage, StorageUnavailable
 from .store import Store
@@ -1216,19 +1216,38 @@ async def _until(check: Callable[[], Awaitable[bool]], *, timeout: float, what: 
     raise TimeoutError(f"Timed out waiting for {what}")
 
 
-async def _relay(src: Remote, src_cmd: str, dst: Remote, dst_cmd: str) -> None:
-    """Stream one machine's command output into another machine's command (via this host)."""
+#: Upper bound for copying a project between two machines.
+RELAY_TIMEOUT = 60 * 60
+
+
+async def _relay(src: Remote, src_cmd: str, dst: Remote, dst_cmd: str, *, timeout: float = RELAY_TIMEOUT) -> None:
+    """Stream one machine's command output into another machine's command (via this host).
+
+    If either side dies, or the copy runs past `timeout`, both processes are killed:
+    a receiver that exits mid-copy used to leave the sender blocked on a full pipe
+    (and the copy waiting on it) forever."""
+    a = src.popen(src_cmd, stdout=subprocess.PIPE)
+    b = dst.popen(dst_cmd, stdin=subprocess.PIPE)
 
     def run() -> tuple[int, int]:
-        a = src.popen(src_cmd, stdout=subprocess.PIPE)
-        b = dst.popen(dst_cmd, stdin=subprocess.PIPE)
         try:
             shutil.copyfileobj(a.stdout, b.stdin, 1 << 20)  # type: ignore[arg-type]
+        except (BrokenPipeError, OSError, ValueError):
+            a.kill()  # the receiver is gone: stop the sender instead of letting it block
         finally:
-            b.stdin.close()  # type: ignore[union-attr]
+            with contextlib.suppress(Exception):
+                b.stdin.close()  # type: ignore[union-attr]
         return a.wait(), b.wait()
 
-    ra, rb = await asyncio.to_thread(run)
+    try:
+        ra, rb = await asyncio.wait_for(asyncio.to_thread(run), timeout)
+    except TimeoutError as exc:
+        raise RemoteError("Copying between machines took too long") from exc
+    finally:
+        # Kills anything still running (on timeout this also unblocks the copy thread),
+        # reaps both processes and closes their pipes and stderr files.
+        for proc in (a, b):
+            end_process(proc)
     if ra or rb:
         raise RemoteError(f"Copying between machines failed (exit {ra}/{rb})")
 

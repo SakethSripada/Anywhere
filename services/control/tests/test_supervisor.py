@@ -573,3 +573,39 @@ async def test_setup_failures_keep_the_last_output_on_the_machine_log(tmp_path):
     await sup._fail(w, RemoteError("desktop-setup.sh exited 22\ncurl: (22) The requested URL returned error: 403"))
     assert store.rows[1]["statusDetail"] == "desktop-setup.sh exited 22"
     assert logs and "returned error: 403" in logs[0]
+
+
+class _LocalShell:
+    """A Remote stand-in that runs commands on this host."""
+
+    def popen(self, command, *, stdin=None, stdout=None):
+        import subprocess
+
+        return subprocess.Popen(["sh", "-c", command], stdin=stdin, stdout=stdout, stderr=subprocess.DEVNULL)
+
+
+async def test_relay_does_not_hang_when_the_receiver_exits_early():
+    from anywhere.remote import RemoteError
+    from anywhere.supervisor import _relay
+
+    # The receiver reads 10 bytes and exits; the sender has ~200 MB to send.
+    with pytest.raises(RemoteError):
+        await asyncio.wait_for(
+            _relay(_LocalShell(), "yes | head -c 200000000", _LocalShell(), "head -c 10 >/dev/null; exit 3"), 20
+        )
+
+
+async def test_relay_times_out_and_kills_both_sides():
+    from anywhere.remote import RemoteError
+    from anywhere.supervisor import _relay
+
+    with pytest.raises(RemoteError, match="too long"):
+        await _relay(_LocalShell(), "sleep 30", _LocalShell(), "cat >/dev/null", timeout=0.5)
+
+
+async def test_relay_copies_between_machines(tmp_path):
+    from anywhere.supervisor import _relay
+
+    out = tmp_path / "out"
+    await _relay(_LocalShell(), "printf hello", _LocalShell(), f"cat > {out}")
+    assert out.read_text() == "hello"
