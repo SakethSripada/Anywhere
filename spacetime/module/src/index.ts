@@ -1,6 +1,13 @@
 import { ScheduleAt, Timestamp } from "spacetimedb";
 import { CaseConversionPolicy, schema, SenderError, t, table } from "spacetimedb/server";
-import { canTransition, CONTROLLERS, shouldBumpConversation, usageUpdate, validatePreferences } from "./lifecycle";
+import {
+  canTransition,
+  CONTROLLERS,
+  newestTelemetry,
+  shouldBumpConversation,
+  usageUpdate,
+  validatePreferences,
+} from "./lifecycle";
 
 /*
  * Anywhere's system of record.
@@ -859,7 +866,9 @@ export const myLogs = spacetimedb.view(
 export const myMetrics = spacetimedb.view(
   { name: "my_metrics", public: true },
   t.array(metricPoint.rowType),
-  (ctx) => [...ctx.db.metricPoint.owner.filter(ctx.sender)],
+  // GPU telemetry adds a reading per series every 10 s for every running machine;
+  // browsers get the newest hour of it (training metrics are kept whole).
+  (ctx) => newestTelemetry([...ctx.db.metricPoint.owner.filter(ctx.sender)].sort((a, b) => (a.id < b.id ? -1 : 1))),
 );
 
 export const myAgentRuns = spacetimedb.view(
