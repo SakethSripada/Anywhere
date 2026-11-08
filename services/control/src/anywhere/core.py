@@ -210,6 +210,13 @@ class Anywhere:
         w = await self.owned(owner, workload_id)
         if w["status"] != Status.PLANNED:
             raise ActionError(f"This plan is already {w['status']}")
+        # A plan can sit for a while before it's approved; make sure Brev still
+        # lists its machine type so `brev create` isn't asked for one it can't make.
+        await self.refresh_prices()
+        if not self.catalog.available(w["instanceType"]):
+            raise ActionError(
+                f"Brev isn't offering {w['instanceType']} right now. Ask me for a new plan and I'll pick another machine."
+            )
         acct = await self.account(owner)
         decision = budget.evaluate(
             kind=w["kind"],
