@@ -2,9 +2,12 @@
 
 import type { Workload } from "@anywhere/stdb";
 import { useState, type ReactNode } from "react";
+import { ReplayDialog } from "@/components/chat/agent-replay";
 import { Button } from "@/components/ui/button";
 import { ApiError, useApi } from "@/lib/api";
 import { useNow } from "@/lib/data";
+import { ago, duration, ms } from "@/lib/format";
+import { useShared } from "@/lib/tables";
 import { clockSeconds, elapsed, useBootTimeline, useGpuTelemetry, type Boot } from "@/lib/insights";
 import { cn } from "@/lib/utils";
 import { TelemetryChart } from "./telemetry-chart";
@@ -19,6 +22,7 @@ export function Insights({ w }: { w: Workload }) {
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-4 py-6 sm:px-8">
         <GpuPanel w={w} />
         {w.kind === "desktop" && <RenderPanel w={w} />}
+        {w.kind === "desktop" && <ReplayPanel w={w} />}
         <BootPanel w={w} />
       </div>
     </div>
@@ -365,6 +369,47 @@ function RenderPanel({ w }: { w: Workload }) {
           </div>
         </div>
       )}
+    </Panel>
+  );
+}
+
+/* ── Agent replays ───────────────────────────────────────────────────────── */
+
+function ReplayPanel({ w }: { w: Workload }) {
+  const runs = useShared("myAgentRuns");
+  const steps = useShared("myAgentSteps");
+  const [open, setOpen] = useState<bigint | null>(null);
+  const list = (runs.byWorkload.get(w.id) ?? []).filter((r) => r.status !== "running");
+  const shots = new Map<bigint, number>();
+  for (const s of steps.byWorkload.get(w.id) ?? []) if (s.screenshotKey) shots.set(s.runId, (shots.get(s.runId) ?? 0) + 1);
+
+  return (
+    <Panel title="Agent replays" subtitle="Step through what the agent saw and where it clicked, or download it as a timelapse GIF">
+      {!list.length ? (
+        <p className="text-[13px] text-muted-foreground">No finished agent runs on this desktop yet. Ask the agent to do something in it.</p>
+      ) : (
+        <ol className="-my-2 divide-y">
+          {list.slice(0, 12).map((r) => {
+            const n = shots.get(r.id) ?? 0;
+            const took = r.endedAt ? duration(ms(r.endedAt) - ms(r.startedAt)) : null;
+            return (
+              <li key={String(r.id)} className="flex items-center gap-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13.5px]">{r.goal}</p>
+                  <p className="text-[12px] text-muted-foreground">
+                    {r.status === "done" ? "Finished" : r.status === "paused" ? "Paused" : "Stopped"} {ago(r.startedAt)}
+                    {took ? ` · ${took}` : ""} · {n} screenshot{n === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <Button size="sm" variant="outline" disabled={!n} onClick={() => setOpen(r.id)}>
+                  Replay
+                </Button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {open != null && <ReplayDialog workloadId={w.id} runId={open} onClose={() => setOpen(null)} />}
     </Panel>
   );
 }
