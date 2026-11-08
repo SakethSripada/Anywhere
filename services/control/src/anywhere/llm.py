@@ -34,7 +34,9 @@ def planner(settings: Settings) -> ChatNVIDIA:
         model=settings.planner_model,
         api_key=_key(settings),
         base_url=settings.nvidia_base_url,
-        temperature=0.6,
+        # NVIDIA's model card recommends temperature 1.0 / top_p 0.95 for this
+        # reasoning model across all tasks; lower temperatures degrade its reasoning.
+        temperature=1.0,
         top_p=0.95,
         max_completion_tokens=8192,
     )

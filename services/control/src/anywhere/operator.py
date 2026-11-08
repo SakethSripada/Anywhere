@@ -127,7 +127,9 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
         if not await has_control():
             return {"status": "paused", "result": "You took control. I'll pick up when you hand it back."}
         png = await screen.screenshot()
-        frame = prepare_frame(png)
+        # PIL resize + JPEG encode takes ~50-150 ms; off the loop so it can't stall
+        # the VNC relay or other requests.
+        frame = await asyncio.to_thread(prepare_frame, png)
         return {
             "frame_url": frame.data_url,
             "frame_meta": {"w": frame.width, "h": frame.height, "scale": frame.scale},

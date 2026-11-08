@@ -44,6 +44,8 @@ from .vault import Vault
 log = structlog.get_logger()
 
 JOB_DIR = "~/workspace/anywhere/job"
+#: How often the guard looks for orphaned Brev instances.
+RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
 PROJECTS_DIR = "~/workspace/anywhere/projects"
 
@@ -84,9 +86,18 @@ class Supervisor:
     def __post_init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
         self._agents: dict[int, asyncio.Task] = {}
+        #: Batch-job monitors. Kept apart from `_tasks` (which means "a lifecycle
+        #: operation is in progress") so the guard and Stop can still act on a
+        #: running training job.
+        self._monitors: dict[int, asyncio.Task] = {}
         self._locks: dict[int, asyncio.Lock] = {}
         self.vnc = VncTunnels()
         self._guard_task: asyncio.Task | None = None
+        #: Unowned instances seen on the previous reconcile pass. An instance is only
+        #: deleted after it is unowned on two passes in a row.
+        self._orphan_candidates: set[str] = set()
+        self._last_reconcile = 0.0
+        self._last_platform: tuple | None = None
 
     # ── Task plumbing ─────────────────────────────────────────────────────
 
@@ -108,6 +119,20 @@ class Supervisor:
     def busy(self, wid: int) -> bool:
         t = self._tasks.get(wid)
         return bool(t and not t.done())
+
+    def _start_monitor(self, w: dict) -> None:
+        if (t := self._monitors.get(w["id"])) and not t.done():
+            return
+        task = asyncio.create_task(self._monitor_batch(w), name=f"monitor:{w['id']}")
+        self._monitors[w["id"]] = task
+        task.add_done_callback(lambda t: self._on_done(w["id"], t))
+
+    async def _stop_monitor(self, wid: int) -> None:
+        t = self._monitors.pop(wid, None)
+        if t and not t.done() and t is not asyncio.current_task():
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
 
     async def _transition(self, w: dict, to: Status, detail: str) -> None:
         await self.store.transition(w["id"], to.value, detail)
@@ -184,7 +209,7 @@ class Supervisor:
         if w["kind"] == "desktop":
             await self.notify(w, "status", f"Your {w['title']} is ready.")
         else:
-            await self._monitor_batch(w)
+            self._start_monitor(w)
 
     def _prepull(self, w: dict) -> str:
         return self.settings.desktop_image if w["kind"] == "desktop" else "hello-world"
@@ -199,24 +224,40 @@ class Supervisor:
             " </dev/null >/dev/null 2>&1 &",
             timeout=30,
         )
-        seen = 0
+        # Only fetch what was appended since the last poll: the setup log can grow to
+        # megabytes during image pulls, and it used to be re-read in full every 5 s.
+        offset = 0
+        partial = ""
+        recent: list[str] = []
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(5)
             out = (
-                await remote.run(f"cat {log_path} 2>/dev/null; echo; cat {log_path}.exit 2>/dev/null", check=False)
+                await remote.run(
+                    # Read the exit file first: if it exists, the log is complete.
+                    f"ex=$(cat {log_path}.exit 2>/dev/null); sz=$(wc -c < {log_path} 2>/dev/null || echo 0); "
+                    f"tail -c +{offset + 1} {log_path} 2>/dev/null | head -c $((sz - {offset})); "
+                    f'echo; echo "::size::$sz"; echo "$ex"',
+                    check=False,
+                )
             ).stdout
-            lines = out.splitlines()
-            steps = [ln.split("::step::", 1)[1].strip() for ln in lines if "::step::" in ln]
-            for s in steps[seen:]:
-                await self._event(w, s)
-            seen = len(steps)
-            if errors := [ln.split("::error::", 1)[1].strip() for ln in lines if "::error::" in ln]:
-                raise RemoteError(errors[-1])
-            exit_code = lines[-1].strip() if lines else ""
+            body, _, meta = out.rpartition("\n::size::")
+            size_txt, _, exit_txt = meta.partition("\n")
+            if not size_txt.strip().isdigit():
+                continue
+            offset = max(offset, int(size_txt.strip()))
+            chunk = partial + body  # the separator consumed the newline `echo` added
+            *lines, partial = chunk.split("\n")
+            recent = (recent + lines)[-15:]
+            for ln in lines:
+                if "::step::" in ln:
+                    await self._event(w, ln.split("::step::", 1)[1].strip())
+                if "::error::" in ln:
+                    raise RemoteError(ln.split("::error::", 1)[1].strip())
+            exit_code = exit_txt.strip()
             if exit_code.isdigit():
                 if exit_code != "0":
-                    tail = "\n".join(lines[-15:-1])
+                    tail = "\n".join([*recent, partial][-15:])
                     raise RemoteError(f"{Path(path).name} exited {exit_code}\n{tail}")
                 return
         raise RemoteError(f"{Path(path).name} did not finish within {timeout / 60:.0f} minutes")
@@ -291,6 +332,7 @@ class Supervisor:
     # ── Stop / resume / terminate ─────────────────────────────────────────
 
     async def _stop(self, w: dict, reason: str) -> None:
+        await self._stop_monitor(w["id"])
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
@@ -338,6 +380,7 @@ class Supervisor:
         await self.notify(w, "status", f"{w['title']} is back online.")
 
     async def _terminate(self, w: dict, reason: str) -> None:
+        await self._stop_monitor(w["id"])
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
@@ -506,12 +549,29 @@ class Supervisor:
 
     # ── Accounting & guard ────────────────────────────────────────────────
 
-    def _accrued(self, w: dict) -> int:
+    def _segment(self, w: dict) -> tuple[datetime | None, int]:
+        """Start and already-billed base of the current billing segment.
+
+        The vault holds the precise values, but it is a local file. If it was lost
+        (say, a redeploy without its volume), fall back to SpacetimeDB's `startedAt`,
+        which the transition reducer sets whenever billing starts, so accrual and the
+        session limit keep working instead of silently stopping.
+        """
         v = self.vault.get(w["id"])
-        start = v.get("segment_start")
-        if not start or w["status"] not in BILLABLE:
+        if start := v.get("segment_start"):
+            return datetime.fromisoformat(start), int(v.get("segment_base", 0))
+        started = w.get("startedAt")
+        if w["status"] in BILLABLE and isinstance(started, datetime):
+            self.vault.update(w["id"], segment_start=started.isoformat(), segment_base=int(v.get("segment_base", 0)))
+            return started, int(v.get("segment_base", 0))
+        return None, 0
+
+    def _accrued(self, w: dict) -> int:
+        start, base = self._segment(w)
+        if start is None or w["status"] not in BILLABLE:
             return int(w.get("accruedCents", 0))
-        return budget.accrued_cents(datetime.fromisoformat(start), int(w["hourlyCents"]), int(v.get("segment_base", 0)))
+        # Spend is monotonic: never report less than SpacetimeDB already recorded.
+        return max(budget.accrued_cents(start, int(w["hourlyCents"]), base), int(w.get("accruedCents", 0)))
 
     async def _settle_usage(self, w: dict) -> None:
         cents = self._accrued(w)
@@ -526,6 +586,8 @@ class Supervisor:
     async def shutdown(self) -> None:
         if self._guard_task:
             self._guard_task.cancel()
+        for t in self._monitors.values():
+            t.cancel()
         await self.vnc.close_all()
 
     async def _guard_loop(self) -> None:
@@ -560,8 +622,8 @@ class Supervisor:
             if self.busy(w["id"]):
                 continue
             acct = accounts.get(w["owner"], {})
-            start = self.vault.get(w["id"]).get("segment_start")
-            hours = (_now() - datetime.fromisoformat(start)).total_seconds() / 3600 if start else 0
+            start, _ = self._segment(w)
+            hours = (_now() - start).total_seconds() / 3600 if start else 0
             last = w.get("lastActiveAt")
             idle = (_now() - last).total_seconds() / 60 if last and not self.agent_running(w["id"]) else None
             action = budget.guard(
@@ -587,17 +649,28 @@ class Supervisor:
                 else:
                     self.terminate(w, action.reason)
 
-        await _safe(
-            self.store.update_platform(
-                self.settings.provisioning_mode.value,
-                self.settings.global_budget_cents,
-                platform_cents,
-                len(live),
-                self.settings.max_concurrent_instances,
-                json.dumps((self.integrations or self.settings.integrations)()),
-            )
+        platform = (
+            self.settings.provisioning_mode.value,
+            self.settings.global_budget_cents,
+            platform_cents,
+            len(live),
+            self.settings.max_concurrent_instances,
+            json.dumps((self.integrations or self.settings.integrations)(), sort_keys=True),
         )
-        await self.reconcile(workloads)
+        # The platform row is public: every write fans out to every connected
+        # browser, so only write when something actually changed.
+        if platform != self._last_platform:
+            try:
+                await self.store.update_platform(*platform)
+                self._last_platform = platform
+            except Exception as exc:
+                log.warning("supervisor.write_failed", error=str(exc))
+        # Orphans are rare and the reconcile pass shells out to `brev ls`, so run it
+        # every RECONCILE_SECONDS rather than on every 30 s budget tick.
+        loop_now = asyncio.get_running_loop().time()
+        if loop_now - self._last_reconcile >= RECONCILE_SECONDS:
+            self._last_reconcile = loop_now
+            await self.reconcile(workloads)
 
     async def reconcile(self, workloads: list[dict]) -> None:
         """Delete Anywhere instances that no billable workload owns."""
@@ -608,12 +681,33 @@ class Supervisor:
         except BrevError as exc:
             log.warning("reconcile.list_failed", error=str(exc))
             return
-        owned = {instance_name(w["id"]) for w in workloads if w["status"] in BILLABLE | {Status.STOPPED}}
-        for inst in instances:
-            if inst.name.startswith("anywhere-") and inst.name not in owned and inst.status != "DELETING":
-                log.warning("reconcile.orphan", instance=inst.name)
-                with contextlib.suppress(BrevError):
-                    await self.brev.delete(inst.name)
+        # `workloads` was read at the start of the tick, before the (slow) Brev list,
+        # so a launch may have created its machine in between. Count anything that
+        # is approved, mid-operation, or has a vault entry as owned, and only delete
+        # an instance that is still unowned on the next pass as well.
+        owned = {
+            instance_name(w["id"])
+            for w in workloads
+            if w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])
+        }
+        owned |= {instance_name(wid) for wid, t in self._tasks.items() if not t.done()}
+        candidates = {
+            inst.name
+            for inst in instances
+            if inst.name.startswith("anywhere-") and inst.name not in owned and inst.status != "DELETING"
+        }
+        confirmed = candidates & self._orphan_candidates
+        self._orphan_candidates = candidates - confirmed
+        if not confirmed:
+            return
+        fresh = {w["id"]: w for w in await self.store.workloads()}
+        for name in sorted(confirmed):
+            w = next((w for w in fresh.values() if instance_name(w["id"]) == name), None)
+            if w and (w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])):
+                continue
+            log.warning("reconcile.orphan", instance=name)
+            with contextlib.suppress(BrevError):
+                await self.brev.delete(name)
 
     async def recover(self) -> None:
         """Reattach after a control-plane restart."""
@@ -634,7 +728,7 @@ class Supervisor:
             if status in (Status.PROVISIONING, Status.CONFIGURING, Status.SAVING, Status.STOPPING, Status.APPROVED):
                 await self._fail(w, RuntimeError("Interrupted by a control-plane restart"))
             elif status == Status.RUNNING and w["kind"] == "batch":
-                self._spawn(w["id"], self._monitor_batch(w), name="monitor")
+                self._start_monitor(w)
 
 
 # ── Batch polling protocol ──────────────────────────────────────────────────
