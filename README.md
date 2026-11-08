@@ -264,7 +264,7 @@ MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a cur
 
 639Cloud sells dedicated VMs with root access and custom OS images. That's all Anywhere needs, because GPU work runs on Brev and state lives in SpacetimeDB.
 
-1. Provision a VM with **2 vCPU / 4 GB / 40 GB** running Ubuntu 24.04. Add your SSH key and confirm it has a public IPv4 address (the site doesn't say whether one is included). Point `DOMAIN` at it and open ports 80 and 443.
+1. Provision a VM with **2 vCPU / 4 GB / 40 GB** running Ubuntu 24.04 (22.04 works too). Add your SSH key and confirm it has a public IPv4 address (the site doesn't say whether one is included). Point `DOMAIN` at it and open ports 80 and 443.
 2. Install Docker: `curl -fsSL https://get.docker.com | sh`.
 3. Publish the module to **SpacetimeDB Maincloud**:
    ```bash
@@ -283,6 +283,28 @@ MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a cur
    ```bash
    docker compose -f deploy/docker-compose.yml exec control anywhere doctor
    ```
+
+### Self-hosting SpacetimeDB on the VM
+
+Use this instead of step 3 if you'd rather not use Maincloud. It's how the 639Cloud demo VM runs.
+
+1. In `deploy/.env`, set `SPACETIME_HOST=http://spacetime:3000` and `SPACETIME_PUBLIC_URL=wss://stdb.$DOMAIN`. In `deploy/Caddyfile`, uncomment the `stdb` block and change its address to `stdb.{$DOMAIN}`. `sslip.io` names such as `stdb.203-0-113-7.sslip.io` resolve without any DNS setup.
+2. Start the database: `docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile spacetime up -d spacetime`. The `spacetime-init` service fixes the data volume's ownership first.
+3. Publish the module and allowlist a worker from a throwaway container on the Compose network. Keep the CLI config in `/opt/stdb-cli`: it holds the database owner's login, which you need to republish.
+   ```bash
+   docker run --rm -u root --network anywhere_default -v "$PWD":/repo -v /opt/stdb-cli:/root/.config/spacetime \
+     --entrypoint bash clockworklabs/spacetime:v2.14.1 -c '
+       apt-get update -qq && apt-get install -y -qq curl >/dev/null
+       curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null && apt-get install -y -qq nodejs >/dev/null
+       cd /repo && corepack pnpm install --frozen-lockfile --filter "@anywhere/spacetime-module..."
+       spacetime server add --url http://spacetime:3000 selfhost --default --no-fingerprint
+       cd spacetime/module && spacetime publish anywhere -y
+       curl -fsS -X POST http://spacetime:3000/v1/identity'   # prints the worker identity and token
+   ```
+   Then allowlist the printed identity with `spacetime sql anywhere "INSERT INTO worker (identity, label) VALUES (0x<identity>, 'control')"` from the same kind of container, and put the token in `SPACETIME_WORKER_TOKEN`.
+4. Start everything with both profiles: `--profile spacetime --profile messaging up -d --build`.
+
+The repo is private, so a fresh VM can't `git clone` it. Push from a machine that has access instead: `git init --bare /opt/anywhere.git` on the VM, then `git push ssh://root@<vm>/opt/anywhere.git main` and `git clone /opt/anywhere.git /opt/anywhere`. Later updates are another push, then `git pull`.
 
 ### Object storage (R2)
 

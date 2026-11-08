@@ -169,6 +169,23 @@ async def test_billing_survives_a_lost_vault(tmp_path):
     assert store.rows[1]["status"] in ("stopped", "stopping", "saving")  # session limit enforced
 
 
+async def test_stopping_a_desktop_does_not_bill_the_segment_twice(tmp_path):
+    # Seen live: the bill is settled when a stop begins, but the row stays `stopping`
+    # (billable) for minutes while Brev shuts down. The guard must not re-open the
+    # segment from `startedAt` and add it on top of what was already settled.
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    w = store.add(kind="desktop", status="running", hourlyCents=100, startedAt=ago(30), lastActiveAt=ago(1))
+    sup.vault.update(1, segment_start=ago(30).isoformat(), segment_base=0)
+    await sup._settle_usage(w)
+    settled = store.rows[1]["accruedCents"]
+    assert 50 <= settled <= 51  # 30 min at $1/h
+    store.rows[1]["status"] = "stopping"
+    await sup.tick()
+    await sup.tick()
+    assert store.rows[1]["accruedCents"] == settled
+
+
 async def test_brev_list_is_shared_and_invalidated_by_mutations(monkeypatch):
     from anywhere.brev import BrevCLI
 
