@@ -243,3 +243,30 @@ async def test_streamed_setup_reads_new_output_and_reports_steps(tmp_path, monke
     with pytest.raises(RemoteError, match="exited 3") as err:
         await sup._run_streamed(w, remote, bad, f"{mod.STATE_DIR}/bad.sh", timeout=20)
     assert "boom detail" in str(err.value)
+
+
+async def test_vnc_tunnel_is_reopened_when_it_dies():
+    import contextlib as cl
+
+    from anywhere.desktop import VncTunnels
+
+    opened: list[asyncio.base_events.Server] = []
+
+    class R:
+        @cl.asynccontextmanager
+        async def tunnel(self, port):
+            server = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
+            opened.append(server)
+            try:
+                yield server.sockets[0].getsockname()[1]
+            finally:
+                server.close()
+
+    t = VncTunnels()
+    p1 = await t.port_for(1, R())
+    assert await t.port_for(1, R()) == p1 and len(opened) == 1
+    opened[0].close()
+    await opened[0].wait_closed()
+    p2 = await t.port_for(1, R())
+    assert len(opened) == 2 and p2 != p1
+    await t.close_all()
