@@ -31,6 +31,7 @@ const LABELS: Record<string, Labels> = {
   resume_desktop: { running: "Resuming", done: "Resumed", failed: "Couldn’t resume", icon: "play" },
   save_project: { running: "Saving", done: "Saved", failed: "Couldn’t save", icon: "save" },
   delete_workload: { running: "Deleting", done: "Deleted", failed: "Couldn’t delete", icon: "trash" },
+  stop_desktop_agent: { running: "Stopping the desktop agent", done: "Stopped the desktop agent", failed: "Couldn’t stop the desktop agent", icon: "stop" },
   operate_desktop: { running: "Working in the desktop", done: "Worked in the desktop", failed: "Desktop task stopped", icon: "cursor" },
 };
 
