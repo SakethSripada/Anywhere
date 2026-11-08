@@ -26,7 +26,7 @@ export function ms(ts: Timestamp | undefined | null): number {
 const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto", style: "short" });
 
 export function ago(ts: Timestamp | Date | number | undefined | null, now = Date.now()): string {
-  if (ts == null) return "—";
+  if (ts == null) return "-";
   const t = typeof ts === "number" ? ts : ts instanceof Date ? ts.getTime() : Number(ts.toMillis());
   const s = Math.round((t - now) / 1000);
   const abs = Math.abs(s);
@@ -43,7 +43,7 @@ export function clock(ts: Timestamp | undefined | null): string {
 }
 
 export function duration(msTotal: number): string {
-  if (!Number.isFinite(msTotal) || msTotal < 0) return "—";
+  if (!Number.isFinite(msTotal) || msTotal < 0) return "-";
   const m = Math.floor(msTotal / 60000);
   if (m < 1) return `${Math.max(1, Math.round(msTotal / 1000))}s`;
   if (m < 60) return `${m}m`;

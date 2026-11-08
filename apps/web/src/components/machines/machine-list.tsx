@@ -34,7 +34,7 @@ export function MachineList() {
           <dl className="grid grid-cols-2 divide-x divide-y rounded-lg border @3xl:grid-cols-4 @3xl:divide-y-0">
             <Stat label="Running" value={String(running.length)} sub={running.length ? `${cents(burn)}/hr` : "Nothing billing"} />
             <Stat label="This month" value={cents(spent)} sub={`of ${cents(account?.monthlyCapCents ?? 0)} limit`} />
-            <Stat label="Shared credit" value={platform ? cents(Math.max(0, platform.globalBudgetCents - platform.globalSpentCents)) : "—"} sub={platform ? `of ${cents(platform.globalBudgetCents)}` : ""} />
+            <Stat label="Shared credit" value={platform ? cents(Math.max(0, platform.globalBudgetCents - platform.globalSpentCents)) : "-"} sub={platform ? `of ${cents(platform.globalBudgetCents)}` : ""} />
             <Stat
               label="Provisioning"
               value={platform?.provisioningMode === "live" ? "Live" : platform?.provisioningMode === "dry_run" ? "Dry run" : "Plans only"}
@@ -47,7 +47,7 @@ export function MachineList() {
           ) : workloads.length === 0 ? (
             <div className="mt-8 rounded-lg border border-dashed px-6 py-14 text-center">
               <p className="text-sm font-medium">No machines yet</p>
-              <p className="mx-auto mt-1 max-w-sm text-[13px] text-muted-foreground">Pick a template or describe a task. Anywhere plans the hardware and asks before billing.</p>
+              <p className="mx-auto mt-1 max-w-sm text-[13px] text-muted-foreground">Start a task from Home to create one.</p>
               <Button className="mt-4" size="sm" nativeButton={false} render={<Link href="/" />}>
                 <Plus /> New task
               </Button>

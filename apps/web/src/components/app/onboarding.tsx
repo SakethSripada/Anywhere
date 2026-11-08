@@ -75,7 +75,7 @@ function Register() {
   }
 
   return (
-    <Panel title="Welcome to Anywhere" body="Describe what you want to do. Anywhere picks the hardware, sets it up, and can operate it for you.">
+    <Panel title="Welcome to Anywhere" body="Enter your name to get started.">
       <form onSubmit={submit} className="flex flex-col gap-3">
         <Label htmlFor="name">Your name</Label>
         <Input id="name" autoFocus autoComplete="name" value={name} maxLength={64} onChange={(e) => setName(e.target.value)} className="h-11" />

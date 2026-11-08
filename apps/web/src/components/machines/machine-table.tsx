@@ -1,12 +1,12 @@
 "use client";
 
 import type { Workload } from "@anywhere/stdb";
-import { Monitor, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useNow } from "@/lib/data";
 import { ago, cents } from "@/lib/format";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
+import { AppLogo, appKey } from "../app/app-logo";
 import { Uptime } from "./shared";
 import { StatusChip } from "./status";
 
@@ -15,10 +15,10 @@ export function MachineTable({ rows, showUpdated = false }: { rows: Workload[]; 
   const router = useRouter();
   const now = useNow(2000);
   return (
-    <div className="overflow-hidden rounded-lg border">
+    <div className="overflow-hidden rounded-card bg-card shadow-hairline">
       <Table>
         <TableHeader>
-          <TableRow className="hover:bg-transparent [&>th]:h-9 [&>th]:text-xs [&>th]:font-normal [&>th]:text-muted-foreground">
+          <TableRow className="hover:bg-transparent [&>th]:h-10 [&>th]:text-[12px] [&>th]:font-normal [&>th]:text-ink-3">
             <TableHead className="pl-3">Name</TableHead>
             <TableHead>Status</TableHead>
             <TableHead className="hidden @2xl:table-cell">GPU</TableHead>
@@ -29,10 +29,10 @@ export function MachineTable({ rows, showUpdated = false }: { rows: Workload[]; 
         </TableHeader>
         <TableBody>
           {rows.map((w) => (
-            <TableRow key={String(w.id)} className="cursor-pointer transition-colors [&>td]:py-2" onClick={() => router.push(href(w))}>
+            <TableRow key={String(w.id)} className="cursor-pointer border-line transition-colors hover:bg-hover [&>td]:py-2.5" onClick={() => router.push(href(w))}>
               <TableCell className="max-w-0 pl-3">
                 <div className="flex items-center gap-2.5">
-                  {w.kind === "desktop" ? <Monitor className="size-3.5 shrink-0 text-faint" /> : <Sparkles className="size-3.5 shrink-0 text-faint" />}
+                  <AppLogo app={appKey(w)} size={15} />
                   <span className="truncate text-[13px] font-medium">{w.title}</span>
                 </div>
               </TableCell>
