@@ -5,7 +5,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     blender_version: str = "4.5.15"
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3001"])
+
+    # A pasted `http://localhost:3001/` would never equal the browser's Origin header
+    # (CORS rejects every request) and doubles slashes in joined URLs.
+    @field_validator("public_web_origin", "public_api_url", "spacetime_host", "nvidia_base_url")
+    @classmethod
+    def _strip_trailing_slash(cls, v: str) -> str:
+        return v.rstrip("/")
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _strip_origin_slashes(cls, v: list[str]) -> list[str]:
+        return [o.rstrip("/") for o in v]
 
     @property
     def stdb_ready(self) -> bool:
