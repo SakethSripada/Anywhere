@@ -44,6 +44,10 @@ class BrevError(Exception):
     pass
 
 
+class BrevDeployFailed(BrevError):
+    """Brev accepted the create but couldn't deliver the machine (failed, torn down, or gone)."""
+
+
 class ProvisioningDisabled(BrevError):
     pass
 
@@ -261,13 +265,13 @@ class BrevCLI:
             if last and last.status == want and (want != "RUNNING" or last.ready):
                 return last
             if last and last.status == "FAILURE":
-                raise BrevError(f"Instance {name} failed to deploy")
+                raise BrevDeployFailed(f"Instance {name} failed to deploy")
             # Brev tears a failed deploy down by itself. Waiting out the full timeout
             # would leave the user staring at "Provisioning" for nothing.
             if want != "DELETING" and last and last.status == "DELETING":
-                raise BrevError(f"Brev is deleting {name}; the deploy didn't succeed")
+                raise BrevDeployFailed(f"Brev is deleting {name}; the deploy didn't succeed")
             if existed and last is None:
-                raise BrevError(f"Instance {name} disappeared from Brev")
+                raise BrevDeployFailed(f"Instance {name} disappeared from Brev")
             existed = existed or last is not None
             await asyncio.sleep(interval)
         raise BrevError(f"Instance {name} did not reach {want} within {timeout / 60:.0f} min (last: {last})")

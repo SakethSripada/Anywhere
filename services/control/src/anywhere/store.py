@@ -113,6 +113,11 @@ class Store:
     ) -> None:
         await self.client.call("update_workload_plan", id, title, plan_json, est_low_cents, est_high_cents)
 
+    async def switch_workload_machine(
+        self, id: int, instance_type: str, gpu_name: str, provider: str, hourly_cents: int
+    ) -> None:
+        await self.client.call("switch_workload_machine", id, instance_type, gpu_name, provider, hourly_cents)
+
     async def transition(self, id: int, to: str, detail: str) -> None:
         await self.client.call("transition_workload", id, to, detail)
 
