@@ -3,7 +3,7 @@
 import type { Workload } from "@anywhere/stdb";
 import { MoreHorizontal, PanelRightClose } from "lucide-react";
 import Link from "next/link";
-import { forwardRef, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { toast } from "sonner";
 import { AgentOrb, type OrbState } from "@/components/bui/orb";
 import { SuggestionChip } from "@/components/bui/tool-chips";
@@ -43,10 +43,17 @@ const STATUS: Record<OrbState, string> = {
  * The agent beside one machine: a single stream of the conversation, every
  * tool call, every desktop action and every machine event — then the prompt.
  */
-export const AgentPanel = forwardRef<AgentPanelHandle, { w: Workload; onCollapse?: () => void }>(function AgentPanel({ w, onCollapse }, ref) {
+/** What survives the panel being unmounted while collapsed: its conversation and
+ *  any unsent text. Owned by the page so reopening the panel restores both. */
+export type AgentPanelMemory = { cid: bigint | null; draft: string };
+
+export const AgentPanel = forwardRef<
+  AgentPanelHandle,
+  { w: Workload; onCollapse?: () => void; memory?: MutableRefObject<AgentPanelMemory> }
+>(function AgentPanel({ w, onCollapse, memory }, ref) {
   const api = useApi();
   const linked = w.conversationId > 0n ? w.conversationId : null;
-  const [cid, setCid] = useState<bigint | null>(linked);
+  const [cid, setCid] = useState<bigint | null>(() => memory?.current.cid ?? linked);
   // Follow the workload when its linked conversation changes (or appears).
   const [seenLinked, setSeenLinked] = useState(linked);
   if (linked !== seenLinked) {
@@ -58,6 +65,20 @@ export const AgentPanel = forwardRef<AgentPanelHandle, { w: Workload; onCollapse
   const agent = useAgentState(w);
   const items = useMemo(() => toItems(messages), [messages]);
   const thinking = useAgentBusy(items) || pending.length > 0;
+
+  useEffect(() => {
+    if (memory) memory.current.cid = cid;
+  }, [cid, memory]);
+  // Restore an unsent draft on mount; save it when the panel is unmounted. A layout
+  // cleanup runs before the composer's own, while its handle is still attached.
+  useLayoutEffect(() => {
+    const store = memory?.current;
+    const box = composer.current;
+    if (store?.draft) box?.fill(store.draft);
+    return () => {
+      if (store) store.draft = box?.value() ?? "";
+    };
+  }, [memory]);
 
   useImperativeHandle(ref, () => ({
     focus: (text) => requestAnimationFrame(() => (text ? composer.current?.fill(text) : composer.current?.focus())),
