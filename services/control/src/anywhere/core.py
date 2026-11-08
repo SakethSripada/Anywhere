@@ -95,6 +95,35 @@ class Anywhere:
             raise ActionError("Create your account first")
         return acct
 
+    async def costs(self, owner: str) -> dict:
+        """Live spend (each billing segment's exact start, for a per-second meter) and
+        what auto-stopping idle desktops has saved."""
+        now = datetime.now(UTC)
+        running = []
+        for w in await self.store.workloads_for(owner):
+            if w["status"] not in BILLABLE:
+                continue
+            start, base = self.supervisor._segment(w)
+            running.append(
+                {
+                    "id": str(w["id"]),
+                    "title": w["title"],
+                    "gpu": w["gpuName"],
+                    "hourly_cents": int(w["hourlyCents"]),
+                    "segment_start": start.isoformat() if start else None,
+                    "segment_base_cents": base,
+                }
+            )
+        saved, stops = self.supervisor.idle_savings(owner, now)
+        return {
+            "now": now.isoformat(),
+            "running": running,
+            "saved_cents": saved,
+            "idle_minutes": self.settings.desktop_idle_minutes,
+            "session_hours": self.settings.max_session_hours,
+            "idle_stops": stops[:20],
+        }
+
     async def spend_snapshot(self, owner: str) -> budget.SpendSnapshot:
         workloads = await self.store.workloads()
         month = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
