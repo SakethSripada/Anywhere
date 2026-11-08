@@ -36,7 +36,7 @@ import {
 import { useAccount, useConversations, useMonthSpend, useNow, usePlatform, useWorkloads } from "@/lib/data";
 import { cents } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { ACTIVE, href, liveCents } from "@/lib/workloads";
+import { ACTIVE, BILLABLE, href, liveCents } from "@/lib/workloads";
 import { needsAttention, StatusDot } from "../machines/status";
 import { MachineMenu } from "../machines/machine-menu";
 import { AppLogo, appKey } from "./app-logo";
@@ -161,7 +161,8 @@ function MachineGroup({ label, items, pathname, onClick }: { label: string; item
 }
 
 function LiveItem({ w, active, onClick }: { w: Workload; active: boolean; onClick: () => void }) {
-  const now = useNow(5000);
+  // Stopped machines are listed too; only billing ones have a cost that moves.
+  const now = useNow(5000, BILLABLE.has(w.status));
   return (
     <SidebarMenuItem>
       <SidebarMenuButton
