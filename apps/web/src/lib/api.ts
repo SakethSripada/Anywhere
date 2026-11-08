@@ -78,11 +78,15 @@ export async function uploadDataset(
   api: ReturnType<typeof useApi>,
   file: File,
   onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
 ): Promise<{ uploadId: number; profile: UploadProfile }> {
   const meta = { filename: file.name, content_type: file.type || "application/octet-stream", size: file.size };
   const { upload_id, put_url } = await api.post<{ upload_id: number; put_url: string }>("/v1/uploads", meta);
   await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Upload cancelled", "AbortError"));
     const xhr = new XMLHttpRequest();
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.onabort = () => reject(new DOMException("Upload cancelled", "AbortError"));
     xhr.open("PUT", put_url);
     xhr.setRequestHeader("Content-Type", meta.content_type);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
@@ -90,6 +94,7 @@ export async function uploadDataset(
     xhr.onerror = () => reject(new ApiError("Upload failed. Check your connection.", 0));
     xhr.send(file);
   });
+  if (signal?.aborted) throw new DOMException("Upload cancelled", "AbortError");
   const done = await api.post<{ upload_id: number; profile: UploadProfile }>(`/v1/uploads/${upload_id}/complete`, meta);
   return { uploadId: done.upload_id, profile: done.profile };
 }

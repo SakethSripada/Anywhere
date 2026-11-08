@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowUp, AtSign, Check, ChevronDown, FileText, Paperclip, Square, X } from "lucide-react";
-import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,6 +50,16 @@ export const Composer = forwardRef<
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const area = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // In-flight uploads, cancelled when their chip is removed or the composer unmounts.
+  const uploads = useRef(new Map<string, AbortController>());
+
+  useEffect(() => {
+    const inflight = uploads.current;
+    return () => {
+      for (const ctl of inflight.values()) ctl.abort();
+      inflight.clear();
+    };
+  }, []);
 
   useImperativeHandle(ref, () => ({
     focus: () => area.current?.focus(),
@@ -104,9 +114,12 @@ export const Composer = forwardRef<
       const key = `${file.name}-${file.size}-${file.lastModified}`;
       setAttachments((prev) => [...prev, { key, file, progress: 0 }]);
       const patch = (p: Partial<Attachment>) => setAttachments((prev) => prev.map((a) => (a.key === key ? { ...a, ...p } : a)));
-      uploadDataset(api, file, (progress) => patch({ progress }))
-        .then(({ uploadId, profile }) => patch({ uploadId, profile, progress: 1 }))
-        .catch((err) => patch({ error: err instanceof ApiError ? err.message : "Upload failed" }));
+      const ctl = new AbortController();
+      uploads.current.set(key, ctl);
+      uploadDataset(api, file, (progress) => patch({ progress }), ctl.signal)
+        .then(({ uploadId, profile }) => !ctl.signal.aborted && patch({ uploadId, profile, progress: 1 }))
+        .catch((err) => !ctl.signal.aborted && patch({ error: err instanceof ApiError ? err.message : "Upload failed" }))
+        .finally(() => uploads.current.get(key) === ctl && uploads.current.delete(key));
     }
   }
 
@@ -129,7 +142,14 @@ export const Composer = forwardRef<
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {attachments.map((a) => (
-            <AttachmentChip key={a.key} a={a} onRemove={() => setAttachments((p) => p.filter((x) => x.key !== a.key))} />
+            <AttachmentChip
+              key={a.key}
+              a={a}
+              onRemove={() => {
+                uploads.current.get(a.key)?.abort();
+                setAttachments((p) => p.filter((x) => x.key !== a.key));
+              }}
+            />
           ))}
         </div>
       )}
