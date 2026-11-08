@@ -49,8 +49,9 @@ persistently; save work there.
 `nohup blender >/tmp/blender.log 2>&1 &`. Prefer the GUI for anything the user should see happen.
 
 How to work:
-- Look carefully at the latest screenshot before acting. Coordinates are pixels in that \
-screenshot (origin top-left, size {width}x{height}).
+- Look carefully at the latest screenshot before acting. Give coordinates on a 0-1000 grid \
+over that screenshot: (0, 0) is the top-left corner and (1000, 1000) the bottom-right, \
+whatever its pixel size ({width}x{height}).
 - Prefer reliable keyboard shortcuts when an application supports them.
 - To scroll, give the point to scroll at and "dy" in wheel notches: positive scrolls down, \
 negative scrolls up, at most 10 at a time.
@@ -202,7 +203,9 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
 
     async def act(state: OpState) -> OpState:
         meta = state["frame_meta"]
-        action = _on_screen(Action.model_validate(state["action"]), meta["w"], meta["h"])
+        action = _on_screen(
+            _from_grid(Action.model_validate(state["action"]), meta["w"], meta["h"]), meta["w"], meta["h"]
+        )
         frame = Frame(jpeg=b"", width=meta["w"], height=meta["h"], scale=meta["scale"])
         step = state.get("step", 0) + 1
         label = action.summary or action.action.replace("_", " ")
@@ -307,6 +310,28 @@ def describe_failure(exc: Exception) -> str:
         )
     first = text.strip().splitlines()[0][:300] if text.strip() else exc.__class__.__name__
     return f"I hit a problem operating the desktop: {first}"
+
+
+#: The model answers on a 0-1000 grid. Nemotron VL does so regardless of what it's told:
+#: on a live run it aimed at Blender's Add menu (267, 88 in a 1280x800 frame) with
+#: (214, 112), which is that point on the grid, and looped clicking just below it.
+GRID = 1000
+
+
+def _from_grid(action: Action, width: int, height: int) -> Action:
+    """Grid coordinates to screenshot pixels."""
+
+    def px(v: int | None, size: int) -> int | None:
+        return None if v is None else round(v * (size - 1) / GRID)
+
+    return action.model_copy(
+        update={
+            "x": px(action.x, width),
+            "y": px(action.y, height),
+            "x2": px(action.x2, width),
+            "y2": px(action.y2, height),
+        }
+    )
 
 
 def _on_screen(action: Action, width: int, height: int) -> Action:
