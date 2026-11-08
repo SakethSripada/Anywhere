@@ -106,9 +106,18 @@ class Anywhere:
                 self.catalog.mark_checked()
 
     async def propose(
-        self, owner: str, conversation_id: int, intent: Intent, dataset_upload_id: int | None = None
+        self,
+        owner: str,
+        conversation_id: int,
+        intent: Intent,
+        dataset_upload_id: int | None = None,
+        *,
+        auto_approve: bool = True,
     ) -> dict:
-        """Validate an intent into a plan, check policy, and record it as a workload awaiting approval."""
+        """Validate an intent into a plan, check policy, and record it as a workload awaiting approval.
+
+        `auto_approve=False` keeps the plan waiting even under the user's auto-approve threshold
+        (used for callers, like MCP tokens, that aren't trusted to spend on their own)."""
         acct = await self.account(owner)
         await self.refresh_prices()
 
@@ -182,7 +191,7 @@ class Anywhere:
         )
         await self.store.append_message(conversation_id, "assistant", "plan", result.title, wid, "system")
 
-        auto = decision.allowed and not decision.requires_approval
+        auto = auto_approve and decision.allowed and not decision.requires_approval
         if auto:
             await self.approve(owner, wid)
         return {

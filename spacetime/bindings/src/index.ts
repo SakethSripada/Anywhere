@@ -255,6 +255,7 @@ const tablesSchema = __schema({
   workerMetrics: __table({ name: "worker_metrics", indexes: [], constraints: [] }, MetricPointRow),
   workerArtifacts: __table({ name: "worker_artifacts", indexes: [], constraints: [] }, ArtifactRow),
   workerAgentRuns: __table({ name: "worker_agent_runs", indexes: [], constraints: [] }, AgentRunRow),
+  workerAgentSteps: __table({ name: "worker_agent_steps", indexes: [], constraints: [] }, AgentStepRow),
 });
 
 /* ── Reducers ──────────────────────────────────────────────────────────── */

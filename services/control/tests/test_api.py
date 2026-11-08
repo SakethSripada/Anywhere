@@ -54,3 +54,10 @@ def test_link_codes_and_phone_numbers():
         raise AssertionError
     except PhotonError:
         pass
+
+
+def test_empty_env_values_count_as_unset(monkeypatch):
+    monkeypatch.setenv("NVIDIA_API_KEY", "")
+    monkeypatch.setenv("BREV_API_KEY", "")
+    s = Settings(_env_file=None)
+    assert not s.nemotron_ready and not s.brev_ready

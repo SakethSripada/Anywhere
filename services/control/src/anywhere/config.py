@@ -19,7 +19,8 @@ class ProvisioningMode(StrEnum):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+    # `KEY=` (as in .env.example) means "not set", not an empty secret that counts as configured.
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore", env_ignore_empty=True)
 
     # Service
     environment: str = "development"
@@ -74,6 +75,16 @@ class Settings(BaseSettings):
     spectrum_api_base: str = "https://spectrum.photon.codes"
     #: Shared secret the messaging bridge uses to call this service.
     messaging_bridge_secret: SecretStr | None = None
+
+    # MCP server for external agents (Claude, Cursor, …). Tokens are minted per account in Settings.
+    mcp_enabled: bool = True
+    mcp_max_tokens_per_account: int = 10
+    mcp_max_token_days: int = 365
+    #: OAuth sign-in for MCP clients (claude.ai connectors, Claude Code). Needs public_api_url.
+    mcp_oauth_enabled: bool = True
+    #: Where clients reach this service: the OAuth issuer, and `/mcp` under it is the resource.
+    #: Behind Caddy that's https://$DOMAIN/api.
+    public_api_url: str = "http://localhost:8000"
 
     # Desktop environment
     desktop_image: str = "ghcr.io/trycua/linux:24.04"
