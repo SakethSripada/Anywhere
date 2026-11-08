@@ -377,13 +377,18 @@ def _routes():
         "delete": lambda a, o, w: a.terminate(o, w),
     }
 
-    @r.post("/v1/workloads/{workload_id}/{action}")
-    async def workload_action(workload_id: int, action: str, owner: str = Identity, app: Anywhere = Depends(anywhere)):
-        if action not in actions:
-            raise HTTPException(404, "Unknown action")
-        rate_limit(f"action:{owner}", 30)
-        await actions[action](app, owner, workload_id)
-        return {"ok": True}
+    # One route per action, not `/{action}`: a catch-all path here would also capture
+    # POSTs meant for later routes like /share and /render-estimate.
+    def action_route(name: str):
+        async def workload_action(workload_id: int, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+            rate_limit(f"action:{owner}", 30)
+            await actions[name](app, owner, workload_id)
+            return {"ok": True}
+
+        return workload_action
+
+    for name in actions:
+        r.add_api_route(f"/v1/workloads/{{workload_id}}/{name}", action_route(name), methods=["POST"])
 
     @r.post("/v1/workloads/{workload_id}/render-estimate")
     async def render_estimate(
