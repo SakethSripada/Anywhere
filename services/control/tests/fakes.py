@@ -139,7 +139,7 @@ class FakeBrev:
         self.instances: dict[str, str] = {}
         self.calls: list[tuple] = []
 
-    async def create(self, name, itype, script):
+    async def create(self, name, itype):
         self.calls.append(("create", name))
         self.types[name] = itype
         if not self.api_key or self.mode == ProvisioningMode.DISABLED:

@@ -29,7 +29,6 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 import structlog
 
@@ -200,7 +199,11 @@ class BrevCLI:
         if self.mode == ProvisioningMode.DISABLED:
             raise ProvisioningDisabled("Provisioning is disabled (PROVISIONING_MODE=disabled)")
 
-    async def create(self, name: str, instance_type: str, startup_script: Path) -> CreateResult:
+    async def create(self, name: str, instance_type: str) -> CreateResult:
+        # No --startup-script: on live runs every instance created with one (even a
+        # script that backgrounds its work and exits 0) went UNHEALTHY and Brev
+        # deleted it ~3.5 min in, while the same create without it booted healthy.
+        # All setup happens over SSH instead, where it's observable.
         self._guard()
         if not NAME_RE.match(name):
             raise BrevError(f"Invalid instance name: {name!r}")
@@ -212,8 +215,6 @@ class BrevCLI:
             "--mode",
             "vm",
             "--jupyter=false",
-            "--startup-script",
-            f"@{startup_script}",
             "--detached",
         ]
         dry_run = self.mode == ProvisioningMode.DRY_RUN

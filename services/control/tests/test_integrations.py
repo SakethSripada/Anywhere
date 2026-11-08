@@ -53,30 +53,26 @@ def fake_brev(tmp_path):
     return str(script), calls
 
 
-async def test_create_uses_verified_flags_and_env_auth(fake_brev, tmp_path):
+async def test_create_uses_verified_flags_and_env_auth(fake_brev):
     binary, calls = fake_brev
-    boot = tmp_path / "boot.sh"
-    boot.write_text("true")
     cli = BrevCLI(binary, "bak-test", ProvisioningMode.LIVE)
-    await cli.create("anywhere-1f", "g2-standard-4:nvidia-l4:1", boot)
+    await cli.create("anywhere-1f", "g2-standard-4:nvidia-l4:1")
     (call,) = calls()
     assert call["argv"] == [
         "create", "anywhere-1f", "--type", "g2-standard-4:nvidia-l4:1", "--mode", "vm", "--jupyter=false",
-        "--startup-script", f"@{boot}", "--detached",
+        "--detached",
     ]  # fmt: skip
     assert call["key"] == "bak-test" and call["stdin"] == ""
 
 
-async def test_dry_run_validates_auth_and_type(fake_brev, tmp_path):
+async def test_dry_run_validates_auth_and_type(fake_brev):
     binary, calls = fake_brev
-    boot = tmp_path / "boot.sh"
-    boot.write_text("true")
     cli = BrevCLI(binary, "bak-test", ProvisioningMode.DRY_RUN)
-    result = await cli.create("anywhere-1f", "g2-standard-4:nvidia-l4:1", boot)
+    result = await cli.create("anywhere-1f", "g2-standard-4:nvidia-l4:1")
     assert result.dry_run
     assert [c["argv"][0] for c in calls()] == ["ls", "search", "create"]
     with pytest.raises(BrevError, match="does not currently offer"):
-        await cli.create("anywhere-2f", "made-up-type", boot)
+        await cli.create("anywhere-2f", "made-up-type")
 
 
 async def test_start_is_detached_and_list_parses(fake_brev):

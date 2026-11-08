@@ -229,8 +229,7 @@ class Supervisor:
                 await self._transition(w, Status.PROVISIONING, f"Requesting a {w['gpuName']} from Brev")
                 tried: list[str] = []
                 while True:
-                    with _script(render(_env("boot.sh"), PREPULL_IMAGE=self._prepull(w))) as boot:
-                        created = await self.brev.create(name, w["instanceType"], boot)
+                    created = await self.brev.create(name, w["instanceType"])
                     if created.dry_run:
                         await self._event(w, "Dry run: Brev accepted this request. No machine was created.", "success")
                         await self._transition(w, Status.CANCELLED, "Dry run complete, nothing was billed")
@@ -290,9 +289,6 @@ class Supervisor:
             await self.notify(w, "status", f"Your {w['title']} is ready.")
         else:
             self._start_monitor(w)
-
-    def _prepull(self, w: dict) -> str:
-        return self.settings.desktop_image if w["kind"] == "desktop" else "hello-world"
 
     async def _run_streamed(self, w: dict, remote: Remote, script: str, path: str, timeout: float) -> None:
         """Run a pushed script detached and mirror its `::step::` markers into events."""
