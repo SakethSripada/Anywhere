@@ -180,12 +180,16 @@ class Supervisor:
 
         return report
 
+    async def _switch_machine(self, w: dict, alt: Offer) -> None:
+        await self.store.switch_workload_machine(w["id"], alt.type, alt.gpu_name, alt.provider, alt.hourly_cents)
+        w.update(instanceType=alt.type, gpuName=alt.gpu_name, provider=alt.provider, hourlyCents=alt.hourly_cents)
+
     def _fallback(self, w: dict, tried: list[str]) -> Offer | None:
         """The cheapest same-GPU machine from a provider we haven't tried, or None.
         One retry at most: a second failure is more likely the setup than capacity."""
         if self.catalog is None or len(tried) > 1:
             return None
-        failed = {o.provider for t in tried if (o := self.catalog.get(t))} | {w.get("provider")}
+        failed = {o.provider for t in tried if (o := self.catalog.lookup(t))} | {w.get("provider")}
         options = [
             o
             for o in self.catalog.offers()
@@ -228,6 +232,15 @@ class Supervisor:
             try:
                 await self._transition(w, Status.PROVISIONING, f"Requesting a {w['gpuName']} from Brev")
                 tried: list[str] = []
+                # Planned before Brev failed this type? Skip straight to a machine that works.
+                if self.catalog is not None and self.catalog.recently_failed(w["instanceType"]):
+                    alt = self._fallback(w, [w["instanceType"]])
+                    if alt is not None:
+                        await self._event(
+                            w,
+                            f"Using a {alt.gpu_name} on {alt.provider.upper()}; {w['provider'].upper()} couldn't deliver one recently.",
+                        )
+                        await self._switch_machine(w, alt)
                 while True:
                     created = await self.brev.create(name, w["instanceType"])
                     if created.dry_run:
@@ -245,6 +258,8 @@ class Supervisor:
                         break
                     except BrevDeployFailed:
                         tried.append(w["instanceType"])
+                        if self.catalog is not None:
+                            self.catalog.mark_failed(w["instanceType"])
                         alt = self._fallback(w, tried)
                         if alt is None:
                             raise
@@ -258,15 +273,7 @@ class Supervisor:
                             f"Trying the same GPU on {alt.provider.upper()} at ${alt.price_per_hour:.2f}/hr.",
                             "warn",
                         )
-                        await self.store.switch_workload_machine(
-                            w["id"], alt.type, alt.gpu_name, alt.provider, alt.hourly_cents
-                        )
-                        w.update(
-                            instanceType=alt.type,
-                            gpuName=alt.gpu_name,
-                            provider=alt.provider,
-                            hourlyCents=alt.hourly_cents,
-                        )
+                        await self._switch_machine(w, alt)
                 await self.brev.refresh_ssh()
                 remote = self.remote(w)
                 await _until(remote.reachable, timeout=6 * 60, what="SSH access")

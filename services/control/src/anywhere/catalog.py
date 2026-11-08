@@ -91,11 +91,26 @@ class Catalog:
         #: Types missing from the last successful live feed. Brev doesn't list them
         #: right now, so they are never offered or provisioned until they come back.
         self._unavailable: set[str] = set()
+        #: Types Brev recently failed to deliver (monotonic time they're trusted again).
+        #: Brev still lists them, but planning around them wastes a 4 minute boot.
+        self._failed_until: dict[str, float] = {}
         self._ttl = ttl_seconds
         self._refreshed_at = 0.0
 
     def offers(self) -> list[Offer]:
-        return [o for t, o in self._offers.items() if t not in self._unavailable]
+        """What planning may choose: listed by Brev and not recently failed."""
+        return [o for t, o in self._offers.items() if t not in self._unavailable and not self.recently_failed(t)]
+
+    def mark_failed(self, instance_type: str, hours: float = 6) -> None:
+        self._failed_until[instance_type] = time.monotonic() + hours * 3600
+        log.info("catalog.deploy_failed", type=instance_type, hours=hours)
+
+    def recently_failed(self, instance_type: str) -> bool:
+        return self._failed_until.get(instance_type, 0) > time.monotonic()
+
+    def lookup(self, instance_type: str) -> Offer | None:
+        """The catalog entry regardless of availability."""
+        return self._offers.get(instance_type)
 
     def get(self, instance_type: str) -> Offer | None:
         if instance_type in self._unavailable:
