@@ -87,3 +87,25 @@ def test_desktop_setup_names_a_missing_gpu(tmp_path):
     result = _run(_setup_script(), env)
     assert result.returncode == 1
     assert "::error:: No NVIDIA GPU is visible on this machine" in result.stdout
+
+
+def test_desktop_start_waits_for_docker_after_a_resume(tmp_path):
+    env = _fakes(tmp_path)
+    (tmp_path / "info_fails").write_text("4")
+    result = _run(_env("desktop-start.sh"), env)
+    assert result.returncode == 0, result.stderr
+    assert "::ready::" in result.stdout
+    assert "docker start anywhere-desktop" in (tmp_path / "calls").read_text()
+
+
+def test_desktop_start_is_not_ready_until_vnc_answers(tmp_path):
+    env = _fakes(tmp_path)
+    (tmp_path / "vnc_down").touch()  # websockify and Cua answer, x11vnc doesn't
+    result = _run(_env("desktop-start.sh"), env)
+    assert result.returncode == 1
+    assert "::ready::" not in result.stdout
+    # The control plane shows stderr; it must say what failed in plain words.
+    assert result.stderr.strip() == "The desktop's VNC and Cua services did not come up"
+    # It kept relaunching the (idempotent) VNC services while it waited.
+    launches = (tmp_path / "calls").read_text().count("-rfbport 5900")
+    assert launches > 1
