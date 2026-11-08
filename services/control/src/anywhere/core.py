@@ -4,6 +4,7 @@ messaging bridge. Every way of spending money funnels through `propose` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -46,6 +47,9 @@ class Anywhere:
 
     def __post_init__(self) -> None:
         self.supervisor = Supervisor(self.settings, self.store, self.brev, self.storage, self.vault, self.notify)
+        #: Serialises "check the budget and concurrency cap, then start a machine" so
+        #: two approvals (or an auto-approve racing a manual one) can't both pass.
+        self._admission = asyncio.Lock()
 
     # ── Notifications ─────────────────────────────────────────────────────
 
@@ -83,7 +87,14 @@ class Anywhere:
                 int(w["accruedCents"]) for w in workloads if w["owner"] == owner and w["createdAt"] >= month
             ),
             platform_cents=sum(int(w["accruedCents"]) for w in workloads),
-            active_instances=sum(1 for w in workloads if w["status"] in BILLABLE),
+            # An approved plan, or a stopped desktop whose resume has started, is about
+            # to provision, so it already takes a slot.
+            active_instances=sum(
+                1
+                for w in workloads
+                if w["status"] in BILLABLE | {Status.APPROVED}
+                or (w["status"] == Status.STOPPED and self.supervisor.busy(w["id"]))
+            ),
             account_active_kinds=tuple(
                 w["kind"] for w in workloads if w["owner"] == owner and w["status"] in BILLABLE | {Status.STOPPED}
             ),
@@ -192,6 +203,10 @@ class Anywhere:
         }
 
     async def approve(self, owner: str, workload_id: int) -> dict:
+        async with self._admission:
+            return await self._approve(owner, workload_id)
+
+    async def _approve(self, owner: str, workload_id: int) -> dict:
         w = await self.owned(owner, workload_id)
         if w["status"] != Status.PLANNED:
             raise ActionError(f"This plan is already {w['status']}")
@@ -232,6 +247,10 @@ class Anywhere:
         self.supervisor.stop(w)
 
     async def resume(self, owner: str, workload_id: int) -> None:
+        async with self._admission:
+            await self._resume(owner, workload_id)
+
+    async def _resume(self, owner: str, workload_id: int) -> None:
         w = await self.owned(owner, workload_id)
         if w["status"] != Status.STOPPED:
             raise ActionError("Only stopped desktops can be resumed")
