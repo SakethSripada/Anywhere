@@ -89,7 +89,8 @@ function LiveDesktop({ w, onAskAgent }: { w: Workload; onAskAgent: () => void })
     if (to === "agent" && agent.control === "user") return onAskAgent();
     setSwitching(true);
     try {
-      await api.post(`/v1/workloads/${w.id}/agent/${to === "user" ? "stop" : "resume"}`);
+      // Taking over pauses the run, so handing back resumes the same goal.
+      await api.post(`/v1/workloads/${w.id}/agent/${to === "user" ? "stop?pause=true" : "resume"}`);
       if (to === "user") requestAnimationFrame(() => screen.current?.focus());
     } catch (err) {
       toast.error("Couldn’t switch control", { description: err instanceof ApiError ? err.message : undefined });

@@ -111,7 +111,7 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
   const done =
     run.status === "paused"
       ? "Paused, you took over"
-      : run.status === "failed"
+      : run.status === "failed" || run.status === "stopped"
         ? `Stopped after ${acts} action${acts === 1 ? "" : "s"}`
         : `Worked${took ? ` for ${took}` : ""} · ${acts} action${acts === 1 ? "" : "s"}`;
 
@@ -127,7 +127,7 @@ export function RunTrace({ workload, runId, goal, linkMachines = true }: { workl
           <div className="flex flex-col gap-2 pt-1 pb-1">
             {/* The thumbnail sits inside the collapsed area, so only fetch it once the trace is open. */}
             <LatestShot steps={steps} enabled={expanded} />
-            {run.result && run.status !== "running" && <p className={run.status === "done" ? "text-[12.5px] text-ink-2" : "text-[12.5px] text-red"}>{run.result}</p>}
+            {run.result && run.status !== "running" && <p className={run.status === "failed" ? "text-[12.5px] text-red" : "text-[12.5px] text-ink-2"}>{run.result}</p>}
             <div className="flex items-center gap-4">
               {linkMachines && (
                 <Link href={`/w/${workload.id}`} className="w-fit text-[12px] text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink-2 hover:decoration-current">
