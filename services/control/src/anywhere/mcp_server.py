@@ -136,14 +136,14 @@ def _touch(app: Anywhere, d: str, record: dict) -> None:
     # Bound vault writes to one a minute per token; last-used is informational.
     if time.monotonic() - _last_touch.get(d, -math.inf) < 60:
         return
+    if len(_last_touch) > 10_000:  # access tokens rotate hourly; don't keep every digest
+        _last_touch.clear()
     _last_touch[d] = time.monotonic()
     try:
         now = datetime.now(UTC).isoformat()
         app.vault.update_mcp_token(d, last_used_at=now)
         if (grant_id := record.get("grant_id")) is not None:
-            grant = app.vault.section_get("oauth_grants", str(grant_id))
-            if grant:
-                app.vault.section_put("oauth_grants", str(grant_id), {**grant, "last_used_at": now})
+            app.vault.section_update("oauth_grants", str(grant_id), last_used_at=now)
     except OSError as exc:
         log.warning("mcp.touch_failed", error=str(exc))
 
@@ -252,7 +252,10 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
             f"This token doesn't have the '{scope}' permission ({SCOPES[scope]}) "
             "Ask the user to grant it in Settings → Agents, or to do this in the Anywhere web app."
         )
-    _rate(f"mcp:{p.token_id}:{scope}", limit)
+    # Key OAuth connections by grant: their access tokens rotate hourly, which
+    # used to reset the counter on every refresh.
+    who = f"g{p.grant_id}" if p.grant_id is not None else f"t{p.token_id}"
+    _rate(f"mcp:{who}:{scope}", limit)
     bound = log.bind(tool=tool, token=p.token_id, owner=p.owner[:12])
     try:
         if not app.settings.stdb_ready:
