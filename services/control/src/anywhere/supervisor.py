@@ -93,6 +93,10 @@ class Supervisor:
         self._locks: dict[int, asyncio.Lock] = {}
         self.vnc = VncTunnels()
         self._guard_task: asyncio.Task | None = None
+        self._telemetry_task: asyncio.Task | None = None
+        #: Running workloads, refreshed by the guard tick, that the GPU sampler polls.
+        self._sampling: dict[int, dict] = {}
+        self._gpu_total_sent: set[int] = set()
         #: Unowned instances seen on the previous reconcile pass. An instance is only
         #: deleted after it is unowned on two passes in a row.
         self._orphan_candidates: set[str] = set()
@@ -287,6 +291,7 @@ class Supervisor:
         if "::ready::" not in result.stdout:
             raise RemoteError("Desktop services did not report ready")
         await self._transition(w, Status.RUNNING, "Desktop is live")
+        await self._event(w, BOOT_READY)
         await self.store.record_usage(w["id"], int(w.get("accruedCents", 0)), touch=True)
         plan = json.loads(w["planJson"])
         if plan.get("intent", {}).get("application") == "blender":
@@ -372,6 +377,7 @@ class Supervisor:
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             try:
                 await self._transition(w, Status.PROVISIONING, "Resuming your machine")
+                await self._event(w, BOOT_RESUME)
                 await self.brev.start(name)
                 await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60)
                 await self.brev.refresh_ssh()
@@ -459,6 +465,7 @@ class Supervisor:
         )
         self.vault.update(w["id"], log_offset=0, metric_lines=0)
         await self._transition(w, Status.RUNNING, f"Fine-tuning {cfg.base_model.split('/')[-1]}")
+        await self._event(w, BOOT_TRAINING)
         await self.notify(w, "status", f"Training started on a {w['gpuName']}. I'll message you when it's done.")
 
     async def _monitor_batch(self, w: dict) -> None:
@@ -591,13 +598,45 @@ class Supervisor:
     def start_guard(self) -> None:
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._guard_loop(), name="budget-guard")
+        if self._telemetry_task is None and self.settings.gpu_telemetry_seconds > 0:
+            self._telemetry_task = asyncio.create_task(self._telemetry_loop(), name="gpu-telemetry")
 
     async def shutdown(self) -> None:
         if self._guard_task:
             self._guard_task.cancel()
+        if self._telemetry_task:
+            self._telemetry_task.cancel()
         for t in self._monitors.values():
             t.cancel()
         await self.vnc.close_all()
+
+    # ── GPU telemetry ─────────────────────────────────────────────────────
+
+    async def _telemetry_loop(self) -> None:
+        while True:
+            for w in list(self._sampling.values()):
+                try:
+                    await self.sample_gpu(w)
+                except Exception as exc:  # telemetry must never break anything else
+                    log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
+            await asyncio.sleep(self.settings.gpu_telemetry_seconds)
+
+    async def sample_gpu(self, w: dict) -> list[dict]:
+        """One `nvidia-smi` reading from a running machine, stored as `gpu.*` metric points.
+
+        The step is seconds since billing started, so a chart's x-axis is elapsed time."""
+        res = await self.remote(w).run(GPU_QUERY, timeout=8, check=False)
+        reading = parse_gpu_query(res.stdout) if res.code == 0 else None
+        if reading is None:
+            return []
+        started = w.get("startedAt")
+        step = max(0, int((_now() - started).total_seconds())) if isinstance(started, datetime) else 0
+        points = [{"name": f"gpu.{k}", "step": step, "value": v} for k, v in reading.items() if k != "mem_total_gb"]
+        if w["id"] not in self._gpu_total_sent and "mem_total_gb" in reading:
+            points.append({"name": "gpu.mem_total_gb", "step": step, "value": reading["mem_total_gb"]})
+            self._gpu_total_sent.add(w["id"])
+        await self.store.add_metrics(w["id"], points)
+        return points
 
     async def _guard_loop(self) -> None:
         while True:
@@ -615,6 +654,7 @@ class Supervisor:
         limits = budget.PlatformLimits(self.settings.global_budget_cents, self.settings.max_concurrent_instances)
 
         live = [w for w in workloads if w["status"] in BILLABLE]
+        self._sampling = {w["id"]: w for w in workloads if w["status"] == Status.RUNNING}
         for w in live:
             cents = self._accrued(w)
             if cents != w["accruedCents"]:
@@ -787,6 +827,36 @@ def parse_poll(out: str) -> Poll:
         status=status_part.strip(),
         alive=alive_part.strip() != "no",
     )
+
+
+#: Milestone events the web app's boot timeline keys on. Keep in sync with apps/web/src/lib/insights.ts.
+BOOT_READY = "Desktop is live"
+BOOT_RESUME = "Restarting the machine"
+BOOT_TRAINING = "Training started"
+
+GPU_QUERY = (
+    "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw "
+    "--format=csv,noheader,nounits"
+)
+
+
+def parse_gpu_query(stdout: str) -> dict[str, float] | None:
+    """Parse the first GPU's line of `GPU_QUERY`. Fields that report [N/A] are left out."""
+    line = next((ln for ln in stdout.splitlines() if ln.strip()), "")
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) != 5:
+        return None
+    names = ("util_pct", "mem_used_gb", "mem_total_gb", "temp_c", "power_w")
+    out: dict[str, float] = {}
+    for name, raw in zip(names, parts, strict=True):
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if name.startswith("mem_"):
+            value = round(value / 1024, 2)  # MiB -> GiB
+        out[name] = value
+    return out if "util_pct" in out else None
 
 
 def metric_points(rows: list[str]) -> list[dict]:
