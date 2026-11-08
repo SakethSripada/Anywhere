@@ -33,6 +33,7 @@ import { AgentOrb } from "@/components/bui/orb";
 import { AppLogo, appKey } from "../app/app-logo";
 import { AgentPanel, type AgentPanelHandle } from "./agent-panel";
 import { DesktopStage } from "./desktop-stage";
+import { Insights } from "./insights";
 import { JobStage } from "./job-stage";
 import { LiveCost, Uptime, useWorkloadAction } from "./shared";
 import { StatusChip } from "./status";
@@ -64,6 +65,7 @@ function Workspace({ w }: { w: Workload }) {
   const [open, setOpen] = useState(true);
   const [sheet, setSheet] = useState(false);
   const [animating, setAnimating] = useState(false);
+  const [view, setView] = useState<"work" | "insights">("work");
   const animTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nav = useSidebar();
 
@@ -126,11 +128,18 @@ function Workspace({ w }: { w: Workload }) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const stage = w.kind === "desktop" ? <DesktopStage w={w} onAskAgent={askAgent} /> : <JobStage w={w} />;
+  const work = w.kind === "desktop" ? <DesktopStage w={w} onAskAgent={askAgent} /> : <JobStage w={w} />;
+  // The desktop stays mounted while Insights is open, so its stream doesn't reconnect on every switch.
+  const stage = (
+    <>
+      <div className={cn("h-full min-h-0", view !== "work" && "hidden")}>{work}</div>
+      {view === "insights" && <Insights w={w} />}
+    </>
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Header w={w} agentOpen={mobile ? sheet : open} onToggleAgent={() => toggle()} />
+      <Header w={w} agentOpen={mobile ? sheet : open} onToggleAgent={() => toggle()} view={view} onView={setView} />
       {mobile ? (
         <>
           <div className="min-h-0 flex-1">{stage}</div>
@@ -168,7 +177,19 @@ function Workspace({ w }: { w: Workload }) {
   );
 }
 
-function Header({ w, agentOpen, onToggleAgent }: { w: Workload; agentOpen: boolean; onToggleAgent: () => void }) {
+function Header({
+  w,
+  agentOpen,
+  onToggleAgent,
+  view,
+  onView,
+}: {
+  w: Workload;
+  agentOpen: boolean;
+  onToggleAgent: () => void;
+  view: "work" | "insights";
+  onView: (v: "work" | "insights") => void;
+}) {
   const router = useRouter();
   const { busy, run } = useWorkloadAction(w.id);
   const agent = useAgentState(w);
@@ -189,6 +210,28 @@ function Header({ w, agentOpen, onToggleAgent }: { w: Workload; agentOpen: boole
         <h1 className="truncate font-medium">{w.title}</h1>
       </nav>
       <StatusChip status={w.status} className="ml-1 text-[12px]" />
+      <div role="tablist" aria-label="View" className="ml-2 flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+        {(
+          [
+            ["work", desktop ? "Desktop" : "Job"],
+            ["insights", "Insights"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={view === key}
+            onClick={() => onView(key)}
+            className={cn(
+              "rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors",
+              view === key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="hidden items-center gap-3 pl-2 text-[12px] text-muted-foreground xl:flex">
         <span className="h-3.5 w-px bg-border" />
         <span>{w.gpuName}</span>
