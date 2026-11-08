@@ -49,6 +49,10 @@ log = structlog.get_logger()
 JOB_DIR = "~/workspace/anywhere/job"
 #: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
 STARTING_POLL_LIMIT = 6
+#: run.log bytes one poll reads (see `poll_command`).
+LOG_CHUNK = 12000
+#: Back-to-back polls allowed to read the rest of run.log once a job has ended.
+MAX_LOG_DRAINS = 200
 #: How often the guard looks for orphaned Brev instances.
 #: Idle-stop savings older than this stop counting toward the total and are dropped.
 IDLE_STOP_RETENTION_DAYS = 90
@@ -354,13 +358,13 @@ class Supervisor:
 
     async def ensure_desktop_services(self, w: dict) -> None:
         """Re-run the idempotent start script: starts any desktop service that's missing."""
-        result = await self.remote(w).run("bash -s", input=_env("desktop-start.sh").encode(), timeout=150)
+        result = await self.remote(w).run("bash -s", input=_env("desktop-start.sh").encode(), timeout=300)
         if "::ready::" not in result.stdout:
             raise RemoteError("The desktop's services didn't come up")
 
     async def _start_desktop(self, w: dict, remote: Remote) -> None:
         await self._event(w, "Starting the desktop session")
-        result = await remote.run("bash -s", input=_env("desktop-start.sh").encode(), timeout=150)
+        result = await remote.run("bash -s", input=_env("desktop-start.sh").encode(), timeout=300)
         if "::ready::" not in result.stdout:
             raise RemoteError("Desktop services did not report ready")
         await self._transition(w, Status.RUNNING, "Desktop is live")
@@ -603,8 +607,10 @@ class Supervisor:
         starting_polls = 0
         source = json.loads(w["planJson"]).get("inputs", {}).get("source_workload_id")
         polls = 0
+        drains = 0
         while True:
-            await asyncio.sleep(self.poll_seconds)
+            if not drains:
+                await asyncio.sleep(self.poll_seconds)
             polls += 1
             # A render copies its frames back to the desktop it came from: don't let that
             # desktop idle-stop before the frames arrive.
@@ -612,6 +618,7 @@ class Supervisor:
                 src = await _quiet(self.store.workload(int(source)))
                 if src and src["status"] == Status.RUNNING:
                     await _safe(self.store.record_usage(int(source), int(src["accruedCents"]), touch=True))
+            read_from = log_offset
             try:
                 res = await remote.run(poll_command(log_offset, metric_lines), timeout=60)
                 failures = 0
@@ -647,6 +654,13 @@ class Supervisor:
             v = self.vault.get(w["id"])
             if (v.get("log_offset"), v.get("metric_lines")) != (log_offset, metric_lines):
                 self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
+            # The job has ended but run.log still holds more than one poll's worth:
+            # read the rest right away. Otherwise the tail (the traceback, on a
+            # failure) would never reach the log view before the machine is deleted.
+            if poll.status and poll.offset - read_from >= LOG_CHUNK and drains < MAX_LOG_DRAINS:
+                drains += 1
+                continue
+            drains = 0
             if poll.status == "succeeded":
                 await self._finish_batch(w, remote)
                 return
@@ -1124,7 +1138,7 @@ class Poll:
     alive: str
 
 
-def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
+def poll_command(log_offset: int, metric_lines: int, chunk: int = LOG_CHUNK) -> str:
     """One SSH round trip that returns new log bytes, complete new metric lines,
     the status file and whether the runner is alive, between unambiguous markers.
 
@@ -1147,7 +1161,7 @@ def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
     )
 
 
-def parse_poll(out: str, log_offset: int = 0, chunk: int = 12000) -> Poll:
+def parse_poll(out: str, log_offset: int = 0, chunk: int = LOG_CHUNK) -> Poll:
     """Parse `poll_command` output. `log_offset` is the offset the command read from."""
     if "::missing::" in out and "::log::" not in out:
         return Poll(False, log_offset, "", [], "", "")
