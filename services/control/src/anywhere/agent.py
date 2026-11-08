@@ -170,7 +170,7 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             return f"Could not approve: {exc}"
 
     async def list_workloads() -> str:
-        rows = [w for w in await app.store.workloads() if w["owner"] == ctx.owner]
+        rows = await app.store.workloads_for(ctx.owner)
         rows.sort(key=lambda w: w["createdAt"], reverse=True)
         return json.dumps(
             [
@@ -319,7 +319,7 @@ class Agent:
         await self._stack.aclose()
 
     async def _state_summary(self, owner: str) -> str:
-        active = [w for w in await self.app.store.workloads() if w["owner"] == owner]
+        active = await self.app.store.workloads_for(owner)
         live = [
             f"- #{w['id']} {w['title']} ({w['kind']}): {w['status']}"
             for w in active

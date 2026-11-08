@@ -51,6 +51,12 @@ class McpStore(FakeStore):
     async def workload(self, id):
         return next((w for w in await self.workloads() if w["id"] == id), None)
 
+    async def workloads_for(self, owner):
+        return [w for w in await self.workloads() if w["owner"] == owner]
+
+    async def agent_step_summaries(self, run_id):
+        return await self.agent_steps(run_id)
+
     async def account(self, identity):
         return next((a for a in self.accounts_ if a["identity"] == identity), None)
 

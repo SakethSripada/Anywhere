@@ -58,3 +58,25 @@ async def test_malformed_identities_never_reach_sql():
     assert await store.account("1 OR 1=1") is None
     assert await store.handles_for("x") == []
     assert client.queries == []
+
+
+@pytest.mark.parametrize("reject", [False, True])
+async def test_workloads_for_filters_by_owner_on_the_server(reject):
+    client = Client({"worker_workloads": [{"id": 1, "owner": OWNER}, {"id": 2, "owner": "cd" * 32}]}, reject)
+    rows = await Store(client).workloads_for(OWNER)
+    assert [w["id"] for w in rows] == [1]
+    assert client.queries[0] == f"SELECT * FROM worker_workloads WHERE owner = 0x{OWNER}"
+
+
+async def test_step_summaries_skip_detail_and_fall_back_to_a_full_read():
+    class Projecting(Client):
+        async def sql(self, query):
+            self.queries.append(query)
+            if query.startswith("SELECT seq"):
+                raise SpacetimeError("unsupported", 400)
+            return [{"seq": 2, "detail": "x"}, {"seq": 1, "detail": "y"}]
+
+    client = Projecting({})
+    rows = await Store(client).agent_step_summaries(5)
+    assert [r["seq"] for r in rows] == [1, 2]
+    assert client.queries[0].startswith("SELECT seq, kind, summary, screenshotKey FROM worker_agent_steps")

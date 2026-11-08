@@ -64,6 +64,9 @@ class FakeStore:
     async def workloads(self):
         return [dict(r) for r in self.rows.values()]
 
+    async def workloads_for(self, owner):
+        return [w for w in await self.workloads() if w["owner"] == owner]
+
     async def accounts(self):
         return self.accounts_
 
