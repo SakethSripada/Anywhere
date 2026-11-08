@@ -295,7 +295,7 @@ class ScriptedRemote(FakeRemote):
     async def run(self, command, **kw):
         from anywhere.remote import Result
 
-        if "::offset::" in command:
+        if "::log::" in command:
             return Result(0, self.polls.pop(0) if self.polls else "", "")
         return Result(0, "file contents\n", "")
 
@@ -315,9 +315,12 @@ class FakeStorage:
         self.objects[key] = content_type
 
 
-def poll_output(offset, log="", metrics=(), status="", alive="yes"):
+def poll_output(offset=0, log="", metrics=(), status="", alive="yes"):
+    import base64
+
     rows = "".join(m + "\n" for m in metrics)
-    return f"::offset::{offset}\n{log}\n::metrics::\n{rows}::status::\n{status}\n::alive::\n{alive}\n"
+    b64 = base64.b64encode(log.encode()).decode()
+    return f"::log::{b64}\n::metrics::\n{rows}::status::\n{status}\n::alive::\n{alive}\n"
 
 
 async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_path):
@@ -337,7 +340,7 @@ async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_pa
     await sup._monitor_batch(w)
     assert [t for _, t in store.logs] == ["::step:: Training\n", "more log\n"]
     assert {(p["name"], p["step"]) for p in store.metrics} >= {("loss", 5), ("loss", 10), ("progress", 10)}
-    assert sup.vault.get(1)["log_offset"] == 40
+    assert sup.vault.get(1)["log_offset"] == len(b"::step:: Training\nmore log\n")
     assert store.rows[1]["status"] == "succeeded"
     names = [a[2] for a in store.artifacts]
     assert names[0] == "LoRA adapter" and "Metrics" in names
@@ -354,3 +357,55 @@ async def test_batch_monitor_fails_when_runner_dies_silently(tmp_path):
     await sup._monitor_batch(w)
     assert store.rows[1]["status"] == "failed"
     assert "stopped unexpectedly" in store.rows[1]["statusDetail"]
+
+
+async def test_batch_monitor_fails_when_the_job_directory_is_gone(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = ["::missing::\n"] * 3
+    w = store.add(kind="batch", status="running")
+    await sup._monitor_batch(w)
+    assert store.rows[1]["status"] == "failed"
+
+
+async def test_batch_monitor_gives_up_on_a_runner_that_never_starts(tmp_path):
+    from anywhere import supervisor as sup_mod
+
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = [poll_output(alive="starting")] * (sup_mod.STARTING_POLL_LIMIT + 3)
+    w = store.add(kind="batch", status="running")
+    await sup._monitor_batch(w)
+    assert store.rows[1]["status"] == "failed"
+
+
+async def test_batch_monitor_retries_a_failed_log_write(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.storage = FakeStorage()
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = [
+        poll_output(log="first\n"),
+        poll_output(log="first\n"),  # same bytes come back because the offset didn't move
+        poll_output(log="", status="succeeded"),
+    ]
+    w = store.add(kind="batch", status="running")
+    brev.instances[instance_name(1)] = "RUNNING"
+    real = store.append_logs
+    calls = {"n": 0}
+
+    async def flaky(wid, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("spacetime blip")
+        await real(wid, text)
+
+    store.append_logs = flaky
+    await sup._monitor_batch(w)
+    assert [t for _, t in store.logs] == ["first\n"]
+    assert sup.vault.get(1)["log_offset"] == len(b"first\n")

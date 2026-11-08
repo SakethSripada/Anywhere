@@ -199,7 +199,7 @@ def test_poll_protocol_in_a_real_shell(tmp_path, monkeypatch):
 
     def poll(offset, lines):
         out = subprocess.run(["bash", "-c", sup_mod.poll_command(offset, lines)], capture_output=True, text=True)
-        return sup_mod.parse_poll(out.stdout)
+        return sup_mod.parse_poll(out.stdout, offset)
 
     p = poll(0, 0)
     assert p.log.startswith("::step:: Checking the GPU") and p.offset == len((tmp_path / "run.log").read_bytes())
@@ -208,7 +208,7 @@ def test_poll_protocol_in_a_real_shell(tmp_path, monkeypatch):
         {"name": "loss", "step": 5, "value": 1.5},
         {"name": "progress", "step": 5, "value": 0.5},
     ]
-    assert p.status == "" and p.alive
+    assert p.status == "" and p.alive == "yes"
 
     with (tmp_path / "metrics.jsonl").open("a") as f:
         f.write('ss": 1.2}\n')
@@ -218,4 +218,31 @@ def test_poll_protocol_in_a_real_shell(tmp_path, monkeypatch):
     assert sup_mod.metric_points(p2.metric_rows) == [{"name": "loss", "step": 10, "value": 1.2}]
 
     (tmp_path / "pid").write_text("999999")
-    assert poll(p.offset, 2).alive is False
+    assert poll(p.offset, 2).alive == "no"
+
+
+def test_poll_protocol_cuts_at_line_boundaries_and_flags_missing_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(sup_mod, "JOB_DIR", str(tmp_path))
+
+    def poll(offset, chunk=12000):
+        cmd = sup_mod.poll_command(offset, 0, chunk=chunk)
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        return sup_mod.parse_poll(out.stdout, offset, chunk=chunk)
+
+    # A partly written last line (and a multibyte char split by the chunk) is held back.
+    (tmp_path / "run.log").write_bytes("::step:: One\nhé".encode())
+    p = poll(0)
+    assert p.log == "::step:: One\n" and p.offset == len(b"::step:: One\n")
+    long_text = "::step:: Two ünïcode line\n" * 3
+    (tmp_path / "run.log").write_bytes(long_text.encode())
+    p = poll(0, chunk=40)  # cuts inside the second line
+    assert p.log == "::step:: Two ünïcode line\n" and "\ufffd" not in p.log
+    assert poll(p.offset, chunk=40).log == "::step:: Two ünïcode line\n"
+    # Once the job has a status, the unterminated tail is flushed.
+    (tmp_path / "run.log").write_bytes(b"done")
+    (tmp_path / "status").write_text("failed: boom\n")
+    assert poll(0).log == "done"
+
+    monkeypatch.setattr(sup_mod, "JOB_DIR", str(tmp_path / "gone"))
+    gone = poll(0)
+    assert gone.found is False

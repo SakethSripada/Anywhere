@@ -14,6 +14,7 @@ Every path that can create compute has a matching cleanup path:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import re
@@ -44,6 +45,8 @@ from .vault import Vault
 log = structlog.get_logger()
 
 JOB_DIR = "~/workspace/anywhere/job"
+#: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
+STARTING_POLL_LIMIT = 6
 #: How often the guard looks for orphaned Brev instances.
 RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
@@ -466,6 +469,7 @@ class Supervisor:
         log_offset, metric_lines = int(v.get("log_offset", 0)), int(v.get("metric_lines", 0))
         failures = 0
         dead_polls = 0
+        starting_polls = 0
         while True:
             await asyncio.sleep(self.poll_seconds)
             try:
@@ -477,26 +481,47 @@ class Supervisor:
                     await self._fail(w, RemoteError(f"Lost contact with the training machine: {exc}"))
                     return
                 continue
-            poll = parse_poll(res.stdout)
+            poll = parse_poll(res.stdout, log_offset)
+            # Offsets only advance once the data is stored, so a failed write is
+            # retried on the next poll instead of being skipped for good.
             if poll.log:
-                await _safe(self.store.append_logs(w["id"], poll.log[-15000:]))
-                for marker in re.findall(r"::step:: (.+)", poll.log):
-                    await self._event(w, marker.strip())
-            log_offset = max(log_offset, poll.offset)
-            metric_lines += len(poll.metric_rows)
+                try:
+                    await self.store.append_logs(w["id"], poll.log)
+                    log_offset = max(log_offset, poll.offset)
+                    for marker in re.findall(r"::step:: (.+)", poll.log):
+                        await self._event(w, marker.strip())
+                except Exception as exc:
+                    log.warning("supervisor.write_failed", error=str(exc))
+            else:
+                log_offset = max(log_offset, poll.offset)
             points = metric_points(poll.metric_rows)
             if points:
-                await _safe(self.store.add_metrics(w["id"], points))
+                try:
+                    await self.store.add_metrics(w["id"], points)
+                    metric_lines += len(poll.metric_rows)
+                except Exception as exc:
+                    log.warning("supervisor.write_failed", error=str(exc))
                 await _safe(self.store.record_usage(w["id"], self._accrued(w), touch=True))
-            self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
+            else:
+                metric_lines += len(poll.metric_rows)
+            v = self.vault.get(w["id"])
+            if (v.get("log_offset"), v.get("metric_lines")) != (log_offset, metric_lines):
+                self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
             if poll.status == "succeeded":
                 await self._finish_batch(w, remote)
                 return
             if poll.status.startswith("failed"):
                 await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "Training failed"))
                 return
-            # The runner died without writing a status (OOM kill, reboot): don't bill forever.
-            dead_polls = dead_polls + 1 if not poll.alive else 0
+            # The runner died without writing a status (OOM kill, reboot), the job
+            # directory vanished, or the runner never started: don't bill forever.
+            if not poll.found or poll.alive == "no":
+                dead_polls += 1
+            elif poll.alive == "starting":
+                starting_polls += 1
+                dead_polls = dead_polls + 1 if starting_polls > STARTING_POLL_LIMIT else 0
+            else:
+                dead_polls = 0
             if dead_polls >= 3:
                 await self._fail(w, RemoteError("The training process stopped unexpectedly. See the log for details."))
                 return
@@ -736,26 +761,32 @@ class Supervisor:
 
 @dataclass(frozen=True)
 class Poll:
+    #: False when the job directory is missing (machine reimaged or wiped).
+    found: bool
+    #: Byte offset in run.log up to which `log` was consumed.
     offset: int
     log: str
     metric_rows: list[str]
     status: str
-    alive: bool
+    #: "yes", "no" (pid file but process gone), "starting" (no pid file yet), or ""
+    #: when the output was unreadable.
+    alive: str
 
 
 def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
     """One SSH round trip that returns new log bytes, complete new metric lines,
     the status file and whether the runner is alive, between unambiguous markers.
 
-    Uses printf (not `echo '\\n'`, which bash prints literally) and reports the
-    byte offset it read up to, so multibyte characters can't skew the offset."""
+    The log bytes travel base64-encoded so `parse_poll` can cut them at a line
+    boundary and count bytes exactly: a byte-sized cut could otherwise split a
+    `::step::` marker or a multibyte character. printf, not `echo '\\n'`."""
     o, m = int(log_offset), int(metric_lines)
     return (
-        f"cd {JOB_DIR} 2>/dev/null || exit 0; "
+        f"cd {JOB_DIR} 2>/dev/null || {{ printf '::missing::\\n'; exit 0; }}; "
         f"size=$(wc -c < run.log 2>/dev/null || echo 0); end=$((size < {o + chunk} ? size : {o + chunk})); "
         f"[ $end -lt {o} ] && end={o}; "
-        "printf '::offset::%s\\n' \"$end\"; "
-        f"tail -c +{o + 1} run.log 2>/dev/null | head -c $((end - {o})); "
+        "printf '::log::'; "
+        f"tail -c +{o + 1} run.log 2>/dev/null | head -c $((end - {o})) | base64 | tr -d '\\n'; "
         "printf '\\n::metrics::\\n'; "
         "total=$(cat metrics.jsonl 2>/dev/null | wc -l); "
         f"[ $total -gt {m} ] && tail -n +{m + 1} metrics.jsonl | head -n $((total - {m})); "
@@ -765,18 +796,34 @@ def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
     )
 
 
-def parse_poll(out: str) -> Poll:
-    head, _, rest = out.partition("::offset::")
-    offset_line, _, rest = rest.partition("\n")
-    log_part, _, rest = rest.partition("\n::metrics::\n")
+def parse_poll(out: str, log_offset: int = 0, chunk: int = 12000) -> Poll:
+    """Parse `poll_command` output. `log_offset` is the offset the command read from."""
+    if "::missing::" in out and "::log::" not in out:
+        return Poll(False, log_offset, "", [], "", "")
+    _, _, rest = out.partition("::log::")
+    b64, _, rest = rest.partition("\n::metrics::\n")
     metrics_part, _, rest = rest.partition("::status::\n")
     status_part, _, alive_part = rest.partition("\n::alive::\n")
+    status = status_part.strip()
+    try:
+        raw = base64.b64decode(b64.strip(), validate=True) if b64.strip() else b""
+    except ValueError:
+        raw = b""
+    # Keep only complete lines unless the job has finished (then flush the tail),
+    # or a single line is longer than a whole chunk (then take it as is).
+    if raw and not raw.endswith(b"\n") and not status:
+        cut = raw.rfind(b"\n")
+        if cut >= 0:
+            raw = raw[: cut + 1]
+        elif len(raw) < chunk:
+            raw = b""
     return Poll(
-        offset=int(offset_line.strip()) if offset_line.strip().isdigit() else 0,
-        log=log_part,
+        found=True,
+        offset=log_offset + len(raw),
+        log=raw.decode("utf-8", errors="replace"),
         metric_rows=[ln for ln in metrics_part.split("\n") if ln.strip()],
-        status=status_part.strip(),
-        alive=alive_part.strip() != "no",
+        status=status,
+        alive=alive_part.strip(),
     )
 
 
