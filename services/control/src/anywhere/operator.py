@@ -426,6 +426,10 @@ async def _execute(screen: Screen, a: Action, frame: Frame) -> str:
             await screen.scroll(*xy(a.x, a.y), -notches)
         case "type":
             await screen.type(a.text or "")
+            # Models often add the confirming key to a type action ("3" then Return); seen
+            # live, typing alone left a Blender field in edit mode.
+            for chord in key_chords([k.lower() for k in a.keys or []]):
+                await screen.keys(chord)
         case "key":
             for chord in key_chords([k.lower() for k in a.keys or []]):
                 await screen.keys(chord)
