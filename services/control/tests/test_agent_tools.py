@@ -73,3 +73,25 @@ def test_failure_detection():
     assert not _failed(json.dumps({"ok": True}))
     assert _failed("Could not approve: already running")
     assert not _failed("Approved.")
+
+
+def test_old_messages_are_pruned_from_the_checkpointed_state():
+    from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
+    from langgraph.graph.message import add_messages
+
+    from anywhere.agent import prune_history
+
+    msgs = add_messages(
+        [],
+        [
+            HumanMessage("q0"),
+            AIMessage("", tool_calls=[{"name": "t", "args": {}, "id": "c1"}]),
+            ToolMessage("r", tool_call_id="c1"),
+        ]
+        + [HumanMessage(f"m{i}") for i in range(5)],
+    )
+    assert prune_history(msgs, keep=10) == []
+    removals = prune_history(msgs, keep=6)  # cut would land on the ToolMessage: move past it
+    assert all(isinstance(r, RemoveMessage) for r in removals) and len(removals) == 3
+    kept = add_messages(msgs, removals)
+    assert len(kept) == 5 and not isinstance(kept[0], ToolMessage)

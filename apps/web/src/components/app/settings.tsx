@@ -10,18 +10,36 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ApiError, fetchHealth, useApi } from "@/lib/api";
-import { useAccount, useMonthSpend, useNow } from "@/lib/data";
+import { useAccount, useMonthSpend, useNow, usePlatform } from "@/lib/data";
 import { cents, ms } from "@/lib/format";
 import { reducers, tables, useReducer, useSession, useTable } from "@/lib/stdb";
 import { cn } from "@/lib/utils";
 import { AgentAccess } from "./agent-access";
 import { PageHeader } from "./page-header";
 
+const SECTIONS = [
+  ["profile", "Profile"],
+  ["spending", "Spending"],
+  ["imessage", "iMessage"],
+  ["agents", "Agents"],
+  ["integrations", "Integrations"],
+] as const;
+
 export function SettingsView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <PageHeader title="Settings" />
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 pt-2 pb-16 sm:px-8">
+      {/* Jump links, so the page reads as five clear sections instead of one long scroll. */}
+      <nav aria-label="Settings sections" className="sticky top-0 z-10 border-b bg-background/90 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-3xl gap-1 overflow-x-auto px-4 py-2 sm:px-8">
+          {SECTIONS.map(([id, label]) => (
+            <a key={id} href={`#${id}`} className="shrink-0 rounded-md px-2.5 py-1 text-[13px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+              {label}
+            </a>
+          ))}
+        </div>
+      </nav>
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 pt-6 pb-16 sm:px-8">
         <Profile />
         <Spending />
         <Messaging />
@@ -51,6 +69,7 @@ function Profile() {
   const register = useReducer(reducers.register);
   const [name, setName] = useState(account?.displayName ?? "");
   const [busy, setBusy] = useState(false);
+  const [showId, setShowId] = useState(false);
   const dirty = !!account && name.trim() !== account.displayName && name.trim().length > 0;
 
   async function save(e?: FormEvent) {
@@ -68,8 +87,9 @@ function Profile() {
 
   return (
     <Section
+      id="profile"
       title="Profile"
-      description="Your account is a SpacetimeDB identity stored in this browser."
+      description="Your account lives in this browser, so there’s no password to remember."
       footer={
         <Button size="sm" disabled={!dirty || busy} onClick={() => void save()}>
           Save
@@ -81,19 +101,26 @@ function Profile() {
           <Label htmlFor="display-name">Display name</Label>
           <Input id="display-name" value={name} maxLength={64} onChange={(e) => setName(e.target.value)} />
         </div>
-        {session.identity && (
+        {session.identity && !showId && (
+          <div className="flex items-end">
+            <button type="button" onClick={() => setShowId(true)} className="pb-2 text-[13px] text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
+              Show account ID
+            </button>
+          </div>
+        )}
+        {session.identity && showId && (
           <div className="grid gap-2">
-            <Label>Identity</Label>
+            <Label>Account ID</Label>
             <div className="flex gap-2">
               <Input readOnly value={session.identity} className="font-mono text-xs text-muted-foreground" />
               <Button
                 type="button"
                 variant="outline"
                 size="icon"
-                aria-label="Copy identity"
+                aria-label="Copy account ID"
                 onClick={() => {
                   void navigator.clipboard.writeText(session.identity!);
-                  toast("Identity copied");
+                  toast("Account ID copied");
                 }}
               >
                 <Copy />
@@ -203,7 +230,7 @@ function Messaging() {
   }
 
   return (
-    <Section title="iMessage" description="Text Anywhere to start tasks, check on machines and get notified when work finishes. Powered by Photon.">
+    <Section id="imessage" title="iMessage" description="Text Anywhere to start tasks, check on machines and get notified when work finishes. Powered by Photon.">
       <div className="grid gap-4">
         {handles.map((h) => (
           <div key={h.handle} className="flex items-center gap-3 rounded-lg border px-3 py-2.5">
@@ -270,13 +297,23 @@ const INTEGRATIONS = [
 ];
 
 function Integrations() {
-  const [health, setHealth] = useState<Awaited<ReturnType<typeof fetchHealth>> | undefined>(undefined);
+  // Readiness and mode come from the live platform row (the control plane
+  // writes the same readiness snapshot /health serves); /health is only probed
+  // to tell whether the control plane is reachable right now.
+  const { platform, integrations } = usePlatform();
+  const [probe, setProbe] = useState<Awaited<ReturnType<typeof fetchHealth>> | undefined>(undefined);
   useEffect(() => {
-    void fetchHealth().then(setHealth);
+    const ctl = new AbortController();
+    void fetchHealth(ctl.signal).then((h) => {
+      if (!ctl.signal.aborted) setProbe(h);
+    });
+    return () => ctl.abort();
   }, []);
+  // Before the supervisor's first platform write, fall back to the probe's own snapshot.
+  const health = probe && platform ? { mode: platform.provisioningMode, integrations } : probe;
 
   return (
-    <Section title="Integrations" description="What this deployment is connected to. Keys live only on the server.">
+    <Section id="integrations" title="Integrations" description="What this deployment is connected to. Keys live only on the server.">
       {health === undefined ? (
         <div className="grid gap-3">
           {INTEGRATIONS.map((i) => (

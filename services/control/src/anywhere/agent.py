@@ -15,7 +15,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START, MessagesState, StateGraph
@@ -96,6 +96,23 @@ def trim_history(messages: list, limit: int = 30) -> list:
     return history
 
 
+#: Messages kept in a conversation's checkpointed state. The model only ever sees
+#: the last 30 (trim_history); anything older is dead weight that every graph
+#: step re-serialises into the checkpoint, so it is removed from the state.
+HISTORY_KEEP = 60
+
+
+def prune_history(messages: list, keep: int = HISTORY_KEEP) -> list:
+    """RemoveMessage markers for everything before the last `keep` messages, never
+    leaving the kept history starting on an orphaned tool result."""
+    if len(messages) <= keep:
+        return []
+    cut = len(messages) - keep
+    while cut < len(messages) and isinstance(messages[cut], ToolMessage):
+        cut += 1
+    return [RemoveMessage(id=m.id) for m in messages[:cut] if getattr(m, "id", None)]
+
+
 def _failed(output: str) -> bool:
     try:
         data = json.loads(output)
@@ -170,7 +187,7 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             return f"Could not approve: {exc}"
 
     async def list_workloads() -> str:
-        rows = [w for w in await app.store.workloads() if w["owner"] == ctx.owner]
+        rows = await app.store.workloads_for(ctx.owner)
         rows.sort(key=lambda w: w["createdAt"], reverse=True)
         return json.dumps(
             [
@@ -319,7 +336,7 @@ class Agent:
         await self._stack.aclose()
 
     async def _state_summary(self, owner: str) -> str:
-        active = [w for w in await self.app.store.workloads() if w["owner"] == owner]
+        active = await self.app.store.workloads_for(owner)
         live = [
             f"- #{w['id']} {w['title']} ({w['kind']}): {w['status']}"
             for w in active
@@ -347,7 +364,13 @@ class Agent:
         )
 
         async def call_model(state: MessagesState) -> dict:
-            return {"messages": [await bound.ainvoke([system, *trim_history(state["messages"])])]}
+            try:
+                reply = await bound.ainvoke([system, *trim_history(state["messages"])])
+            except Exception as exc:
+                self.app.readiness.record_call("nemotron", "Nemotron planner model", exc)
+                raise
+            self.app.readiness.record_call("nemotron", "Nemotron planner model", None)
+            return {"messages": [*prune_history(state["messages"]), reply]}
 
         g = StateGraph(MessagesState)
         g.add_node("agent", call_model)

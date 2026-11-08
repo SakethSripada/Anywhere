@@ -296,7 +296,8 @@ function ControlSwitch({ control, busy, onChange }: { control: Control; busy: bo
         onClick={() => !agentSide && onChange("agent")}
         className={cn("relative z-10 flex h-full w-[76px] items-center justify-center gap-1.5 rounded-md transition-colors @xl/stage:w-24", agentSide ? "text-white" : "text-neutral-400 hover:text-neutral-200")}
       >
-        <AgentOrb state={agentSide ? "working" : "ready"} size={11} className={cn(!agentSide && "opacity-50 grayscale")} />
+        {/* Greyed out when you drive: "offline" is the same opacity-50 grayscale look, but frozen. */}
+        <AgentOrb state={agentSide ? "working" : "offline"} size={11} />
         Agent
       </button>
       <button
@@ -349,9 +350,10 @@ function Hud(props: {
   onTakeOver: () => void;
   onHandBack: () => void;
 }) {
-  const now = useNow(1000);
   const { control, w } = props;
   const saving = w.status === "saving";
+  // Don't tick while the HUD is hidden (the user has control).
+  const now = useNow(1000, !(control === "user" && !saving));
   if (control === "user" && !saving) return null;
   const thought = props.step ? parseDetail(props.step)?.thought : undefined;
 
@@ -416,7 +418,8 @@ function Hud(props: {
 function DesktopState({ w }: { w: Workload }) {
   const { busy, run } = useWorkloadAction(w.id);
   const booting = ["approved", "provisioning", "configuring"].includes(w.status);
-  const now = useNow(1000);
+  // Only the boot timer moves; stopped or failed machines don't need a clock.
+  const now = useNow(1000, booting);
 
   if (w.status === "planned") {
     return (

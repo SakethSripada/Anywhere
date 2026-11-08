@@ -14,6 +14,7 @@ Every path that can create compute has a matching cleanup path:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import re
@@ -31,7 +32,7 @@ import structlog
 from . import budget
 from .brev import BrevCLI, BrevError, ProvisioningDisabled, instance_name
 from .config import ProvisioningMode, Settings
-from .desktop import VncTunnels, connect_screen
+from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
 from .remote import Remote, RemoteError
@@ -44,6 +45,8 @@ from .vault import Vault
 log = structlog.get_logger()
 
 JOB_DIR = "~/workspace/anywhere/job"
+#: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
+STARTING_POLL_LIMIT = 6
 #: How often the guard looks for orphaned Brev instances.
 RECONCILE_SECONDS = 120
 STATE_DIR = "~/workspace/anywhere/state"
@@ -92,7 +95,12 @@ class Supervisor:
         self._monitors: dict[int, asyncio.Task] = {}
         self._locks: dict[int, asyncio.Lock] = {}
         self.vnc = VncTunnels()
+        self.shots = Screenshots()
         self._guard_task: asyncio.Task | None = None
+        self._telemetry_task: asyncio.Task | None = None
+        #: Running workloads, refreshed by the guard tick, that the GPU sampler polls.
+        self._sampling: dict[int, dict] = {}
+        self._gpu_total_sent: set[int] = set()
         #: Unowned instances seen on the previous reconcile pass. An instance is only
         #: deleted after it is unowned on two passes in a row.
         self._orphan_candidates: set[str] = set()
@@ -139,7 +147,12 @@ class Supervisor:
         w["status"] = to.value
         if to == Status.PROVISIONING:
             # Billing segment begins; remember what was already billed.
-            self.vault.update(w["id"], segment_base=int(w.get("accruedCents", 0)), segment_start=_now().isoformat())
+            self.vault.update(
+                w["id"],
+                segment_base=int(w.get("accruedCents", 0)),
+                segment_start=_now().isoformat(),
+                segment_closed=False,
+            )
 
     async def _event(self, w: dict, message: str, level: str = "info") -> None:
         try:
@@ -282,6 +295,7 @@ class Supervisor:
         if "::ready::" not in result.stdout:
             raise RemoteError("Desktop services did not report ready")
         await self._transition(w, Status.RUNNING, "Desktop is live")
+        await self._event(w, BOOT_READY)
         await self.store.record_usage(w["id"], int(w.get("accruedCents", 0)), touch=True)
         plan = json.loads(w["planJson"])
         if plan.get("intent", {}).get("application") == "blender":
@@ -336,6 +350,7 @@ class Supervisor:
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
+            await self.shots.close(w["id"])
             remote = self.remote(w)
             if w["kind"] == "desktop" and w["status"] == Status.RUNNING:
                 await self._transition(w, Status.SAVING, "Saving before stopping")
@@ -367,6 +382,7 @@ class Supervisor:
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             try:
                 await self._transition(w, Status.PROVISIONING, "Resuming your machine")
+                await self._event(w, BOOT_RESUME)
                 await self.brev.start(name)
                 await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60)
                 await self.brev.refresh_ssh()
@@ -384,6 +400,7 @@ class Supervisor:
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
+            await self.shots.close(w["id"])
             name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
             if w["status"] == Status.RUNNING and w["kind"] == "desktop":
                 await self._transition(w, Status.SAVING, "Saving before deleting")
@@ -426,6 +443,7 @@ class Supervisor:
         if asyncio.current_task() is not self._agents.get(w["id"]):
             await self.stop_agent(w["id"])
         await self.vnc.close(w["id"])
+        await self.shots.close(w["id"])
         name = self.vault.get(w["id"]).get("instance") or instance_name(w["id"])
         await self._settle_usage(w)
         with contextlib.suppress(ReducerRejected):
@@ -454,6 +472,7 @@ class Supervisor:
         )
         self.vault.update(w["id"], log_offset=0, metric_lines=0)
         await self._transition(w, Status.RUNNING, f"Fine-tuning {cfg.base_model.split('/')[-1]}")
+        await self._event(w, BOOT_TRAINING)
         await self.notify(w, "status", f"Training started on a {w['gpuName']}. I'll message you when it's done.")
 
     async def _monitor_batch(self, w: dict) -> None:
@@ -466,6 +485,7 @@ class Supervisor:
         log_offset, metric_lines = int(v.get("log_offset", 0)), int(v.get("metric_lines", 0))
         failures = 0
         dead_polls = 0
+        starting_polls = 0
         while True:
             await asyncio.sleep(self.poll_seconds)
             try:
@@ -477,26 +497,47 @@ class Supervisor:
                     await self._fail(w, RemoteError(f"Lost contact with the training machine: {exc}"))
                     return
                 continue
-            poll = parse_poll(res.stdout)
+            poll = parse_poll(res.stdout, log_offset)
+            # Offsets only advance once the data is stored, so a failed write is
+            # retried on the next poll instead of being skipped for good.
             if poll.log:
-                await _safe(self.store.append_logs(w["id"], poll.log[-15000:]))
-                for marker in re.findall(r"::step:: (.+)", poll.log):
-                    await self._event(w, marker.strip())
-            log_offset = max(log_offset, poll.offset)
-            metric_lines += len(poll.metric_rows)
+                try:
+                    await self.store.append_logs(w["id"], poll.log)
+                    log_offset = max(log_offset, poll.offset)
+                    for marker in re.findall(r"::step:: (.+)", poll.log):
+                        await self._event(w, marker.strip())
+                except Exception as exc:
+                    log.warning("supervisor.write_failed", error=str(exc))
+            else:
+                log_offset = max(log_offset, poll.offset)
             points = metric_points(poll.metric_rows)
             if points:
-                await _safe(self.store.add_metrics(w["id"], points))
+                try:
+                    await self.store.add_metrics(w["id"], points)
+                    metric_lines += len(poll.metric_rows)
+                except Exception as exc:
+                    log.warning("supervisor.write_failed", error=str(exc))
                 await _safe(self.store.record_usage(w["id"], self._accrued(w), touch=True))
-            self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
+            else:
+                metric_lines += len(poll.metric_rows)
+            v = self.vault.get(w["id"])
+            if (v.get("log_offset"), v.get("metric_lines")) != (log_offset, metric_lines):
+                self.vault.update(w["id"], log_offset=log_offset, metric_lines=metric_lines)
             if poll.status == "succeeded":
                 await self._finish_batch(w, remote)
                 return
             if poll.status.startswith("failed"):
                 await self._fail(w, RemoteError(poll.status.removeprefix("failed:").strip() or "Training failed"))
                 return
-            # The runner died without writing a status (OOM kill, reboot): don't bill forever.
-            dead_polls = dead_polls + 1 if not poll.alive else 0
+            # The runner died without writing a status (OOM kill, reboot), the job
+            # directory vanished, or the runner never started: don't bill forever.
+            if not poll.found or poll.alive == "no":
+                dead_polls += 1
+            elif poll.alive == "starting":
+                starting_polls += 1
+                dead_polls = dead_polls + 1 if starting_polls > STARTING_POLL_LIMIT else 0
+            else:
+                dead_polls = 0
             if dead_polls >= 3:
                 await self._fail(w, RemoteError("The training process stopped unexpectedly. See the log for details."))
                 return
@@ -560,6 +601,10 @@ class Supervisor:
         v = self.vault.get(w["id"])
         if start := v.get("segment_start"):
             return datetime.fromisoformat(start), int(v.get("segment_base", 0))
+        if v.get("segment_closed"):
+            # Settled (e.g. on stop) while the row is still briefly billable, such as
+            # `stopping`. Re-opening from `startedAt` here would bill the segment twice.
+            return None, int(v.get("segment_base", 0))
         started = w.get("startedAt")
         if w["status"] in BILLABLE and isinstance(started, datetime):
             self.vault.update(w["id"], segment_start=started.isoformat(), segment_base=int(v.get("segment_base", 0)))
@@ -576,19 +621,52 @@ class Supervisor:
     async def _settle_usage(self, w: dict) -> None:
         cents = self._accrued(w)
         w["accruedCents"] = cents
-        self.vault.update(w["id"], segment_start=None, segment_base=cents)
+        self.vault.update(w["id"], segment_start=None, segment_base=cents, segment_closed=True)
         await _safe(self.store.record_usage(w["id"], cents))
 
     def start_guard(self) -> None:
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._guard_loop(), name="budget-guard")
+        if self._telemetry_task is None and self.settings.gpu_telemetry_seconds > 0:
+            self._telemetry_task = asyncio.create_task(self._telemetry_loop(), name="gpu-telemetry")
 
     async def shutdown(self) -> None:
         if self._guard_task:
             self._guard_task.cancel()
+        if self._telemetry_task:
+            self._telemetry_task.cancel()
         for t in self._monitors.values():
             t.cancel()
         await self.vnc.close_all()
+        await self.shots.close_all()
+
+    # ── GPU telemetry ─────────────────────────────────────────────────────
+
+    async def _telemetry_loop(self) -> None:
+        while True:
+            for w in list(self._sampling.values()):
+                try:
+                    await self.sample_gpu(w)
+                except Exception as exc:  # telemetry must never break anything else
+                    log.debug("telemetry.sample_failed", workload=w["id"], error=str(exc)[:200])
+            await asyncio.sleep(self.settings.gpu_telemetry_seconds)
+
+    async def sample_gpu(self, w: dict) -> list[dict]:
+        """One `nvidia-smi` reading from a running machine, stored as `gpu.*` metric points.
+
+        The step is seconds since billing started, so a chart's x-axis is elapsed time."""
+        res = await self.remote(w).run(GPU_QUERY, timeout=8, check=False)
+        reading = parse_gpu_query(res.stdout) if res.code == 0 else None
+        if reading is None:
+            return []
+        started = w.get("startedAt")
+        step = max(0, int((_now() - started).total_seconds())) if isinstance(started, datetime) else 0
+        points = [{"name": f"gpu.{k}", "step": step, "value": v} for k, v in reading.items() if k != "mem_total_gb"]
+        if w["id"] not in self._gpu_total_sent and "mem_total_gb" in reading:
+            points.append({"name": "gpu.mem_total_gb", "step": step, "value": reading["mem_total_gb"]})
+            self._gpu_total_sent.add(w["id"])
+        await self.store.add_metrics(w["id"], points)
+        return points
 
     async def _guard_loop(self) -> None:
         while True:
@@ -606,6 +684,7 @@ class Supervisor:
         limits = budget.PlatformLimits(self.settings.global_budget_cents, self.settings.max_concurrent_instances)
 
         live = [w for w in workloads if w["status"] in BILLABLE]
+        self._sampling = {w["id"]: w for w in workloads if w["status"] == Status.RUNNING}
         for w in live:
             cents = self._accrued(w)
             if cents != w["accruedCents"]:
@@ -736,26 +815,32 @@ class Supervisor:
 
 @dataclass(frozen=True)
 class Poll:
+    #: False when the job directory is missing (machine reimaged or wiped).
+    found: bool
+    #: Byte offset in run.log up to which `log` was consumed.
     offset: int
     log: str
     metric_rows: list[str]
     status: str
-    alive: bool
+    #: "yes", "no" (pid file but process gone), "starting" (no pid file yet), or ""
+    #: when the output was unreadable.
+    alive: str
 
 
 def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
     """One SSH round trip that returns new log bytes, complete new metric lines,
     the status file and whether the runner is alive, between unambiguous markers.
 
-    Uses printf (not `echo '\\n'`, which bash prints literally) and reports the
-    byte offset it read up to, so multibyte characters can't skew the offset."""
+    The log bytes travel base64-encoded so `parse_poll` can cut them at a line
+    boundary and count bytes exactly: a byte-sized cut could otherwise split a
+    `::step::` marker or a multibyte character. printf, not `echo '\\n'`."""
     o, m = int(log_offset), int(metric_lines)
     return (
-        f"cd {JOB_DIR} 2>/dev/null || exit 0; "
+        f"cd {JOB_DIR} 2>/dev/null || {{ printf '::missing::\\n'; exit 0; }}; "
         f"size=$(wc -c < run.log 2>/dev/null || echo 0); end=$((size < {o + chunk} ? size : {o + chunk})); "
         f"[ $end -lt {o} ] && end={o}; "
-        "printf '::offset::%s\\n' \"$end\"; "
-        f"tail -c +{o + 1} run.log 2>/dev/null | head -c $((end - {o})); "
+        "printf '::log::'; "
+        f"tail -c +{o + 1} run.log 2>/dev/null | head -c $((end - {o})) | base64 | tr -d '\\n'; "
         "printf '\\n::metrics::\\n'; "
         "total=$(cat metrics.jsonl 2>/dev/null | wc -l); "
         f"[ $total -gt {m} ] && tail -n +{m + 1} metrics.jsonl | head -n $((total - {m})); "
@@ -765,19 +850,65 @@ def poll_command(log_offset: int, metric_lines: int, chunk: int = 12000) -> str:
     )
 
 
-def parse_poll(out: str) -> Poll:
-    head, _, rest = out.partition("::offset::")
-    offset_line, _, rest = rest.partition("\n")
-    log_part, _, rest = rest.partition("\n::metrics::\n")
+def parse_poll(out: str, log_offset: int = 0, chunk: int = 12000) -> Poll:
+    """Parse `poll_command` output. `log_offset` is the offset the command read from."""
+    if "::missing::" in out and "::log::" not in out:
+        return Poll(False, log_offset, "", [], "", "")
+    _, _, rest = out.partition("::log::")
+    b64, _, rest = rest.partition("\n::metrics::\n")
     metrics_part, _, rest = rest.partition("::status::\n")
     status_part, _, alive_part = rest.partition("\n::alive::\n")
+    status = status_part.strip()
+    try:
+        raw = base64.b64decode(b64.strip(), validate=True) if b64.strip() else b""
+    except ValueError:
+        raw = b""
+    # Keep only complete lines unless the job has finished (then flush the tail),
+    # or a single line is longer than a whole chunk (then take it as is).
+    if raw and not raw.endswith(b"\n") and not status:
+        cut = raw.rfind(b"\n")
+        if cut >= 0:
+            raw = raw[: cut + 1]
+        elif len(raw) < chunk:
+            raw = b""
     return Poll(
-        offset=int(offset_line.strip()) if offset_line.strip().isdigit() else 0,
-        log=log_part,
+        found=True,
+        offset=log_offset + len(raw),
+        log=raw.decode("utf-8", errors="replace"),
         metric_rows=[ln for ln in metrics_part.split("\n") if ln.strip()],
-        status=status_part.strip(),
-        alive=alive_part.strip() != "no",
+        status=status,
+        alive=alive_part.strip(),
     )
+
+
+#: Milestone events the web app's boot timeline keys on. Keep in sync with apps/web/src/lib/insights.ts.
+BOOT_READY = "Desktop is live"
+BOOT_RESUME = "Restarting the machine"
+BOOT_TRAINING = "Training started"
+
+GPU_QUERY = (
+    "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw "
+    "--format=csv,noheader,nounits"
+)
+
+
+def parse_gpu_query(stdout: str) -> dict[str, float] | None:
+    """Parse the first GPU's line of `GPU_QUERY`. Fields that report [N/A] are left out."""
+    line = next((ln for ln in stdout.splitlines() if ln.strip()), "")
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) != 5:
+        return None
+    names = ("util_pct", "mem_used_gb", "mem_total_gb", "temp_c", "power_w")
+    out: dict[str, float] = {}
+    for name, raw in zip(names, parts, strict=True):
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if name.startswith("mem_"):
+            value = round(value / 1024, 2)  # MiB -> GiB
+        out[name] = value
+    return out if "util_pct" in out else None
 
 
 def metric_points(rows: list[str]) -> list[dict]:

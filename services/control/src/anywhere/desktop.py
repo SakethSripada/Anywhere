@@ -110,17 +110,21 @@ def prepare_frame(png: bytes, max_width: int = 1280, quality: int = 72) -> Frame
 
 
 @contextlib.asynccontextmanager
-async def connect_screen(remote: Remote, token: str) -> AsyncIterator[Screen]:
+async def connect_screen(remote: Remote, token: str, *, port: int | None = None) -> AsyncIterator[Screen]:
+    """Connect to the desktop's Cua server, through a fresh tunnel or an existing
+    local `port` (see `Screenshots`)."""
     # The native Cua runtime has its own telemetry, separate from `telemetry_enabled`.
     os.environ.setdefault("CUA_TELEMETRY", "0")
     try:
         from cua_sandbox import Sandbox
     except ImportError as exc:  # pragma: no cover - dependency is declared
         raise RuntimeError("cua-sandbox is not installed") from exc
-    async with (
-        remote.tunnel(SPACESD_PORT) as port,
-        Sandbox.connect(url=f"http://127.0.0.1:{port}", token=token, telemetry_enabled=False) as sb,
-    ):
+    async with contextlib.AsyncExitStack() as stack:
+        if port is None:
+            port = await stack.enter_async_context(remote.tunnel(SPACESD_PORT))
+        sb = await stack.enter_async_context(
+            Sandbox.connect(url=f"http://127.0.0.1:{port}", token=token, telemetry_enabled=False)
+        )
         yield CuaScreen(sb)
 
 
@@ -133,15 +137,22 @@ async def _accepts(port: int) -> bool:
     return True
 
 
-class VncTunnels:
-    """One shared SSH tunnel per desktop for browser VNC sessions."""
+class TunnelPool:
+    """One shared SSH tunnel per desktop to a port on its loopback.
 
-    def __init__(self) -> None:
+    Each workload has its own lock, so a slow or dead desktop (probing takes up
+    to 3 s, bringing a tunnel up up to 20 s) never blocks other users' connects."""
+
+    def __init__(self, remote_port: int = VNC_PORT) -> None:
+        self.remote_port = remote_port
         self._tunnels: dict[int, tuple[contextlib.AbstractAsyncContextManager, int]] = {}
-        self._lock = asyncio.Lock()
+        self._locks: dict[int, asyncio.Lock] = {}
+
+    def _lock(self, workload_id: int) -> asyncio.Lock:
+        return self._locks.setdefault(workload_id, asyncio.Lock())
 
     async def port_for(self, workload_id: int, remote: Remote) -> int:
-        async with self._lock:
+        async with self._lock(workload_id):
             if workload_id in self._tunnels:
                 cm, port = self._tunnels[workload_id]
                 if await _accepts(port):
@@ -150,17 +161,66 @@ class VncTunnels:
                 del self._tunnels[workload_id]
                 with contextlib.suppress(Exception):
                     await cm.__aexit__(None, None, None)
-            cm = remote.tunnel(VNC_PORT)
+            cm = remote.tunnel(self.remote_port)
             port = await cm.__aenter__()
             self._tunnels[workload_id] = (cm, port)
             return port
 
     async def close(self, workload_id: int) -> None:
-        async with self._lock:
+        async with self._lock(workload_id):
             entry = self._tunnels.pop(workload_id, None)
+        self._locks.pop(workload_id, None)
         if entry:
             await entry[0].__aexit__(None, None, None)
 
     async def close_all(self) -> None:
         for wid in list(self._tunnels):
             await self.close(wid)
+
+
+class VncTunnels(TunnelPool):
+    """Browser VNC sessions: one shared tunnel per desktop to its VNC port."""
+
+    def __init__(self) -> None:
+        super().__init__(VNC_PORT)
+
+
+class Screenshots:
+    """Live screenshots for API/MCP callers, without a new SSH handshake and Cua
+    connection per call: the tunnel to the desktop's Cua port is pooled, a frame
+    is reused for `ttl` seconds, and concurrent callers share one capture."""
+
+    def __init__(self, ttl: float = 3.0) -> None:
+        self.ttl = ttl
+        self.tunnels = TunnelPool(SPACESD_PORT)
+        self._cache: dict[int, tuple[float, Frame]] = {}
+        self._inflight: dict[int, asyncio.Task] = {}
+
+    async def frame(self, workload_id: int, remote: Remote, token: str, timeout: float = 20) -> Frame:
+        now = asyncio.get_running_loop().time()
+        if (hit := self._cache.get(workload_id)) and now - hit[0] < self.ttl:
+            return hit[1]
+        task = self._inflight.get(workload_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._capture(workload_id, remote, token, timeout))
+            self._inflight[workload_id] = task
+        return await asyncio.shield(task)
+
+    async def _capture(self, workload_id: int, remote: Remote, token: str, timeout: float) -> Frame:
+        try:
+            port = await self.tunnels.port_for(workload_id, remote)
+            async with connect_screen(remote, token, port=port) as screen:
+                png = await asyncio.wait_for(screen.screenshot(), timeout)
+            frame = await asyncio.to_thread(prepare_frame, png)
+            self._cache[workload_id] = (asyncio.get_running_loop().time(), frame)
+            return frame
+        finally:
+            self._inflight.pop(workload_id, None)
+
+    async def close(self, workload_id: int) -> None:
+        self._cache.pop(workload_id, None)
+        await self.tunnels.close(workload_id)
+
+    async def close_all(self) -> None:
+        self._cache.clear()
+        await self.tunnels.close_all()

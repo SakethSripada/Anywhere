@@ -3,12 +3,13 @@
 import type { Message, Workload } from "@anywhere/stdb";
 import { ArrowDown } from "lucide-react";
 import Link from "next/link";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LoadingStatus } from "@/components/bui/loader";
-import { agentBusy, toItems, type ChatItem } from "@/lib/chat";
-import { useNow, useWorkloads } from "@/lib/data";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import { toItems, useAgentBusy, type ChatItem } from "@/lib/chat";
+import { useWorkload } from "@/lib/data";
 import { clock, ms } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { href } from "@/lib/workloads";
 import { Markdown } from "./markdown";
@@ -17,10 +18,40 @@ import { RunTrace, ToolRun } from "./tool-run";
 
 export type Pending = { id: string; text: string };
 
+const NO_ITEMS: ChatItem[] = [];
+
+type EventItem = { kind: "event"; at: number; key: string; level: string; text: string; time: string };
 type StreamItem =
   | { kind: "chat"; at: number; item: ChatItem }
   | { kind: "run"; at: number; key: string; runId: bigint }
-  | { kind: "event"; at: number; key: string; level: string; text: string; time: string };
+  | EventItem
+  | { kind: "events"; at: number; key: string; events: EventItem[] };
+
+const routine = (e: StreamItem): e is EventItem => e.kind === "event" && (e.level === "info" || e.level === "success");
+
+/**
+ * Fold runs of routine machine events ("Fetching the desktop image", ...) into
+ * one collapsible line, so the conversation isn't buried under setup steps.
+ * Warnings and errors always stay on their own line.
+ */
+function foldEvents(items: StreamItem[]): StreamItem[] {
+  const out: StreamItem[] = [];
+  let run: EventItem[] = [];
+  const flush = () => {
+    if (run.length >= 3) out.push({ kind: "events", at: run[0].at, key: `g${run[0].key}`, events: run });
+    else out.push(...run);
+    run = [];
+  };
+  for (const it of items) {
+    if (routine(it)) run.push(it);
+    else {
+      flush();
+      out.push(it);
+    }
+  }
+  flush();
+  return out;
+}
 
 /**
  * One continuous stream, the way Codex and Claude show an agent: what you
@@ -33,18 +64,24 @@ export function Thread({
   compact,
   focus,
   className,
+  busy: busyProp,
 }: {
   messages: readonly Message[];
   pending: Pending[];
+  /** whether the agent is mid-turn, when the parent already knows */
+  busy?: boolean;
   compact?: boolean;
   /** stream this machine's agent runs and events in as well */
   focus?: Workload;
   className?: string;
 }) {
   const items = useMemo(() => toItems(messages), [messages]);
-  const now = useNow(1000);
-  const [runs] = useTable(tables.myAgentRuns);
-  const [events] = useTable(tables.myEvents);
+  // Runs and events only join the stream for a focused machine; otherwise
+  // don't subscribe, and don't recompute or re-scroll on their changes.
+  const runRows = useShared("myAgentRuns", !!focus).rows;
+  const eventRows = useShared("myEvents", !!focus).rows;
+  const runs = focus ? runRows : NONE;
+  const events = focus ? eventRows : NONE;
 
   const stream = useMemo<StreamItem[]>(() => {
     const out: StreamItem[] = items.map((item) => ({ kind: "chat", at: itemTime(item), item }));
@@ -57,11 +94,13 @@ export function Thread({
         // Runs already narrate themselves; skip their start/finish events.
         if (e.workloadId === focus.id && !/^agent (started|finished|stopped|paused|resumed)/i.test(e.message)) out.push({ kind: "event", at: ms(e.createdAt), key: `e${e.id}`, level: e.level, text: e.message, time: clock(e.createdAt) });
     }
-    return out.sort((a, b) => a.at - b.at);
+    return foldEvents(out.sort((a, b) => a.at - b.at));
   }, [items, runs, events, focus]);
 
-  const busy = pending.length > 0 || agentBusy(items, now);
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  // A parent that already tracks this passes `busy` down; otherwise derive it here.
+  const ownBusy = useAgentBusy(busyProp === undefined ? items : NO_ITEMS);
+  const busy = busyProp ?? (pending.length > 0 || ownBusy);
+  const lastUser = useMemo(() => messages.findLast((m) => m.role === "user"), [messages]);
   const scroller = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
@@ -91,6 +130,8 @@ export function Thread({
               <RunTrace key={s.key} workload={focus} runId={s.runId} linkMachines={false} />
             ) : s.kind === "event" ? (
               <EventLine key={s.key} level={s.level} text={s.text} time={s.time} />
+            ) : s.kind === "events" ? (
+              <EventGroup key={s.key} events={s.events} />
             ) : null,
           )}
           {pending.map((p) => (
@@ -133,25 +174,15 @@ function itemTime(item: ChatItem): number {
 
 const prose = (compact?: boolean) => (compact ? "text-[13.5px] leading-[1.7] text-ink" : undefined);
 
-function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; focused: boolean }) {
+// Memoized: scroll state, pending bubbles and busy changes re-render the thread, not every item.
+const Item = memo(function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; focused: boolean }) {
   switch (item.type) {
     case "user":
       return <UserBubble text={item.m.body} channel={item.m.channel} time={clock(item.m.createdAt)} compact={compact} />;
     case "tools":
       return <ToolRun calls={item.calls} linkMachines={!focused} />;
     case "plan":
-      return compact ? (
-        <PlanRow workloadId={item.m.workloadId} />
-      ) : (
-        <>
-          <div className="xl:hidden">
-            <PlanCard workloadId={item.m.workloadId} />
-          </div>
-          <div className="hidden max-w-md xl:block">
-            <PlanRow workloadId={item.m.workloadId} />
-          </div>
-        </>
-      );
+      return compact ? <PlanRow workloadId={item.m.workloadId} /> : <WidePlan workloadId={item.m.workloadId} />;
     case "status":
       return <StatusLine m={item.m} focused={focused} />;
     case "error":
@@ -161,6 +192,20 @@ function Item({ item, compact, focused }: { item: ChatItem; compact?: boolean; f
     default:
       return <Markdown text={item.m.body} className={prose(compact)} />;
   }
+});
+
+/** Full card below xl, compact row at xl and up: mount only the one that shows. */
+function WidePlan({ workloadId }: { workloadId: bigint }) {
+  const xl = useMediaQuery("(min-width: 80rem)") // Tailwind's `xl`;
+  return xl ? (
+    <div className="max-w-md">
+      <PlanRow workloadId={workloadId} />
+    </div>
+  ) : (
+    <div>
+      <PlanCard workloadId={workloadId} />
+    </div>
+  );
 }
 
 function UserBubble({ text, channel, time, compact }: { text: string; channel?: string; time?: string; compact?: boolean }) {
@@ -184,8 +229,7 @@ function UserBubble({ text, channel, time, compact }: { text: string; channel?: 
 }
 
 function StatusLine({ m, focused }: { m: Message; focused: boolean }) {
-  const { all } = useWorkloads();
-  const w = all.find((x) => x.id === m.workloadId);
+  const { workload: w } = useWorkload(m.workloadId);
   return (
     <div className="flex items-baseline gap-2 text-[12.5px] text-ink-2">
       <span className="size-1.5 shrink-0 -translate-y-px rounded-full bg-green" />
@@ -194,6 +238,36 @@ function StatusLine({ m, focused }: { m: Message; focused: boolean }) {
         <Link href={href(w)} className="shrink-0 text-ink-3 underline decoration-transparent underline-offset-2 transition-colors hover:text-ink hover:decoration-current">
           Open
         </Link>
+      )}
+    </div>
+  );
+}
+
+function EventGroup({ events }: { events: EventItem[] }) {
+  const [open, setOpen] = useState(false);
+  const last = events.at(-1)!;
+  const took = last.at - events[0].at;
+  const span = took >= 60_000 ? `${Math.round(took / 60_000)} min` : `${Math.max(1, Math.round(took / 1000))}s`;
+  return (
+    <div className="text-[12px] text-ink-3" style={{ animation: "fade-in 300ms ease-out both" }}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-baseline gap-2 text-left transition-colors hover:text-ink-2"
+      >
+        <span className="size-1.5 shrink-0 -translate-y-px rounded-full bg-line-strong" />
+        <span className="min-w-0 flex-1 truncate">
+          Machine setup · {events.length} steps over {span} · <span className="text-ink-2">{last.text}</span>
+        </span>
+        <span className="shrink-0 text-[11px]">{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-col gap-1.5 border-l pl-3">
+          {events.map((e) => (
+            <EventLine key={e.key} level={e.level} text={e.text} time={e.time} />
+          ))}
+        </div>
       )}
     </div>
   );

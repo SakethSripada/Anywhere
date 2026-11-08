@@ -106,7 +106,7 @@ function Row({
 }
 
 /** Settings → Agents: the MCP endpoint, connected OAuth apps, and personal tokens. */
-export function AgentAccess({ Section }: { Section: (p: { title: string; description: string; children: React.ReactNode }) => React.ReactNode }) {
+export function AgentAccess({ Section }: { Section: (p: { id?: string; title: string; description: string; children: React.ReactNode }) => React.ReactNode }) {
   const api = useApi();
   const now = useNow(60_000);
   const [data, setData] = useState<Loaded>({ tokens: null, grants: [], scopes: {}, error: null });
@@ -175,6 +175,7 @@ export function AgentAccess({ Section }: { Section: (p: { title: string; descrip
 
   return (
     <Section
+      id="agents"
       title="Agents (MCP)"
       description="Let Claude and other MCP clients use Anywhere as a tool. Apps that support OAuth only need the server URL; others use a token. Neither can approve spending unless you allow it."
     >

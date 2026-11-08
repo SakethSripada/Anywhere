@@ -24,7 +24,9 @@ export const tables = Object.fromEntries(
   ["platform", "myAccount", "myConversations", "myMessages", "myWorkloads", "myEvents", "myLogs", "myMetrics", "myAgentRuns", "myAgentSteps", "myProjects", "myArtifacts", "myHandles", "myLinkCode"].map((k) => [k, k]),
 ) as { [K in Table]: K };
 
-export function useTable<K extends Table>(table: K): [readonly Rows[K][], boolean] {
+// The in-memory store has no subscription cost, so `enabled` is accepted for API parity and ignored.
+export function useTable<K extends Table>(table: K, opts?: { enabled?: boolean }): [readonly Rows[K][], boolean] {
+  void opts;
   const data = useSyncExternalStore(subscribe, () => rows(table), () => rows(table));
   return [data, true];
 }

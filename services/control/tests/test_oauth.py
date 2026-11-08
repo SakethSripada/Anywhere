@@ -285,3 +285,26 @@ async def test_oauth_connections_share_one_conversation(h):
                 await m.call_tool("propose_workload", {"request": {"kind": "desktop", "summary": "A VS Code desktop"}})
             ).is_error
     assert len(h.store.conversations) == 1
+
+
+async def test_a_rejected_consent_can_be_retried(h):
+    async with http(h) as c:
+        client_id = await register(c)
+        _, challenge = pkce()
+        request_id = await start(h, c, client_id, challenge)
+        res = await c.post(f"/v1/oauth/requests/{request_id}/decision", json={"approve": True, "scopes": []})
+        assert res.status_code == 422
+        assert await approve(c, request_id, ["read"])  # the request is still there
+
+
+async def test_reauthorizing_a_client_reuses_its_connection(h):
+    from anywhere import api
+
+    api._hits.clear()  # the in-process rate limiter is shared across tests
+    async with http(h) as c:
+        client_id = await register(c)
+        for _ in range(2):
+            verifier, challenge = pkce()
+            code = await approve(c, await start(h, c, client_id, challenge))
+            assert (await exchange(c, client_id, code, verifier)).status_code == 200
+    assert h.app.vault.section_size("oauth_grants") == 1

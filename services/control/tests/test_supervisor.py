@@ -169,6 +169,23 @@ async def test_billing_survives_a_lost_vault(tmp_path):
     assert store.rows[1]["status"] in ("stopped", "stopping", "saving")  # session limit enforced
 
 
+async def test_stopping_a_desktop_does_not_bill_the_segment_twice(tmp_path):
+    # Seen live: the bill is settled when a stop begins, but the row stays `stopping`
+    # (billable) for minutes while Brev shuts down. The guard must not re-open the
+    # segment from `startedAt` and add it on top of what was already settled.
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    w = store.add(kind="desktop", status="running", hourlyCents=100, startedAt=ago(30), lastActiveAt=ago(1))
+    sup.vault.update(1, segment_start=ago(30).isoformat(), segment_base=0)
+    await sup._settle_usage(w)
+    settled = store.rows[1]["accruedCents"]
+    assert 50 <= settled <= 51  # 30 min at $1/h
+    store.rows[1]["status"] = "stopping"
+    await sup.tick()
+    await sup.tick()
+    assert store.rows[1]["accruedCents"] == settled
+
+
 async def test_brev_list_is_shared_and_invalidated_by_mutations(monkeypatch):
     from anywhere.brev import BrevCLI
 
@@ -295,7 +312,7 @@ class ScriptedRemote(FakeRemote):
     async def run(self, command, **kw):
         from anywhere.remote import Result
 
-        if "::offset::" in command:
+        if "::log::" in command:
             return Result(0, self.polls.pop(0) if self.polls else "", "")
         return Result(0, "file contents\n", "")
 
@@ -315,9 +332,12 @@ class FakeStorage:
         self.objects[key] = content_type
 
 
-def poll_output(offset, log="", metrics=(), status="", alive="yes"):
+def poll_output(offset=0, log="", metrics=(), status="", alive="yes"):
+    import base64
+
     rows = "".join(m + "\n" for m in metrics)
-    return f"::offset::{offset}\n{log}\n::metrics::\n{rows}::status::\n{status}\n::alive::\n{alive}\n"
+    b64 = base64.b64encode(log.encode()).decode()
+    return f"::log::{b64}\n::metrics::\n{rows}::status::\n{status}\n::alive::\n{alive}\n"
 
 
 async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_path):
@@ -337,7 +357,7 @@ async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_pa
     await sup._monitor_batch(w)
     assert [t for _, t in store.logs] == ["::step:: Training\n", "more log\n"]
     assert {(p["name"], p["step"]) for p in store.metrics} >= {("loss", 5), ("loss", 10), ("progress", 10)}
-    assert sup.vault.get(1)["log_offset"] == 40
+    assert sup.vault.get(1)["log_offset"] == len(b"::step:: Training\nmore log\n")
     assert store.rows[1]["status"] == "succeeded"
     names = [a[2] for a in store.artifacts]
     assert names[0] == "LoRA adapter" and "Metrics" in names
@@ -354,3 +374,149 @@ async def test_batch_monitor_fails_when_runner_dies_silently(tmp_path):
     await sup._monitor_batch(w)
     assert store.rows[1]["status"] == "failed"
     assert "stopped unexpectedly" in store.rows[1]["statusDetail"]
+
+
+async def test_batch_monitor_fails_when_the_job_directory_is_gone(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = ["::missing::\n"] * 3
+    w = store.add(kind="batch", status="running")
+    await sup._monitor_batch(w)
+    assert store.rows[1]["status"] == "failed"
+
+
+async def test_batch_monitor_gives_up_on_a_runner_that_never_starts(tmp_path):
+    from anywhere import supervisor as sup_mod
+
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = [poll_output(alive="starting")] * (sup_mod.STARTING_POLL_LIMIT + 3)
+    w = store.add(kind="batch", status="running")
+    await sup._monitor_batch(w)
+    assert store.rows[1]["status"] == "failed"
+
+
+async def test_batch_monitor_retries_a_failed_log_write(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.storage = FakeStorage()
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = [
+        poll_output(log="first\n"),
+        poll_output(log="first\n"),  # same bytes come back because the offset didn't move
+        poll_output(log="", status="succeeded"),
+    ]
+    w = store.add(kind="batch", status="running")
+    brev.instances[instance_name(1)] = "RUNNING"
+    real = store.append_logs
+    calls = {"n": 0}
+
+    async def flaky(wid, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("spacetime blip")
+        await real(wid, text)
+
+    store.append_logs = flaky
+    await sup._monitor_batch(w)
+    assert [t for _, t in store.logs] == ["first\n"]
+    assert sup.vault.get(1)["log_offset"] == len(b"first\n")
+
+
+async def test_a_slow_desktop_does_not_block_other_vnc_connects():
+    import contextlib as cl
+
+    from anywhere.desktop import VncTunnels
+
+    gate = asyncio.Event()
+
+    class Slow:
+        @cl.asynccontextmanager
+        async def tunnel(self, port):
+            await gate.wait()
+            yield 1
+
+    class Fast:
+        @cl.asynccontextmanager
+        async def tunnel(self, port):
+            yield 2
+
+    t = VncTunnels()
+    slow = asyncio.create_task(t.port_for(1, Slow()))
+    await asyncio.sleep(0)
+    assert await asyncio.wait_for(t.port_for(2, Fast()), 1) == 2
+    gate.set()
+    assert await slow == 1
+
+
+class _GpuRemote(FakeRemote):
+    out = "87, 6144, 23034, 61, 72.45\n"
+
+    async def run(self, command, **kw):
+        from anywhere.remote import Result
+
+        return Result(0, self.out, "") if command.startswith("nvidia-smi") else Result(0, "", "")
+
+
+def test_parses_nvidia_smi_and_skips_unavailable_fields():
+    from anywhere.supervisor import parse_gpu_query
+
+    assert parse_gpu_query("87, 6144, 23034, 61, 72.45\n") == {
+        "util_pct": 87.0,
+        "mem_used_gb": 6.0,
+        "mem_total_gb": 22.49,
+        "temp_c": 61.0,
+        "power_w": 72.45,
+    }
+    assert parse_gpu_query("3, 512, 15360, 40, [N/A]")["util_pct"] == 3.0
+    assert "power_w" not in parse_gpu_query("3, 512, 15360, 40, [N/A]")
+    assert parse_gpu_query("NVIDIA-SMI has failed") is None
+    assert parse_gpu_query("") is None
+    # Multi-GPU machines report the first GPU.
+    assert parse_gpu_query("10, 1024, 2048, 30, 20\n90, 1024, 2048, 70, 200\n")["util_pct"] == 10.0
+
+
+async def test_gpu_samples_are_stored_as_metrics_with_elapsed_seconds(tmp_path):
+    s = Settings(_env_file=None, brev_api_key="bak-test", data_dir=tmp_path)
+    store = FakeStore()
+    stored: list[dict] = []
+
+    async def add_metrics(wid, points):
+        stored.extend(points)
+
+    store.add_metrics = add_metrics
+
+    async def notify(*_):
+        return None
+
+    sup = Supervisor(s, store, FakeBrev(), Storage(s), Vault(tmp_path / "v.json"), notify, remote_factory=_GpuRemote)
+    w = store.add(status="running", startedAt=ago(2))
+    first = await sup.sample_gpu(w)
+    names = {p["name"] for p in first}
+    assert names == {"gpu.util_pct", "gpu.mem_used_gb", "gpu.mem_total_gb", "gpu.temp_c", "gpu.power_w"}
+    assert all(115 <= p["step"] <= 125 for p in first)  # ~2 minutes since start
+    second = await sup.sample_gpu(w)
+    assert "gpu.mem_total_gb" not in {p["name"] for p in second}  # the total is sent once
+    assert len(stored) == len(first) + len(second)
+
+
+async def test_only_running_machines_are_sampled(tmp_path):
+    sup, store, _ = make(tmp_path, FakeBrev())
+    store.add(id=1, status="running")
+    store.add(id=2, status="stopped")
+    store.add(id=3, status="provisioning")
+    await sup.tick()
+    assert set(sup._sampling) == {1}
+
+
+async def test_telemetry_can_be_turned_off(tmp_path):
+    sup, _, _ = make(tmp_path, FakeBrev(), gpu_telemetry_seconds=0)
+    sup.start_guard()
+    assert sup._telemetry_task is None
+    await sup.shutdown()
+    await asyncio.gather(sup._guard_task, return_exceptions=True)

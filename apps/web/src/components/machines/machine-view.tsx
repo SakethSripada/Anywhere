@@ -31,8 +31,9 @@ import { cn } from "@/lib/utils";
 import { MobileNavTrigger } from "../app/mobile-nav";
 import { AgentOrb } from "@/components/bui/orb";
 import { AppLogo, appKey } from "../app/app-logo";
-import { AgentPanel, type AgentPanelHandle } from "./agent-panel";
+import { AgentPanel, type AgentPanelHandle, type AgentPanelMemory } from "./agent-panel";
 import { DesktopStage } from "./desktop-stage";
+import { Insights } from "./insights";
 import { JobStage } from "./job-stage";
 import { LiveCost, Uptime, useWorkloadAction } from "./shared";
 import { StatusChip } from "./status";
@@ -61,9 +62,11 @@ function Workspace({ w }: { w: Workload }) {
   const mobile = useIsMobile();
   const panel = usePanelRef();
   const agentRef = useRef<AgentPanelHandle>(null);
+  const agentMemory = useRef<AgentPanelMemory>({ cid: null, draft: "" });
   const [open, setOpen] = useState(true);
   const [sheet, setSheet] = useState(false);
   const [animating, setAnimating] = useState(false);
+  const [view, setView] = useState<"work" | "insights">("work");
   const animTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nav = useSidebar();
 
@@ -126,18 +129,25 @@ function Workspace({ w }: { w: Workload }) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const stage = w.kind === "desktop" ? <DesktopStage w={w} onAskAgent={askAgent} /> : <JobStage w={w} />;
+  const work = w.kind === "desktop" ? <DesktopStage w={w} onAskAgent={askAgent} /> : <JobStage w={w} />;
+  // The desktop stays mounted while Insights is open, so its stream doesn't reconnect on every switch.
+  const stage = (
+    <>
+      <div className={cn("h-full min-h-0", view !== "work" && "hidden")}>{work}</div>
+      {view === "insights" && <Insights w={w} />}
+    </>
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Header w={w} agentOpen={mobile ? sheet : open} onToggleAgent={() => toggle()} />
+      <Header w={w} agentOpen={mobile ? sheet : open} onToggleAgent={() => toggle()} view={view} onView={setView} />
       {mobile ? (
         <>
           <div className="min-h-0 flex-1">{stage}</div>
           <Sheet open={sheet} onOpenChange={setSheet}>
             <SheetContent side="right" className="w-full p-0 sm:max-w-md" showCloseButton={false}>
               <SheetTitle className="sr-only">Agent</SheetTitle>
-              <AgentPanel ref={agentRef} w={w} onCollapse={() => setSheet(false)} />
+              <AgentPanel ref={agentRef} w={w} memory={agentMemory} onCollapse={() => setSheet(false)} />
             </SheetContent>
           </Sheet>
         </>
@@ -159,7 +169,9 @@ function Workspace({ w }: { w: Workload }) {
           >
             {/* Fixed-width content: the panel clips it while animating instead of re-wrapping every frame. */}
             <div className={cn("h-full w-full min-w-[320px] transition-opacity duration-300", !open && "opacity-0")}>
-              <AgentPanel ref={agentRef} w={w} onCollapse={() => toggle(false)} />
+              {/* Collapsed, the panel used to stay fully live behind opacity-0 (subscriptions,
+                  timers, orbs, screenshot fetches). Unmount it once the collapse finishes. */}
+              {(open || animating) && <AgentPanel ref={agentRef} w={w} memory={agentMemory} onCollapse={() => toggle(false)} />}
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -168,7 +180,19 @@ function Workspace({ w }: { w: Workload }) {
   );
 }
 
-function Header({ w, agentOpen, onToggleAgent }: { w: Workload; agentOpen: boolean; onToggleAgent: () => void }) {
+function Header({
+  w,
+  agentOpen,
+  onToggleAgent,
+  view,
+  onView,
+}: {
+  w: Workload;
+  agentOpen: boolean;
+  onToggleAgent: () => void;
+  view: "work" | "insights";
+  onView: (v: "work" | "insights") => void;
+}) {
   const router = useRouter();
   const { busy, run } = useWorkloadAction(w.id);
   const agent = useAgentState(w);
@@ -189,6 +213,28 @@ function Header({ w, agentOpen, onToggleAgent }: { w: Workload; agentOpen: boole
         <h1 className="truncate font-medium">{w.title}</h1>
       </nav>
       <StatusChip status={w.status} className="ml-1 text-[12px]" />
+      <div role="tablist" aria-label="View" className="ml-2 flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+        {(
+          [
+            ["work", desktop ? "Desktop" : "Job"],
+            ["insights", "Insights"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={view === key}
+            onClick={() => onView(key)}
+            className={cn(
+              "rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors",
+              view === key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="hidden items-center gap-3 pl-2 text-[12px] text-muted-foreground xl:flex">
         <span className="h-3.5 w-px bg-border" />
         <span>{w.gpuName}</span>
@@ -201,14 +247,6 @@ function Header({ w, agentOpen, onToggleAgent }: { w: Workload; agentOpen: boole
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
-        {desktop && running && (
-          <Tooltip>
-            <TooltipTrigger render={<Button size="sm" variant="outline" disabled={busy === "save"} onClick={() => void run("save")} />}>
-              <Save /> <span className="hidden md:inline">Save</span>
-            </TooltipTrigger>
-            <TooltipContent>Copy ~/Projects to durable storage</TooltipContent>
-          </Tooltip>
-        )}
         {running && (
           <Button size="sm" variant="outline" onClick={() => setConfirm(desktop && w.stoppable ? "stop" : "delete")}>
             {desktop && w.stoppable ? <Pause /> : <Square className="size-3" />}
@@ -228,6 +266,11 @@ function Header({ w, agentOpen, onToggleAgent }: { w: Workload; agentOpen: boole
             {w.conversationId > 0n && (
               <DropdownMenuItem onClick={() => router.push(`/c/${w.conversationId}`)}>
                 <MessageSquare /> Open full conversation
+              </DropdownMenuItem>
+            )}
+            {desktop && running && (
+              <DropdownMenuItem disabled={busy === "save"} onClick={() => void run("save")}>
+                <Save /> Save project files now
               </DropdownMenuItem>
             )}
             <DropdownMenuItem

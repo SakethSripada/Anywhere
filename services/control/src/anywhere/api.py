@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -144,8 +145,17 @@ def anywhere(request: Request) -> Anywhere:
 _hits: dict[str, deque[float]] = defaultdict(deque)
 
 
+_last_sweep = 0.0
+
+
 def rate_limit(key: str, limit: int, window: float = 60) -> None:
+    global _last_sweep
     now = time.monotonic()
+    # Keys (per owner, token or IP) used to accumulate forever; drop idle ones.
+    if now - _last_sweep > window:
+        _last_sweep = now
+        for k in [k for k, q in _hits.items() if not q or q[-1] < now - window]:
+            del _hits[k]
     q = _hits[key]
     while q and q[0] < now - window:
         q.popleft()
@@ -257,8 +267,9 @@ class InboundIn(BaseModel):
     message_id: str = Field(min_length=1, max_length=128)
 
 
-_turn_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_turn_locks: dict[int, list] = {}  # conversation id -> [lock, users]
 _seen_inbound: deque[str] = deque(maxlen=2048)
+_background: set[asyncio.Task] = set()
 
 
 def _routes():
@@ -592,21 +603,30 @@ def _routes():
 
 
 async def _agent_turn(app: Anywhere, agent: Agent, ctx: TurnContext, text: str, post: bool = True) -> str:
-    async with _turn_locks[ctx.conversation_id]:
-        try:
-            reply = await agent.respond(ctx, text)
-            kind = "text"
-        except ModelUnavailable as exc:
-            reply, kind = f"The Nemotron agent isn't configured yet ({exc}).", "error"
-        except Exception as exc:
-            log.exception("agent.turn_failed", conversation=ctx.conversation_id)
-            reply, kind = f"Something went wrong on my side: {exc.__class__.__name__}. Please try again.", "error"
-        if post:
+    # One turn at a time per conversation. Entries are reference-counted and
+    # removed when idle, so the table no longer grows with every conversation.
+    entry = _turn_locks.setdefault(ctx.conversation_id, [asyncio.Lock(), 0])
+    entry[1] += 1
+    try:
+        async with entry[0]:
             try:
-                await app.store.append_message(ctx.conversation_id, "assistant", kind, reply, 0, ctx.channel)
+                reply = await agent.respond(ctx, text)
+                kind = "text"
+            except ModelUnavailable as exc:
+                reply, kind = f"The Nemotron agent isn't configured yet ({exc}).", "error"
             except Exception as exc:
-                log.warning("agent.post_failed", error=str(exc))
-        return reply
+                log.exception("agent.turn_failed", conversation=ctx.conversation_id)
+                reply, kind = f"Something went wrong on my side: {exc.__class__.__name__}. Please try again.", "error"
+            if post:
+                try:
+                    await app.store.append_message(ctx.conversation_id, "assistant", kind, reply, 0, ctx.channel)
+                except Exception as exc:
+                    log.warning("agent.post_failed", error=str(exc))
+            return reply
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0:
+            _turn_locks.pop(ctx.conversation_id, None)
 
 
 async def _relay(client: WebSocket, upstream, touch) -> None:
@@ -631,12 +651,25 @@ async def _relay(client: WebSocket, upstream, touch) -> None:
                 await upstream.send(text)
             if time.monotonic() - last_touch > 60:
                 last_touch = time.monotonic()
-                asyncio.create_task(touch())
+                # Keep a reference: an unreferenced task can be garbage-collected mid-run.
+                t = asyncio.create_task(touch())
+                _background.add(t)
+                t.add_done_callback(_background.discard)
 
-    tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    downstream, upstream_task = asyncio.create_task(down()), asyncio.create_task(up())
+    done, pending = await asyncio.wait([downstream, upstream_task], return_when=asyncio.FIRST_COMPLETED)
     for t in pending:
         t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for t in done:
+        # The desktop going away (stop, delete, reboot) ends `down` with ConnectionClosed;
+        # that's a normal end of session. Anything else is worth a log line, not a crash.
+        if (exc := t.exception()) and not isinstance(exc, (websockets.ConnectionClosed, WebSocketDisconnect)):
+            log.warning("vnc.relay_failed", error=f"{exc.__class__.__name__}: {exc}"[:300])
+    if downstream in done:
+        # The machine side closed: tell the browser now instead of leaving its socket open.
+        with contextlib.suppress(Exception):
+            await client.close(code=1001)
 
 
 def _title(text: str) -> str:

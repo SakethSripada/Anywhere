@@ -9,7 +9,7 @@ import { ApiError, useApi } from "@/lib/api";
 import { useNow } from "@/lib/data";
 import { bytes, centsRange, clock, compact, duration, ms } from "@/lib/format";
 import { parsePlan } from "@/lib/plan";
-import { tables, useTable } from "@/lib/stdb";
+import { NONE, useShared } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE } from "@/lib/workloads";
 import { PlanCard } from "../chat/plan-card";
@@ -20,18 +20,18 @@ import { BootProgress, EventFeed, LiveCost } from "./shared";
 type Point = { step: number; value: number };
 
 function useSeries(workloadId: bigint) {
-  const [rows] = useTable(tables.myMetrics);
+  const rows = useShared("myMetrics").byWorkload.get(workloadId) ?? NONE;
   return useMemo(() => {
     const by = new Map<string, Point[]>();
     for (const r of rows) {
-      if (r.workloadId !== workloadId || !Number.isFinite(r.value)) continue;
+      if (!Number.isFinite(r.value)) continue;
       const list = by.get(r.name);
       if (list) list.push({ step: r.step, value: r.value });
       else by.set(r.name, [{ step: r.step, value: r.value }]);
     }
     for (const list of by.values()) list.sort((a, b) => a.step - b.step);
     return by;
-  }, [rows, workloadId]);
+  }, [rows]);
 }
 
 const PRETTY: Record<string, string> = {
@@ -63,7 +63,8 @@ export function JobStage({ w }: { w: Workload }) {
 function Overview({ w }: { w: Workload }) {
   const plan = useMemo(() => parsePlan(w.planJson), [w.planJson]);
   const series = useSeries(w.id);
-  const now = useNow(1000);
+  // Only a running job's elapsed time and ETA change by the second.
+  const now = useNow(1000, BILLABLE.has(w.status));
   const loss = series.get("loss") ?? [];
   const latest = loss.at(-1);
   const prior = loss.length > 20 ? loss[Math.max(0, loss.length - 21)] : loss[0];
@@ -160,7 +161,7 @@ function Delta({ from, to }: { from: number; to: number }) {
 }
 
 function Metrics({ series }: { series: Map<string, Point[]> }) {
-  const names = [...series.keys()].filter((n) => n !== "progress" && n !== "epoch" && n !== "eval_loss").sort((a, b) => (a === "loss" ? -1 : b === "loss" ? 1 : a.localeCompare(b)));
+  const names = [...series.keys()].filter((n) => n !== "progress" && n !== "epoch" && n !== "eval_loss" && !n.startsWith("gpu.")).sort((a, b) => (a === "loss" ? -1 : b === "loss" ? 1 : a.localeCompare(b)));
   const [picked, setPicked] = useState<string | null>(null);
   const name = picked && series.has(picked) ? picked : (names[0] ?? "loss");
   const points = series.get(name) ?? [];
@@ -215,8 +216,8 @@ function fileIcon(name: string) {
 
 function Outputs({ workloadId, expected, done }: { workloadId: bigint; expected: string[]; done: boolean }) {
   const api = useApi();
-  const [rows] = useTable(tables.myArtifacts);
-  const files = useMemo(() => rows.filter((a) => a.workloadId === workloadId && !a.name.startsWith("agent-")), [rows, workloadId]);
+  const rows = useShared("myArtifacts").byWorkload.get(workloadId) ?? NONE;
+  const files = useMemo(() => rows.filter((a) => !a.name.startsWith("agent-")), [rows]);
 
   async function download(key: string) {
     try {
@@ -288,7 +289,7 @@ function Spec({ label, value, mono, wide }: { label: string; value: string; mono
 }
 
 function JobState({ w }: { w: Workload }) {
-  const now = useNow(1000);
+  const now = useNow(1000, BILLABLE.has(w.status));
   if (w.status === "planned") {
     return (
       <div className="h-full overflow-y-auto">

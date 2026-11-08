@@ -3,13 +3,12 @@
 import { ArrowRight, ArrowUpRight } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useAccount, useConversations, useMonthSpend, useNow, usePlatform, useWorkloads } from "@/lib/data";
-import { ago, cents, clock } from "@/lib/format";
-import { tables, useTable } from "@/lib/stdb";
+import { ago, cents } from "@/lib/format";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
-import { ACTIVE, BILLABLE, href } from "@/lib/workloads";
+import { ACTIVE, BILLABLE } from "@/lib/workloads";
 import { AppLogo } from "../app/app-logo";
 import { PageHeader } from "../app/page-header";
 import { Composer } from "../chat/composer";
@@ -91,10 +90,7 @@ export function Home() {
           </Section>
 
           <div className="mt-14 grid gap-10 @4xl:grid-cols-[1fr_300px]">
-            <div className="grid gap-8 @2xl:grid-cols-2 @4xl:grid-cols-[1.3fr_1fr]">
-              <Activity />
-              <RecentTasks />
-            </div>
+            <RecentTasks />
             <Usage />
           </div>
         </div>
@@ -113,41 +109,6 @@ function Section({ title, action, children }: { title: string; action?: ReactNod
       </div>
       {children}
     </section>
-  );
-}
-
-function Activity() {
-  const [events] = useTable(tables.myEvents);
-  const { all } = useWorkloads();
-  const recent = useMemo(() => [...events].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, 8), [events]);
-  return (
-    <Section title="Activity">
-      {recent.length === 0 ? (
-        <p className="text-[13px] text-muted-foreground">Nothing yet.</p>
-      ) : (
-        <ol className="relative">
-          <span aria-hidden className="absolute top-2 bottom-2 left-[3px] w-px bg-border" />
-          {recent.map((e) => {
-            const w = all.find((x) => x.id === e.workloadId);
-            return (
-              <li key={String(e.id)} className="relative flex gap-3 py-1.5 pl-4">
-                <span
-                  className={cn(
-                    "absolute top-[11px] left-0 size-[7px] rounded-full ring-4 ring-background",
-                    e.level === "error" ? "bg-red" : e.level.startsWith("warn") ? "bg-warning" : "bg-line-strong",
-                  )}
-                />
-                <Link href={w ? href(w) : "/machines"} className="min-w-0 flex-1 text-[13px] leading-5 hover:underline">
-                  <span className={cn(e.level === "error" ? "text-destructive" : "text-foreground/85")}>{e.message}</span>
-                  {w && <span className="block truncate text-[11.5px] text-muted-foreground">{w.title}</span>}
-                </Link>
-                <span className="shrink-0 pt-0.5 text-[11px] text-faint tabular">{clock(e.createdAt)}</span>
-              </li>
-            );
-          })}
-        </ol>
-      )}
-    </Section>
   );
 }
 
@@ -205,9 +166,9 @@ function Usage() {
           </div>
         </div>
         <dl className="divide-y border-t text-[12.5px]">
-          <Row label="Burn rate" value={burn ? `${cents(burn)}/hr` : "-"} />
-          <Row label="Shared credit left" value={credit == null ? "-" : cents(credit)} />
-          <Row label="Auto-approve" value={account?.approvalThresholdCents ? `≤ ${cents(account.approvalThresholdCents)}` : "Always ask"} />
+          <Row label="Spending now" value={burn ? `${cents(burn)}/hr` : "-"} />
+          <Row label="Team credit left" value={credit == null ? "-" : cents(credit)} />
+          <Row label="Approval" value={account?.approvalThresholdCents ? `Automatic up to ${cents(account.approvalThresholdCents)}` : "You approve every machine"} />
         </dl>
       </div>
     </Section>

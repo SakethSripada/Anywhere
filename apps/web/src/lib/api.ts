@@ -54,7 +54,7 @@ async function route<T>(method: string, path: string, body: Body): Promise<T> {
 export function useApi() {
   return useMemo(
     () => ({
-      get: <T,>(path: string) => route<T>("GET", path, null),
+      get: <T,>(path: string, opts?: { signal?: AbortSignal }) => (void opts, route<T>("GET", path, null)),
       post: <T,>(path: string, body?: Body) => route<T>("POST", path, body),
       del: <T,>(path: string) => route<T>("DELETE", path, null),
       ready: true,
@@ -63,14 +63,16 @@ export function useApi() {
   );
 }
 
-export async function fetchHealth() {
+export async function fetchHealth(signal?: AbortSignal) {
+  void signal;
   return { ok: true, mode: "live", integrations: { spacetime: true, nemotron: true, brev: true, storage: true, photon: true } as Record<string, boolean> };
 }
 
 export type UploadProfile = { rows: number; schema: string; [k: string]: unknown };
 
-export async function uploadDataset(api: ReturnType<typeof useApi>, file: File, onProgress: (f: number) => void) {
+export async function uploadDataset(api: ReturnType<typeof useApi>, file: File, onProgress: (f: number) => void, signal?: AbortSignal) {
   for (let i = 1; i <= 10; i++) {
+    if (signal?.aborted) throw new DOMException("Upload cancelled", "AbortError");
     await new Promise((r) => setTimeout(r, 120));
     onProgress(i / 10);
   }

@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from anywhere.api import create_app, issue_ticket, read_ticket
@@ -61,3 +63,65 @@ def test_empty_env_values_count_as_unset(monkeypatch):
     monkeypatch.setenv("BREV_API_KEY", "")
     s = Settings(_env_file=None)
     assert not s.nemotron_ready and not s.brev_ready
+
+
+def test_idle_rate_limit_keys_are_swept(monkeypatch):
+    from anywhere import api
+
+    api._hits.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(api, "_last_sweep", 0.0)
+    api.rate_limit("ip:1", 5)
+    clock[0] += 120
+    api.rate_limit("ip:2", 5)
+    assert "ip:1" not in api._hits and "ip:2" in api._hits
+
+
+class _Upstream:
+    """A VNC upstream that sends one frame and then drops, as when a desktop stops."""
+
+    def __init__(self):
+        self.sent = []
+
+    def __aiter__(self):
+        return self._frames()
+
+    async def _frames(self):
+        yield b"frame"
+        import websockets
+
+        raise websockets.ConnectionClosedError(None, None)
+
+    async def send(self, data):
+        self.sent.append(data)
+
+
+class _Browser:
+    def __init__(self):
+        self.received, self.closed = [], None
+
+    async def send_bytes(self, data):
+        self.received.append(data)
+
+    async def send_text(self, data):
+        self.received.append(data)
+
+    async def receive(self):
+        await asyncio.sleep(3600)
+
+    async def close(self, code=1000):
+        self.closed = code
+
+
+async def test_vnc_relay_closes_the_browser_when_the_desktop_goes_away(caplog):
+    from anywhere.api import _relay
+
+    browser = _Browser()
+
+    async def touch():
+        return None
+
+    await asyncio.wait_for(_relay(browser, _Upstream(), touch), 5)
+    assert browser.received == [b"frame"]
+    assert browser.closed == 1001

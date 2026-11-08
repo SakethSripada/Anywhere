@@ -36,7 +36,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
-from . import budget, desktop
+from . import budget
 from .core import ActionError, Anywhere
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
@@ -136,14 +136,14 @@ def _touch(app: Anywhere, d: str, record: dict) -> None:
     # Bound vault writes to one a minute per token; last-used is informational.
     if time.monotonic() - _last_touch.get(d, -math.inf) < 60:
         return
+    if len(_last_touch) > 10_000:  # access tokens rotate hourly; don't keep every digest
+        _last_touch.clear()
     _last_touch[d] = time.monotonic()
     try:
         now = datetime.now(UTC).isoformat()
         app.vault.update_mcp_token(d, last_used_at=now)
         if (grant_id := record.get("grant_id")) is not None:
-            grant = app.vault.section_get("oauth_grants", str(grant_id))
-            if grant:
-                app.vault.section_put("oauth_grants", str(grant_id), {**grant, "last_used_at": now})
+            app.vault.section_update("oauth_grants", str(grant_id), last_used_at=now)
     except OSError as exc:
         log.warning("mcp.touch_failed", error=str(exc))
 
@@ -199,6 +199,24 @@ class McpEndpoint:
         await server.session_manager.handle_request(scope, receive, send)
 
 
+#: owner -> (checked_at, activated). Every tool call needs this check, and agents
+#: poll; a short cache spares an account read per call.
+_ACTIVE_TTL = 20.0
+
+
+async def _active(app: Anywhere, owner: str) -> bool:
+    cache: dict[str, tuple[float, bool]] = app.__dict__.setdefault("_mcp_activation", {})
+    now = time.monotonic()
+    if (hit := cache.get(owner)) and now - hit[0] < _ACTIVE_TTL:
+        return hit[1]
+    acct = await app.store.account(owner)
+    active = bool(acct and acct["activated"])
+    if len(cache) > 10_000:
+        cache.clear()
+    cache[owner] = (now, active)
+    return active
+
+
 def _rate(key: str, limit: int) -> None:
     from .api import rate_limit  # api imports this module; keep the import lazy.
 
@@ -234,13 +252,15 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
             f"This token doesn't have the '{scope}' permission ({SCOPES[scope]}) "
             "Ask the user to grant it in Settings → Agents, or to do this in the Anywhere web app."
         )
-    _rate(f"mcp:{p.token_id}:{scope}", limit)
+    # Key OAuth connections by grant: their access tokens rotate hourly, which
+    # used to reset the counter on every refresh.
+    who = f"g{p.grant_id}" if p.grant_id is not None else f"t{p.token_id}"
+    _rate(f"mcp:{who}:{scope}", limit)
     bound = log.bind(tool=tool, token=p.token_id, owner=p.owner[:12])
     try:
         if not app.settings.stdb_ready:
             raise ToolError("Anywhere isn't connected to its database yet. Try again later.")
-        acct = await app.store.account(p.owner)
-        if not acct or not acct["activated"]:
+        if not await _active(app, p.owner):
             raise ToolError("This Anywhere account isn't active, so its agent tokens are paused.")
         result = await asyncio.wait_for(fn(app, p), CALL_TIMEOUT)
     except ToolError:
@@ -273,19 +293,27 @@ async def _call(ctx: Context, scope: str, tool: str, fn, *, limit: int = 30):
 
 async def _conversation(app: Anywhere, p: Principal) -> int:
     """One conversation per token (or per OAuth connection, whose access tokens rotate hourly),
-    so the user can see in the web app what the agent asked for."""
-    grant = app.vault.section_get("oauth_grants", str(p.grant_id)) if p.grant_id is not None else None
-    record = grant if grant is not None else (app.vault.mcp_token(p.digest) or {})
-    cid = record.get("conversation_id")
-    if cid:
-        return int(cid)
-    cid = new_id()
-    await app.store.upsert_conversation(cid, p.owner, f"Agent: {p.name}"[:60], "mcp")
-    if grant is not None:
-        app.vault.section_put("oauth_grants", str(p.grant_id), {**grant, "conversation_id": cid})
-    else:
-        app.vault.update_mcp_token(p.digest, conversation_id=cid)
-    return cid
+    so the user can see in the web app what the agent asked for.
+
+    Serialised per connection: parallel first calls would otherwise each create a
+    conversation. The id is merged in with section_update, which does nothing if
+    the connection was revoked meanwhile, so a revoke is never undone."""
+    key = f"grant:{p.grant_id}" if p.grant_id is not None else f"token:{p.digest}"
+    locks: dict[str, asyncio.Lock] = app.__dict__.setdefault("_mcp_conversation_locks", {})
+    async with locks.setdefault(key, asyncio.Lock()):
+        grant = app.vault.section_get("oauth_grants", str(p.grant_id)) if p.grant_id is not None else None
+        record = grant if grant is not None else (app.vault.mcp_token(p.digest) or {})
+        cid = record.get("conversation_id")
+        if cid:
+            locks.pop(key, None)
+            return int(cid)
+        cid = new_id()
+        await app.store.upsert_conversation(cid, p.owner, f"Agent: {p.name}"[:60], "mcp")
+        if grant is not None:
+            app.vault.section_update("oauth_grants", str(p.grant_id), conversation_id=cid)
+        else:
+            app.vault.update_mcp_token(p.digest, conversation_id=cid)
+        return cid
 
 
 async def _note(app: Anywhere, p: Principal, workload_id: int, text: str) -> None:
@@ -328,7 +356,7 @@ async def _agent_history(app: Anywhere, workload_id: int, steps: int = 15) -> di
         if not runs:
             return None
         latest = runs[0]
-        rows = await app.store.agent_steps(int(latest["id"]))
+        rows = await app.store.agent_step_summaries(int(latest["id"]))
     except (SpacetimeError, httpx.HTTPError) as exc:
         log.info("mcp.agent_history_unavailable", error=str(exc)[:200])
         return None
@@ -432,7 +460,7 @@ def build_server() -> MCPServer:
 
         async def run(app: Anywhere, p: Principal):
             done = {Status.TERMINATED, Status.CANCELLED, Status.SUCCEEDED, Status.FAILED}
-            rows = [w for w in await app.store.workloads() if w["owner"] == p.owner]
+            rows = await app.store.workloads_for(p.owner)
             if not include_finished:
                 rows = [w for w in rows if w["status"] not in done]
             rows.sort(key=lambda w: w["createdAt"], reverse=True)
@@ -466,9 +494,11 @@ def build_server() -> MCPServer:
             if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
                 raise ActionError("Screenshots need a running desktop")
             try:
-                async with desktop.connect_screen(app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))) as sc:
-                    png = await asyncio.wait_for(sc.screenshot(), 20)
-                frame = await asyncio.to_thread(desktop.prepare_frame, png)
+                # Pooled tunnel, a few seconds of frame reuse, and one capture shared
+                # by concurrent callers (agents are told to poll this).
+                frame = await app.supervisor.shots.frame(
+                    int(w["id"]), app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))
+                )
             except TimeoutError:
                 raise
             except Exception as exc:
