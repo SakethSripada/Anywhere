@@ -13,6 +13,7 @@ import contextlib
 import shlex
 import socket
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -97,8 +98,16 @@ class Remote:
             return False
 
     def popen(self, command: str, *, stdin: int | None = None, stdout: int | None = None) -> subprocess.Popen:
-        """Blocking process handle for streaming large tarballs to/from object storage."""
-        return subprocess.Popen(self._argv(command), stdin=stdin, stdout=stdout, stderr=subprocess.PIPE)
+        """Blocking process handle for streaming large tarballs to/from object storage.
+
+        stderr goes to a temporary file rather than a pipe: nobody reads it while the
+        transfer runs, and a full pipe (tar warnings on many files) would block the
+        process mid-stream. `stderr_tail()` reads it afterwards.
+        """
+        errfile = tempfile.TemporaryFile()  # noqa: SIM115 -- closed by end_process()
+        proc = subprocess.Popen(self._argv(command), stdin=stdin, stdout=stdout, stderr=errfile)
+        proc.anywhere_stderr = errfile  # type: ignore[attr-defined]
+        return proc
 
     @contextlib.asynccontextmanager
     async def tunnel(self, remote_port: int) -> AsyncIterator[int]:
@@ -125,6 +134,27 @@ class Remote:
                 proc.terminate()
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(proc.wait(), 5)
+
+
+def stderr_tail(proc: subprocess.Popen, limit: int = 400) -> str:
+    """The end of a `Remote.popen` process's stderr."""
+    f = getattr(proc, "anywhere_stderr", None)
+    if f is None:
+        return proc.stderr.read().decode(errors="replace")[-limit:] if proc.stderr else ""
+    f.seek(0)
+    return f.read().decode(errors="replace")[-limit:]
+
+
+def end_process(proc: subprocess.Popen) -> None:
+    """Kill (if still running) and reap a streaming process, and close its files."""
+    if proc.poll() is None:
+        proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=10)
+    for f in (proc.stdin, proc.stdout, getattr(proc, "anywhere_stderr", None)):
+        if f is not None:
+            with contextlib.suppress(Exception):
+                f.close()
 
 
 def _free_port() -> int:
