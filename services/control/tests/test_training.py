@@ -107,3 +107,26 @@ def test_batch_runner_marks_success_after_the_last_step(tmp_path):
     status, log = _run_batch_script(tmp_path, "echo trained")
     assert status == "succeeded"
     assert log.rstrip().endswith("::step:: Done")
+
+
+def test_a_large_dataset_whose_first_megabyte_ends_mid_character_is_profiled():
+    row = json.dumps({"prompt": "café crème", "response": "très bien"}, ensure_ascii=False).encode() + b"\n"
+    data = row * 200_000
+    head = data[: 1024 * 1024]
+    while head[-1:] == b"\n" or head[-1] < 0x80:  # end the sample inside a multi-byte character
+        head = head[:-1]
+    profile = inspect_dataset("big.jsonl", head, len(data))
+    assert profile.schema_ == "prompt_response"
+    assert profile.rows == pytest.approx(200_000, rel=0.01)
+
+
+def test_every_epoch_count_the_planner_accepts_builds_a_config():
+    data = jsonl([{"prompt": "q", "response": "a"}] * 10)
+    profile = inspect_dataset("t.jsonl", data, len(data))
+    cfg = build_config(params_b=None, epochs=20, profile=profile, dataset_path="data.jsonl", vram_gb=16)
+    assert cfg.epochs == 20
+
+
+def test_json_strings_with_unicode_line_separators_are_one_row():
+    data = (json.dumps({"text": "one two"}, ensure_ascii=False) + "\n").encode() * 3
+    assert inspect_dataset("t.jsonl", data, len(data)).rows == 3

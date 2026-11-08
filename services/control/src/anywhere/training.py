@@ -48,7 +48,8 @@ class TrainConfig(BaseModel):
     method: Literal["lora", "qlora"]
     dataset_path: str
     dataset_format: Literal["jsonl", "csv"]
-    epochs: int = Field(ge=1, le=10)
+    #: Same range the planner accepts (Intent.epochs), so an allowed request can't fail here.
+    epochs: int = Field(ge=1, le=20)
     batch_size: int = Field(ge=1, le=32)
     grad_accum: int = Field(ge=1, le=64)
     learning_rate: float = Field(gt=0, le=1e-3)
@@ -70,12 +71,17 @@ def inspect_dataset(name: str, head: bytes, size_bytes: int) -> DatasetProfile:
     """Profile a dataset from its first ~1 MB. Raises DatasetError on anything unusable."""
     if size_bytes > MAX_DATASET_BYTES:
         raise DatasetError(f"Datasets are limited to {MAX_DATASET_BYTES // 2**20} MB")
+    truncated = size_bytes > len(head)
+    if truncated and (cut := head.rfind(b"\n")) >= 0:
+        # Only the first ~1 MB was read: drop the partial last line, which can also
+        # end mid-way through a multi-byte character and would fail to decode.
+        head = head[: cut + 1]
     text = head.decode("utf-8", errors="strict") if head else ""
     lower = name.lower()
     if lower.endswith((".jsonl", ".json")):
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        if size_bytes > len(head):
-            lines = lines[:-1]  # the last line may be truncated
+        # split("\n"), not splitlines(): JSON strings may hold raw U+2028 and friends,
+        # which splitlines() treats as line breaks.
+        lines = [ln for ln in text.split("\n") if ln.strip()]
         if not lines:
             raise DatasetError("The dataset is empty")
         rows = []
@@ -88,19 +94,23 @@ def inspect_dataset(name: str, head: bytes, size_bytes: int) -> DatasetProfile:
                 raise DatasetError(f"Line {i + 1} must be a JSON object")
             rows.append(row)
         keys = set(rows[0])
+        records = len(lines)
         fmt: Literal["jsonl", "csv"] = "jsonl"
     elif lower.endswith(".csv"):
         reader = csv.DictReader(io.StringIO(text))
-        rows = [r for _, r in zip(range(2000), reader, strict=False)]
+        everything = list(reader)
+        rows = everything[:2000]
         if not rows:
             raise DatasetError("The CSV has no rows")
+        records = len(everything)
         keys = set(reader.fieldnames or [])
         fmt = "csv"
     else:
         raise DatasetError("Upload a .jsonl or .csv file")
 
     schema = _schema(keys)
-    estimated_rows = max(len(rows), int(len(rows) * size_bytes / max(len(head), 1)))
+    # Scale the records in the sample (not just the 2000 parsed) up to the whole file.
+    estimated_rows = max(records, int(records * size_bytes / max(len(head), 1)))
     return DatasetProfile(
         format=fmt,
         schema=schema,
