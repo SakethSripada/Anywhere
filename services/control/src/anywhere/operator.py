@@ -163,8 +163,8 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
         return {"action": action.model_dump()}
 
     async def act(state: OpState) -> OpState:
-        action = Action.model_validate(state["action"])
         meta = state["frame_meta"]
+        action = _on_screen(Action.model_validate(state["action"]), meta["w"], meta["h"])
         frame = Frame(jpeg=b"", width=meta["w"], height=meta["h"], scale=meta["scale"])
         step = state.get("step", 0) + 1
         label = action.summary or action.action.replace("_", " ")
@@ -230,6 +230,23 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
     g.add_edge("decide", "act")
     g.add_conditional_edges("act", after_act, ["observe", END])
     return g.compile()
+
+
+def _on_screen(action: Action, width: int, height: int) -> Action:
+    """Clamp coordinates into the screenshot. A point just off the edge would otherwise
+    land outside the desktop (or fail in Cua) and draw the cursor off the stream."""
+
+    def clamp(v: int | None, size: int) -> int | None:
+        return None if v is None else max(0, min(size - 1, v))
+
+    return action.model_copy(
+        update={
+            "x": clamp(action.x, width),
+            "y": clamp(action.y, height),
+            "x2": clamp(action.x2, width),
+            "y2": clamp(action.y2, height),
+        }
+    )
 
 
 def _public(action: Action) -> dict:

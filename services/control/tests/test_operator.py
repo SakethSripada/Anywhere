@@ -126,3 +126,22 @@ async def test_scroll_down_is_positive_for_the_model_and_clamped():
     )
     # Cua scrolls up for positive wheel values, so "down 2" is sent as -2.
     assert screen.calls == [("scroll", 200, 200, -2), ("scroll", 200, 200, 10)]
+
+
+async def test_coordinates_off_the_screenshot_are_clamped_onto_it():
+    steps = []
+    screen = FakeScreen()
+
+    async def record(kind, summary, detail, jpeg):
+        steps.append((kind, detail))
+
+    async def has_control():
+        return True
+
+    replies = [{"action": "click", "x": 1400, "y": -5}, {"action": "done", "text": "ok"}]
+    graph = build_operator(llm=ScriptedLLM(replies), screen=screen, record=record, has_control=has_control)
+    await graph.ainvoke({"goal": "test", "step": 0, "history": []})
+    # The 2560x1440 screen is shown as 1280x720: the click lands on the right edge.
+    assert screen.calls[0] == ("click", 2558, 0, "left", False)
+    detail = json.loads(next(d for k, d in steps if k == "act"))
+    assert (detail["x"], detail["y"], detail["frame"]) == (1279, 0, [1280, 720])
