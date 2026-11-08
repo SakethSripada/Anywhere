@@ -11,6 +11,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import structlog
 import websockets
@@ -29,6 +30,7 @@ from .ids import new_id
 from .lifecycle import Status
 from .llm import ModelUnavailable
 from .photon import PhotonClient, PhotonError, normalize_phone
+from .planner import SUPPORTED_APPS, Application, Intent, Preference
 from .stdb import ReducerRejected, SpacetimeClient
 from .storage import Storage, StorageUnavailable, safe_filename
 from .store import Store
@@ -68,6 +70,7 @@ async def lifespan(api: FastAPI):
     api.state.agent = agent
     api.state.ticket_key = secrets.token_bytes(32)
     await agent.start()
+    app.readiness.start()
     if settings.stdb_ready:
         await app.supervisor.recover()
         app.supervisor.start_guard()
@@ -75,6 +78,7 @@ async def lifespan(api: FastAPI):
         log.warning("startup.spacetime_unconfigured", hint="Set SPACETIME_WORKER_TOKEN; see README")
     log.info("startup.ready", integrations=settings.integrations(), mode=settings.provisioning_mode.value)
     yield
+    await app.readiness.stop()
     await app.supervisor.shutdown()
     await agent.close()
 
@@ -164,6 +168,39 @@ class ChatIn(BaseModel):
     upload_ids: list[int] = Field(default_factory=list, max_length=4)
 
 
+class PlanIn(BaseModel):
+    """A template launch: everything the planner needs, without the language model."""
+
+    kind: Literal["desktop", "fine_tune"]
+    application: Application | None = None
+    session_hours: float | None = Field(None, gt=0, le=24)
+    model_params_billions: float | None = Field(None, gt=0, le=100)
+    epochs: int | None = Field(None, ge=1, le=20)
+    upload_id: int | None = None
+    preference: Preference | None = None
+    summary: str | None = Field(None, max_length=500)
+    conversation_id: int | None = None
+
+    def intent(self) -> Intent:
+        summary = (self.summary or "").strip() or _default_summary(self)
+        return Intent(
+            kind=self.kind,
+            summary=summary,
+            application=self.application if self.kind == "desktop" else None,
+            model_params_billions=self.model_params_billions,
+            epochs=self.epochs,
+            session_hours=self.session_hours,
+            preference=self.preference,
+        )
+
+
+def _default_summary(body: PlanIn) -> str:
+    if body.kind == "desktop":
+        return f"{SUPPORTED_APPS.get(body.application or 'terminal', 'Linux')} desktop"
+    size = f"{body.model_params_billions:g}B " if body.model_params_billions else ""
+    return f"Fine-tune a {size}language model"
+
+
 class ActivateIn(BaseModel):
     code: str = Field(min_length=1, max_length=128)
 
@@ -199,8 +236,11 @@ def _routes():
 
     @r.get("/health")
     async def health(request: Request):
+        """Liveness plus integration readiness. `integrations[x]` is true only when x
+        is configured and its latest background check (every 5 min) didn't fail;
+        `checks` carries the per-integration status and reason."""
         s: Settings = request.app.state.settings
-        return {"ok": True, "mode": s.provisioning_mode.value, "integrations": s.integrations()}
+        return {"ok": True, "mode": s.provisioning_mode.value, **request.app.state.anywhere.readiness.snapshot()}
 
     @r.get("/v1/catalog")
     async def catalog(app: Anywhere = Depends(anywhere)):
@@ -240,6 +280,8 @@ def _routes():
         elif cid is None:
             cid = new_id()
             await app.store.upsert_conversation(cid, owner, _title(body.text), "web")
+        elif not await app.store.conversation_owned(cid, owner):
+            raise ActionError("Conversation not found")
         text = body.text.strip()
         for uid in body.upload_ids:
             up = app.vault.upload(uid)
@@ -255,6 +297,18 @@ def _routes():
         return {"conversation_id": cid}
 
     # Workloads -------------------------------------------------------------
+
+    @r.post("/v1/workloads/plan")
+    async def plan_workload(body: PlanIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
+        """Template launcher: plan a desktop or fine-tune without Nemotron."""
+        rate_limit(f"plan:{owner}", 20)
+        try:
+            intent = body.intent()
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return await app.plan_direct(
+            owner, intent, conversation_id=body.conversation_id, upload_id=body.upload_id, note=body.summary
+        )
 
     actions = {
         "approve": lambda a, o, w: a.approve(o, w),
@@ -346,10 +400,7 @@ def _routes():
         if not head:
             raise HTTPException(404, "Upload not found")
         size = int(head["ContentLength"])
-        obj = await asyncio.to_thread(
-            app.storage.client.get_object, Bucket=app.storage.bucket, Key=key, Range="bytes=0-1048575"
-        )
-        sample = await asyncio.to_thread(obj["Body"].read)
+        sample = await app.storage.read_range(key, 1024 * 1024)
         try:
             profile = inspect_dataset(body.filename, sample, size)
         except (DatasetError, UnicodeDecodeError) as exc:

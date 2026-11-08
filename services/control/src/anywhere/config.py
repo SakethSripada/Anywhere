@@ -39,8 +39,14 @@ class Settings(BaseSettings):
     # NVIDIA Nemotron (build.nvidia.com)
     nvidia_api_key: SecretStr | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    #: Central agent: Nemotron 3 Super (tool calling + reasoning). Both ids are in
+    #: the integrate.api.nvidia.com catalog and in langchain-nvidia-ai-endpoints'
+    #: model table with tool support.
     planner_model: str = "nvidia/nemotron-3-super-120b-a12b"
-    vision_model: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    #: Desktop operator: Nemotron 3.5 Super VL reads screenshots (image input + tools).
+    vision_model: str = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+    #: Reasoning before each GUI action is slower; off by default for the operator loop.
+    vision_thinking: bool = False
 
     # NVIDIA Brev
     brev_api_key: SecretStr | None = None
@@ -72,7 +78,6 @@ class Settings(BaseSettings):
     # Desktop environment
     desktop_image: str = "ghcr.io/trycua/linux:24.04"
     blender_version: str = "4.5.15"
-    desktop_resolution: str = "1600x900"
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3001"])
 

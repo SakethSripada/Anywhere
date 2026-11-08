@@ -26,26 +26,33 @@ def _key(settings: Settings) -> str:
 
 
 def planner(settings: Settings) -> ChatNVIDIA:
-    """Nemotron 3 Super: the central agent. Tool calling + multi-step reasoning."""
+    """Nemotron 3 Super: the central agent. Tool calling + multi-step reasoning.
+
+    Reasoning tokens count against the completion budget, so it is generous;
+    a small cap can end the turn before any answer or tool call is produced."""
     return ChatNVIDIA(
         model=settings.planner_model,
         api_key=_key(settings),
         base_url=settings.nvidia_base_url,
         temperature=0.6,
         top_p=0.95,
-        max_completion_tokens=4096,
+        max_completion_tokens=8192,
     )
 
 
-def vision(settings: Settings) -> ChatNVIDIA:
-    """Nemotron 3 Nano Omni: reads screenshots and grounds GUI actions."""
-    return ChatNVIDIA(
+def vision(settings: Settings):
+    """Nemotron 3.5 Super VL: reads screenshots and grounds GUI actions."""
+    model = ChatNVIDIA(
         model=settings.vision_model,
         api_key=_key(settings),
         base_url=settings.nvidia_base_url,
         temperature=0.2,
-        max_completion_tokens=2048,
+        max_completion_tokens=8192,
     )
+    known = model._client.model  # None for ids missing from the library's model table
+    if known is not None and known.supports_thinking:
+        return model.with_thinking_mode(enabled=settings.vision_thinking)
+    return model
 
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)

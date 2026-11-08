@@ -131,6 +131,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "boto3" },
+    { name = "cua" },
     { name = "cua-sandbox" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -161,6 +162,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21" },
     { name = "boto3", specifier = ">=1.43" },
+    { name = "cua", specifier = ">=0.5.0,<0.6" },
     { name = "cua-sandbox", specifier = ">=0.9.1" },
     { name = "fastapi", specifier = ">=0.162" },
     { name = "httpx", specifier = ">=0.28" },
@@ -482,31 +484,15 @@ wheels = [
 
 [[package]]
 name = "cua"
-version = "0.13.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cua-cli" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/ed/57566e369e758d4063c870d1c7b7b7f3daf26f4a44765db9f7bf256ace26/cua-0.13.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:cfe75eef8965c77402fb59373b66420bd8fc0060289b94f8ec0bb5bf35b02a93", size = 43941616, upload-time = "2026-11-07T17:39:40.896Z" },
-    { url = "https://files.pythonhosted.org/packages/41/d9/952aa4866126a415e613b20b64d0740c3bb10c3bf1825725c3f51ac9f134/cua-0.13.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fcfae09f21736fa4f5a42e2ff31c6922db1267d4c048780510f94751b6281506", size = 39866062, upload-time = "2026-11-07T17:39:36.889Z" },
-    { url = "https://files.pythonhosted.org/packages/e8/12/a97022d8832b0490285f1142ef3b0424d14dcd41f9297061d088a566c5ea/cua-0.13.0-py3-none-manylinux_2_31_aarch64.whl", hash = "sha256:db1c2c50791baacd9b07ebbf7557eff2281c7f81c1fe6cc641d80a017e34cb87", size = 54560009, upload-time = "2026-11-07T17:39:45.004Z" },
-    { url = "https://files.pythonhosted.org/packages/a6/7a/d928a84d832c3d364358b3403c2a4d79b833e220bb7b0d08cce70d4f0bf1/cua-0.13.0-py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:a76414950f416852ba753f41af4cb904018f9e4434fd83077fb4eca54b47b802", size = 60105154, upload-time = "2026-11-07T17:39:49.086Z" },
-    { url = "https://files.pythonhosted.org/packages/41/77/ac28ef928c81c8332d75f1a9215deccf7efd4332ba51497d923c5611f7dc/cua-0.13.0-py3-none-win_amd64.whl", hash = "sha256:1e2acfcbbe0d876c70e1ecacc6a39f3de8a91cef4fe59bc7f9588d82b31aca5c", size = 46131248, upload-time = "2026-11-07T17:39:56.628Z" },
-    { url = "https://files.pythonhosted.org/packages/be/63/51bc3c1670145034d683f51b7a9dcbffffe47da0922784a977d3abf8b275/cua-0.13.0-py3-none-win_arm64.whl", hash = "sha256:2391836d2e2a05dccee833e17236dbf2ea6bbe76b5e2c7987bc0bf6c0634210d", size = 42563037, upload-time = "2026-11-07T17:39:52.589Z" },
-]
-
-[[package]]
-name = "cua-cli"
-version = "0.13.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/36/e0a201f6d24dfc0f89ce36eaf043e2eec734e6c97d619781045ee9f451af/cua_cli-0.13.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:079bd9f8f2e84711b2b7c0f272bca0f4c67c0003289a665601bf4e97b24e8b0a", size = 83215012, upload-time = "2026-11-07T17:39:09.334Z" },
-    { url = "https://files.pythonhosted.org/packages/80/4f/e5c0b6df0d09eff18daec4a25f75d3b6627b5d56ecbacc93e1f530e94347/cua_cli-0.13.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b884560d5b2abf13787aa1ac1552892aee65a7dbf2457fb090d07fb76bfcda91", size = 76253166, upload-time = "2026-11-07T17:39:02.92Z" },
-    { url = "https://files.pythonhosted.org/packages/88/2f/7881e8b67caa04b62a0e5c6df7313d935af773efd46f837ebbbd088c7c27/cua_cli-0.13.0-py3-none-manylinux_2_31_aarch64.whl", hash = "sha256:cc7af5c25e5f0577447c03d332cc8d3ed6a0f31fbf9547549342a24294f93ec6", size = 79203892, upload-time = "2026-11-07T17:39:15.189Z" },
-    { url = "https://files.pythonhosted.org/packages/81/91/61ea8d966c4ff7dbf7069f3fe232d3101aebd63094cbfb940bdb52e53399/cua_cli-0.13.0-py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:5804f3d62b1fbab40ac88ef1b925db8cc5e01547c3303efc3d770e8af55e634b", size = 86411371, upload-time = "2026-11-07T17:39:21.554Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/09/791147f55cd29b99fe7a9341095e003117e20c291934bb7dfdacd60e20b9/cua_cli-0.13.0-py3-none-win_amd64.whl", hash = "sha256:5bb5592acfc67c6d33fd22a2c82a833d9a29f9f7c4e1975d45334ccf073ff893", size = 88466320, upload-time = "2026-11-07T17:39:33.12Z" },
-    { url = "https://files.pythonhosted.org/packages/e0/a2/b9668a9f00137fb892b00e568077eff8ffa4d8fc6fc9cc09aa29d1e4d5f3/cua_cli-0.13.0-py3-none-win_arm64.whl", hash = "sha256:66200af06238c53705c956b28d4cf363c3b9f7d39343b5c2e3fda20ba03f8f06", size = 81197837, upload-time = "2026-11-07T17:39:27.427Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/a7/590b6c9209289378eac8d1dd5e5364158676502d664d197737e7a7136fa1/cua-0.5.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:a0e0caecfd56327f5421c098fd63591ac046e4f9327c8821bfb104ef5f1c2c0a", size = 77447467, upload-time = "2026-10-19T05:23:39.882Z" },
+    { url = "https://files.pythonhosted.org/packages/97/83/7d1031bf1ac4680f6ed5bff17d3bdb7891c16d97ce17077819ac22c72738/cua-0.5.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:d5a208a443dbae80e441186ce308fb801b37bf0689a4be32a2346f9730f9785b", size = 71948695, upload-time = "2026-10-19T05:23:35.376Z" },
+    { url = "https://files.pythonhosted.org/packages/88/ce/e86abf1fb6d87ef0a71f2c40f38c35a8f152dc04b211df4838ba489c88d5/cua-0.5.0-py3-none-manylinux_2_31_aarch64.whl", hash = "sha256:f7ae88c3e00af0800587fe15380e87669c9db89a5e45cb7a44f90cd81d98924a", size = 83923504, upload-time = "2026-10-19T05:23:44.423Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/ab/ae1b4963b1bae5a86f261be0ca0c6bfe8a57d07f167cc2659028d415700a/cua-0.5.0-py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:bda6f8e45e6738278b5e0e98bd719a5c06acf8cd45d3d43dfec6a3d4e6359a03", size = 82779220, upload-time = "2026-10-19T05:23:49.776Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/7e/b1b20852b1be8f5c8a5995eee600df1b49cb03332fb97c6b2cf985ac3f8f/cua-0.5.0-py3-none-win_amd64.whl", hash = "sha256:54583bccc9f7d0e72f31f778fcf0712b6fd73d2fce306abec0687a31b002b21d", size = 71348369, upload-time = "2026-10-19T05:24:01.198Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/b5/68b1574dd0daf08809d8b41c9a799fee2c9f375782877ab60f5526a8b2b8/cua-0.5.0-py3-none-win_arm64.whl", hash = "sha256:b6a3dda91334931f4561dc84b333d4853adc19ea0c52b9be5d28df6bba771427", size = 65965759, upload-time = "2026-10-19T05:23:56.358Z" },
 ]
 
 [[package]]

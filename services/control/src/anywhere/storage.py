@@ -20,6 +20,7 @@ from typing import IO
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from .config import Settings
 
@@ -46,11 +47,11 @@ class Storage:
             return
         self._client = boto3.client(
             "s3",
-            endpoint_url=s.s3_endpoint_url,
-            region_name=s.s3_region,
+            endpoint_url=s.s3_endpoint_url or None,
+            region_name=client_region(s.s3_endpoint_url, s.s3_region),
             aws_access_key_id=s.s3_access_key_id.get_secret_value(),
             aws_secret_access_key=s.s3_secret_access_key.get_secret_value(),
-            config=Config(signature_version="s3v4", retries={"max_attempts": 4, "mode": "standard"}),
+            config=client_config(s.s3_endpoint_url),
         )
 
     @property
@@ -97,13 +98,24 @@ class Storage:
         return self.client.generate_presigned_url("get_object", Params=params, ExpiresIn=expires)
 
     async def head(self, key: str) -> dict | None:
+        """Object metadata, or None if it doesn't exist. Auth and network errors raise."""
+
         def _head():
             try:
                 return self.client.head_object(Bucket=self.bucket, Key=key)
-            except self.client.exceptions.ClientError:
-                return None
+            except ClientError as exc:
+                if _status(exc) == 404 or _code(exc) in ("404", "NoSuchKey", "NotFound"):
+                    return None
+                raise StorageUnavailable(f"Object storage error ({_code(exc) or _status(exc)})") from exc
 
         return await asyncio.to_thread(_head)
+
+    async def read_range(self, key: str, length: int) -> bytes:
+        def _read() -> bytes:
+            obj = self.client.get_object(Bucket=self.bucket, Key=key, Range=f"bytes=0-{max(length, 1) - 1}")
+            return obj["Body"].read()
+
+        return await asyncio.to_thread(_read)
 
     # ── Streaming ─────────────────────────────────────────────────────────
     async def upload_stream(self, proc: subprocess.Popen, key: str, content_type: str) -> int:
@@ -139,6 +151,37 @@ class Storage:
         await asyncio.to_thread(
             self.client.put_object, Bucket=self.bucket, Key=key, Body=data, ContentType=content_type
         )
+
+
+def client_region(endpoint_url: str | None, region: str) -> str:
+    """`auto` is what R2 expects; AWS itself needs a real region."""
+    if not endpoint_url and (not region or region == "auto"):
+        return "us-east-1"
+    return region or "auto"
+
+
+def client_config(endpoint_url: str | None) -> Config:
+    """SigV4 everywhere. Path-style addressing for non-AWS endpoints (R2, MinIO);
+    AWS keeps virtual-hosted style. botocore >= 1.36 adds CRC checksums to every
+    upload by default, which some S3-compatible stores reject, so non-AWS
+    endpoints only send them when an operation requires it."""
+    if not endpoint_url or endpoint_url.rstrip("/").endswith(".amazonaws.com"):
+        return Config(signature_version="s3v4", retries={"max_attempts": 4, "mode": "standard"})
+    return Config(
+        signature_version="s3v4",
+        retries={"max_attempts": 4, "mode": "standard"},
+        s3={"addressing_style": "path"},
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    )
+
+
+def _status(exc: ClientError) -> int | None:
+    return exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+
+
+def _code(exc: ClientError) -> str:
+    return str(exc.response.get("Error", {}).get("Code", ""))
 
 
 class _CountingReader:
