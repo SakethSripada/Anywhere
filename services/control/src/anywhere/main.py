@@ -1,10 +1,12 @@
-"""Entrypoints: `anywhere serve` and `anywhere identity` (mint a worker identity)."""
+"""Entrypoints: `anywhere serve`, `anywhere identity` (mint a worker identity)
+and `anywhere doctor` (check every integration with the configured env)."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
+import sys
 
 import structlog
 import uvicorn
@@ -41,6 +43,14 @@ async def _mint_identity() -> None:
     print("Then set SPACETIME_WORKER_TOKEN to the token above.")
 
 
+async def _doctor(live: bool) -> int:
+    from .doctor import render, run_all
+
+    checks = await run_all(get_settings(), live=live)
+    print(render(checks))
+    return 1 if any(c.failed for c in checks) else 0
+
+
 def cli() -> None:
     parser = argparse.ArgumentParser(prog="anywhere")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -49,13 +59,21 @@ def cli() -> None:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--reload", action="store_true")
     sub.add_parser("identity", help="Mint a SpacetimeDB identity for a worker service")
+    doctor = sub.add_parser("doctor", help="Check every integration with the configured environment")
+    doctor.add_argument(
+        "--quick",
+        action="store_true",
+        help="Read-only checks only: skip the 1-token model calls and the storage write/read round trip",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
-    _configure_logging(settings.log_level)
+    _configure_logging("WARNING" if args.cmd == "doctor" else settings.log_level)
     if args.cmd == "identity":
         asyncio.run(_mint_identity())
         return
+    if args.cmd == "doctor":
+        sys.exit(asyncio.run(_doctor(live=not args.quick)))
     uvicorn.run(
         "anywhere.api:create_app",
         factory=True,

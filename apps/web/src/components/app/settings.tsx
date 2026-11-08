@@ -32,9 +32,9 @@ export function SettingsView() {
   );
 }
 
-function Section({ title, description, children, footer }: { title: string; description: string; children: ReactNode; footer?: ReactNode }) {
+function Section({ id, title, description, children, footer }: { id?: string; title: string; description: string; children: ReactNode; footer?: ReactNode }) {
   return (
-    <section className="overflow-hidden rounded-xl border">
+    <section id={id} className="scroll-mt-6 overflow-hidden rounded-xl border bg-card">
       <div className="p-5">
         <h2 className="text-[15px] font-semibold tracking-tight">{title}</h2>
         <p className="mt-1 text-[13px] text-muted-foreground">{description}</p>
@@ -134,6 +134,7 @@ function Spending() {
 
   return (
     <Section
+      id="spending"
       title="Compute and spending"
       description="Anywhere never spends past your monthly cap, and asks before anything that could cost more than your auto-approve limit."
       footer={

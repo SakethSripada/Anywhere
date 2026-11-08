@@ -247,6 +247,7 @@ const tablesSchema = __schema({
 
   workerWorkloads: __table({ name: "worker_workloads", indexes: [], constraints: [] }, WorkloadRow),
   workerAccounts: __table({ name: "worker_accounts", indexes: [], constraints: [] }, AccountRow),
+  workerConversations: __table({ name: "worker_conversations", indexes: [], constraints: [] }, ConversationRow),
   workerHandles: __table({ name: "worker_handles", indexes: [], constraints: [] }, LinkedHandleRow),
   workerOutbox: __table({ name: "worker_outbox", indexes: [], constraints: [] }, NotificationRow),
   workerEvents: __table({ name: "worker_events", indexes: [], constraints: [] }, WorkloadEventRow),

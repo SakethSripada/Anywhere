@@ -1,33 +1,8 @@
 "use client";
 
-import { PanelLeft } from "lucide-react";
-import { createContext, useContext, useState, type ReactNode } from "react";
-import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 
-const Ctx = createContext<{ open: boolean; setOpen: (o: boolean) => void } | null>(null);
-
-export function MobileNavProvider({ sidebar, children }: { sidebar: (close: () => void) => ReactNode; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Ctx.Provider value={{ open, setOpen }}>
-      {children}
-      <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent side="left" className="w-72 bg-sidebar p-0" showCloseButton={false}>
-          <SheetTitle className="sr-only">Navigation</SheetTitle>
-          {sidebar(() => setOpen(false))}
-        </SheetContent>
-      </Sheet>
-    </Ctx.Provider>
-  );
-}
-
+/** Toggles the sidebar: collapse to icons on desktop, sheet on mobile. */
 export function MobileNavTrigger() {
-  const ctx = useContext(Ctx);
-  if (!ctx) return null;
-  return (
-    <Button variant="ghost" size="icon-sm" className="md:hidden" aria-label="Open navigation" onClick={() => ctx.setOpen(true)}>
-      <PanelLeft />
-    </Button>
-  );
+  return <SidebarTrigger className="-ml-1 text-muted-foreground" />;
 }

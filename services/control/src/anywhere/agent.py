@@ -15,7 +15,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START, MessagesState, StateGraph
@@ -84,6 +84,15 @@ class TurnContext:
 FOCUS = """
 The user is chatting from the page of workload #{id} ("{title}", a {kind}, currently {status}).
 "this", "it", "the desktop" or "the job" mean that workload. Use its id for tools without asking."""
+
+
+def trim_history(messages: list, limit: int = 30) -> list:
+    """The last `limit` messages, never starting on a tool result: a ToolMessage
+    without the assistant message that requested it is rejected by the API."""
+    history = list(messages[-limit:])
+    while history and isinstance(history[0], ToolMessage):
+        history.pop(0)
+    return history
 
 
 def _failed(output: str) -> bool:
@@ -337,8 +346,7 @@ class Agent:
         )
 
         async def call_model(state: MessagesState) -> dict:
-            history = state["messages"][-30:]
-            return {"messages": [await bound.ainvoke([system, *history])]}
+            return {"messages": [await bound.ainvoke([system, *trim_history(state["messages"])])]}
 
         g = StateGraph(MessagesState)
         g.add_node("agent", call_model)

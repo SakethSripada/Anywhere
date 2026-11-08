@@ -118,3 +118,72 @@ async def test_one_operation_per_workload(tmp_path):
     with pytest.raises(RuntimeError):
         sup.launch(w)
     await drain(sup)
+
+
+class ScriptedRemote(FakeRemote):
+    """Answers the batch monitor's poll with a scripted sequence of job states."""
+
+    polls: list[str] = []
+
+    async def run(self, command, **kw):
+        from anywhere.remote import Result
+
+        if "::offset::" in command:
+            return Result(0, self.polls.pop(0) if self.polls else "", "")
+        return Result(0, "file contents\n", "")
+
+    def popen(self, command, **kw):
+        return object()
+
+
+class FakeStorage:
+    def __init__(self):
+        self.objects: dict[str, str] = {}
+
+    async def upload_stream(self, proc, key, content_type):
+        self.objects[key] = content_type
+        return 1234
+
+    async def put_bytes(self, key, data, content_type):
+        self.objects[key] = content_type
+
+
+def poll_output(offset, log="", metrics=(), status="", alive="yes"):
+    rows = "".join(m + "\n" for m in metrics)
+    return f"::offset::{offset}\n{log}\n::metrics::\n{rows}::status::\n{status}\n::alive::\n{alive}\n"
+
+
+async def test_batch_monitor_streams_logs_metrics_and_registers_artifacts(tmp_path):
+    import json as _json
+
+    brev = FakeBrev()
+    sup, store, notes = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.storage = FakeStorage()
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = [
+        poll_output(20, "::step:: Training\n", [_json.dumps({"step": 5, "loss": 2.0, "max_steps": 10})]),
+        poll_output(40, "more log\n", [_json.dumps({"step": 10, "loss": 1.0, "max_steps": 10})], status="succeeded"),
+    ]
+    w = store.add(kind="batch", status="running")
+    brev.instances[instance_name(1)] = "RUNNING"
+    await sup._monitor_batch(w)
+    assert [t for _, t in store.logs] == ["::step:: Training\n", "more log\n"]
+    assert {(p["name"], p["step"]) for p in store.metrics} >= {("loss", 5), ("loss", 10), ("progress", 10)}
+    assert sup.vault.get(1)["log_offset"] == 40
+    assert store.rows[1]["status"] == "succeeded"
+    names = [a[2] for a in store.artifacts]
+    assert names[0] == "LoRA adapter" and "Metrics" in names
+    assert ("delete", instance_name(1)) in brev.calls
+
+
+async def test_batch_monitor_fails_when_runner_dies_silently(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.poll_seconds = 0
+    sup.remote_factory = ScriptedRemote
+    ScriptedRemote.polls = [poll_output(0, alive="no")] * 3
+    w = store.add(kind="batch", status="running")
+    await sup._monitor_batch(w)
+    assert store.rows[1]["status"] == "failed"
+    assert "stopped unexpectedly" in store.rows[1]["statusDetail"]

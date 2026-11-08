@@ -7,6 +7,7 @@
 set -uo pipefail
 JOB="$HOME/workspace/anywhere/job"
 cd "$JOB"
+echo $$ > pid  # the control plane checks this to notice a runner that died silently
 exec > >(tee -a run.log) 2>&1
 
 fail() { echo "failed: $*" > status; echo "::error:: $*"; exit 1; }

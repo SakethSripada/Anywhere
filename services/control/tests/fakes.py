@@ -18,6 +18,11 @@ class FakeStore:
         self.events: list[tuple[int, str, str]] = []
         self.accounts_: list[dict] = []
         self.platform: tuple | None = None
+        self.logs: list[tuple[int, str]] = []
+        self.metrics: list[dict] = []
+        self.artifacts: list[tuple] = []
+        self.conversations: dict[int, dict] = {}
+        self.messages: list[tuple] = []
 
     def add(self, **w) -> dict:
         now = datetime.now(UTC)
@@ -65,10 +70,54 @@ class FakeStore:
     async def update_platform(self, *args):
         self.platform = args
 
-    async def append_logs(self, *a): ...
-    async def add_metrics(self, *a): ...
+    async def append_logs(self, wid, text):
+        self.logs.append((wid, text))
+
+    async def add_metrics(self, wid, points):
+        self.metrics.extend(points)
+
     async def upsert_project(self, *a): ...
-    async def add_artifact(self, *a): ...
+
+    async def add_artifact(self, *a):
+        self.artifacts.append(a)
+
+    # Conversations and planning (used by Anywhere.propose / plan_direct)
+    async def account(self, identity):
+        return next((a for a in self.accounts_ if a["identity"] == identity), None)
+
+    async def upsert_conversation(self, id, owner, title, channel):
+        existing = self.conversations.get(id)
+        if existing and existing["owner"] != owner:
+            raise ReducerRejected("Conversation owner mismatch")
+        self.conversations[id] = {"id": id, "owner": owner, "title": title, "channel": channel}
+
+    async def conversation_owned(self, id, owner):
+        return self.conversations.get(id, {}).get("owner") == owner
+
+    async def append_message(self, conversation_id, role, kind, body, workload_id=0, channel="web"):
+        if conversation_id not in self.conversations:
+            raise ReducerRejected("Conversation not found")
+        self.messages.append((conversation_id, role, kind, body, workload_id))
+
+    async def create_workload(self, **w):
+        self.add(
+            id=w["id"],
+            owner=w["owner"],
+            conversationId=w["conversation_id"],
+            kind=w["kind"],
+            title=w["title"],
+            status="planned",
+            planJson=w["plan_json"],
+            instanceType=w["instance_type"],
+            gpuName=w["gpu_name"],
+            hourlyCents=w["hourly_cents"],
+            estLowCents=w["est_low_cents"],
+            estHighCents=w["est_high_cents"],
+            stoppable=w["stoppable"],
+        )
+
+    async def handles_for(self, owner):
+        return []
 
 
 class FakeBrev:
