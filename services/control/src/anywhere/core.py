@@ -35,6 +35,9 @@ log = structlog.get_logger()
 
 
 #: A .blend path relative to ~/Projects: plain names and folders only (no quotes, no `..`).
+#: How long the public watch page's database reads are shared between viewers.
+WATCH_CACHE_SECONDS = 2.0
+
 SAFE_PATH = re.compile(r"^[\w .@+-]+(/[\w .@+-]+)*\.blend$")
 
 
@@ -764,7 +767,26 @@ class Anywhere:
         return rec, w
 
     async def watch_view(self, token: str) -> dict:
-        """What someone with a watch link may see: the desktop's state and the agent's steps."""
+        """What someone with a watch link may see: the desktop's state and the agent's steps.
+
+        Every viewer polls this every couple of seconds; the link is checked on each call
+        (in memory), but the database reads behind it are shared for WATCH_CACHE_SECONDS."""
+        digest = sharing.digest(token)
+        rec = self.vault.section_get(sharing.SECTION, digest)
+        if not sharing.live(rec):
+            raise ActionError("This watch link has expired or was turned off")
+        cache: dict[str, tuple[float, dict]] = self.__dict__.setdefault("_watch_cache", {})
+        now = asyncio.get_running_loop().time()
+        hit = cache.get(digest)
+        if hit and now - hit[0] < WATCH_CACHE_SECONDS:
+            return hit[1]
+        for key in [k for k, (at, _) in cache.items() if now - at >= WATCH_CACHE_SECONDS]:
+            del cache[key]
+        view = await self._watch_view(token)
+        cache[digest] = (now, view)
+        return view
+
+    async def _watch_view(self, token: str) -> dict:
         rec, w = await self.watched(token)
         agent = None
         runs = await self.store.agent_runs(int(w["id"]))

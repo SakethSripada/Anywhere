@@ -84,3 +84,22 @@ async def test_links_expire_and_only_owners_of_running_desktops_can_share(app):
     with pytest.raises(ActionError, match="Start the desktop"):
         await app.create_share(ALICE, 12)
     assert sharing.make(1, ALICE, hours=500)[1]["expires_at"] < (datetime.now(UTC) + timedelta(hours=25)).isoformat()
+
+
+async def test_viewers_share_the_watch_reads_but_revoking_still_cuts_them_off(app):
+    made = await app.create_share(ALICE, 11)
+    reads = 0
+    original = app.store.agent_runs
+
+    async def counting(wid):
+        nonlocal reads
+        reads += 1
+        return await original(wid)
+
+    app.store.agent_runs = counting
+    for _ in range(5):  # five viewers polling at once
+        await app.watch_view(made["token"])
+    assert reads == 1
+    await app.revoke_share(ALICE, 11)
+    with pytest.raises(ActionError):
+        await app.watch_view(made["token"])  # the cache never outlives the link
