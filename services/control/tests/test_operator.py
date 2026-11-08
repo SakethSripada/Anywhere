@@ -151,3 +151,29 @@ async def test_coordinates_off_the_screenshot_are_clamped_onto_it():
     assert screen.calls[0] == ("click", 2558, 0, "left", False)
     detail = json.loads(next(d for k, d in steps if k == "act"))
     assert (detail["x"], detail["y"], detail["frame"]) == (1279, 0, [1280, 720])
+
+
+async def test_the_agent_stops_when_it_keeps_repeating_itself():
+    click = {"action": "click", "x": 5, "y": 5, "summary": "Click File"}
+    final, screen, steps = await run([click] * 4 + [{"action": "done", "text": "never reached"}])
+    assert final["status"] == "failed" and "same thing" in final["result"]
+    assert len(screen.calls) == 3 and steps[-1] == "error"
+
+
+async def test_the_agent_stops_when_the_desktop_keeps_failing():
+    class Broken(FakeScreen):
+        async def click(self, *a, **k):
+            raise ConnectionError("tunnel closed")
+
+    screen = Broken()
+
+    async def record(kind, summary, detail, jpeg): ...
+
+    async def has_control():
+        return True
+
+    replies = [{"action": "click", "x": i, "y": 1} for i in range(10)]
+    graph = build_operator(llm=ScriptedLLM(replies), screen=screen, record=record, has_control=has_control)
+    final = await graph.ainvoke({"goal": "test", "step": 0, "history": []})
+    assert final["status"] == "failed" and final["step"] == 3
+    assert "tunnel closed" in final["result"]
