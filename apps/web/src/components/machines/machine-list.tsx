@@ -5,21 +5,17 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAccount, useMonthSpend, useWorkloads } from "@/lib/data";
-import { cents } from "@/lib/format";
-import { ACTIVE, BILLABLE } from "@/lib/workloads";
+import { useWorkloads } from "@/lib/data";
+import { ACTIVE } from "@/lib/workloads";
 import { PageHeader } from "../app/page-header";
+import { CostPanel } from "./cost-panel";
 import { MachineTable } from "./machine-table";
 
 export function MachineList() {
   const { workloads, ready } = useWorkloads();
-  const { account } = useAccount();
-  const spent = useMonthSpend();
   const live = workloads.filter((w) => ACTIVE.has(w.status) || w.status === "planned");
   const stopped = workloads.filter((w) => w.status === "stopped");
   const history = workloads.filter((w) => ["succeeded", "failed", "cancelled"].includes(w.status));
-  const running = workloads.filter((w) => BILLABLE.has(w.status));
-  const burn = running.reduce((s, w) => s + w.hourlyCents, 0);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -30,10 +26,7 @@ export function MachineList() {
       </PageHeader>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="@container mx-auto w-full max-w-6xl px-6 pt-6 pb-16">
-          <dl className="grid max-w-xl grid-cols-2 divide-x rounded-lg border">
-            <Stat label="Running now" value={String(running.length)} sub={running.length ? `${cents(burn)}/hr` : "Nothing billing"} />
-            <Stat label="This month" value={cents(spent)} sub={`of ${cents(account?.monthlyCapCents ?? 0)} limit`} />
-          </dl>
+          <CostPanel />
 
           {!ready ? (
             <Skeleton className="mt-8 h-40 rounded-lg" />
@@ -64,16 +57,6 @@ export function MachineList() {
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
-  return (
-    <div className="px-4 py-3">
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="mt-1 text-lg font-semibold tracking-tight tabular">{value}</dd>
-      <dd className="truncate text-xs text-muted-foreground">{sub}</dd>
     </div>
   );
 }
