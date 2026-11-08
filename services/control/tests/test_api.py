@@ -30,10 +30,17 @@ def test_commands_require_authentication(tmp_path):
     with client(tmp_path) as c:
         assert c.post("/v1/chat", json={"text": "hi"}).status_code == 401
         assert c.post("/v1/workloads/1/approve").status_code == 401
+        assert c.post("/v1/workloads/1/share", json={}).status_code == 401
+        assert c.delete("/v1/workloads/1/share").status_code == 401
         assert (
             c.post("/v1/bridge/inbound", json={"handle": "+15550100", "text": "hi", "message_id": "m"}).status_code
             == 401
         )
+
+
+def test_unknown_watch_links_are_not_found(tmp_path):
+    with client(tmp_path) as c:
+        assert c.get("/v1/watch/not-a-real-token").status_code == 404
 
 
 def test_vnc_tickets_are_signed_scoped_and_short_lived():
