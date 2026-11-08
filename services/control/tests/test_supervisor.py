@@ -768,3 +768,29 @@ def test_site_prefix_is_stable_and_valid(tmp_path):
     assert first == site_prefix(tmp_path)
     assert not first.startswith("anywhere")
     assert NAME_RE.match(instance_name(0xFFFFFFFFFFFF, first) + "-1")
+
+
+async def test_reach_refreshes_until_brev_writes_the_host(tmp_path, monkeypatch):
+    # Seen live on a resume: the first refresh after "Machine is up" wrote an empty
+    # ssh_config, and the supervisor waited on an alias that didn't exist.
+    import anywhere.supervisor as sup_mod
+
+    monkeypatch.setattr(sup_mod, "_until", _fast_until)
+    brev = FakeBrev()
+    refreshes = []
+
+    async def refresh_ssh(attempts=8):
+        refreshes.append(attempts)
+
+    brev.refresh_ssh = refresh_ssh
+    brev.has_ssh_host = lambda name: len(refreshes) >= 3
+    sup, store, _ = make(tmp_path, brev)
+    await sup._reach(store.add(), "awx-1")
+    assert len(refreshes) >= 3
+
+
+async def _fast_until(check, *, timeout, what, interval=8):
+    for _ in range(20):
+        if await check():
+            return
+    raise TimeoutError(what)

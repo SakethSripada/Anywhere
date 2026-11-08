@@ -180,6 +180,16 @@ class BrevCLI:
                 log.warning("brev.refresh_retry", attempt=attempt, error=str(exc)[:200])
                 await asyncio.sleep(self.REFRESH_RETRY_SECONDS * min(2**attempt, 8))
 
+    def has_ssh_host(self, name: str) -> bool:
+        """Whether the last refresh wrote an alias for `name`. Right after a start,
+        refresh can succeed while Brev has no SSH details for the machine yet, leaving
+        the config empty (seen live on a resume)."""
+        try:
+            text = (Path.home() / ".brev" / "ssh_config").read_text()
+        except OSError:
+            return False
+        return any(line.strip() == f"Host {name}" for line in text.splitlines())
+
     async def check_auth(self) -> int:
         """Confirm the CLI is authenticated. Returns how many instances the org has."""
         return len(await self.list())

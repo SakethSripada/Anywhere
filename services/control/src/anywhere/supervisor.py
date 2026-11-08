@@ -203,6 +203,22 @@ class Supervisor:
         await self.store.switch_workload_machine(w["id"], alt.type, alt.gpu_name, alt.provider, alt.hourly_cents)
         w.update(instanceType=alt.type, gpuName=alt.gpu_name, provider=alt.provider, hourlyCents=alt.hourly_cents)
 
+    async def _reach(self, w: dict, name: str) -> Remote:
+        """Refresh Brev's SSH config until it has this machine, then wait for SSH."""
+        remote = self.remote(w)
+        await self.brev.refresh_ssh()
+
+        async def ready() -> bool:
+            if not self.brev.has_ssh_host(name):
+                with contextlib.suppress(BrevError):
+                    await self.brev.refresh_ssh(attempts=1)
+                if not self.brev.has_ssh_host(name):
+                    return False
+            return await remote.reachable()
+
+        await _until(ready, timeout=8 * 60, what="SSH access")
+        return remote
+
     def _fallback(self, w: dict, tried: list[str]) -> Offer | None:
         """The cheapest same-GPU machine from a provider we haven't tried, or None.
         One retry at most: a second failure is more likely the setup than capacity."""
@@ -298,9 +314,7 @@ class Supervisor:
                             "warn",
                         )
                         await self._switch_machine(w, alt)
-                await self.brev.refresh_ssh()
-                remote = self.remote(w)
-                await _until(remote.reachable, timeout=6 * 60, what="SSH access")
+                remote = await self._reach(w, name)
 
                 await self._transition(w, Status.CONFIGURING, "Setting up the environment")
                 if w["kind"] == "desktop":
@@ -525,9 +539,7 @@ class Supervisor:
                 await self._event(w, BOOT_RESUME)
                 await self.brev.start(name)
                 await self.brev.wait_for(name, want="RUNNING", timeout=20 * 60, on_change=self._boot_progress(w))
-                await self.brev.refresh_ssh()
-                remote = self.remote(w)
-                await _until(remote.reachable, timeout=6 * 60, what="SSH access")
+                remote = await self._reach(w, name)
                 await self._transition(w, Status.CONFIGURING, "Reconnecting the desktop")
                 await self._start_desktop(w, remote)
             except Exception as exc:

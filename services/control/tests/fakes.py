@@ -157,7 +157,10 @@ class FakeBrev:
         self.instances[name] = want
         return Instance(name, "id", want, "READY", "", "")
 
-    async def refresh_ssh(self): ...
+    async def refresh_ssh(self, attempts=8): ...
+
+    def has_ssh_host(self, name):
+        return True
 
     async def get(self, name):
         s = self.instances.get(name)
