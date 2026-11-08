@@ -1000,6 +1000,29 @@ def _planet(
     return made
 
 
+def _three_quarter_turn(obj):
+    """Z rotation that shows a long subject (ship, plane, train) three-quarter on to the camera,
+    which opens on +X looking back along X: the turn that gives the widest silhouette, eased
+    back 35 degrees. Without it a hull could face the lens bow first and read as a sliver.
+    Compact subjects keep the generator's own three-quarter pose."""
+    verts = obj.data.vertices
+    step = max(1, len(verts) // 4000)
+    pts = [(verts[i].co.x, verts[i].co.y) for i in range(0, len(verts), step)]
+    if len(pts) < 10:
+        return 0.0
+    base = obj.rotation_euler.z
+    widths = []
+    for k in range(36):
+        t = base + _math.radians(k * 5)
+        c, s_ = _math.cos(t), _math.sin(t)
+        ys = [x * s_ + y * c for x, y in pts]  # world y of each point after turning by t
+        widths.append((max(ys) - min(ys), k))
+    widest, k = max(widths)
+    if widest < min(widths)[0] * 1.3:
+        return 0.0
+    return _math.radians(k * 5 - 35)
+
+
 @_lenient
 def _hero(path="/projects/hero.glb", height=8.0, location=(0, 0, 0), rotation=0.0, roughness=0.55, metallic=0.0):
     """Place the generated 3D model of the subject: upright, `height` metres tall, standing on
@@ -1026,11 +1049,13 @@ def _hero(path="/projects/hero.glb", height=8.0, location=(0, 0, 0), rotation=0.
             bpy.data.objects.remove(o, do_unlink=True)
     obj.name = "Hero"
     obj.parent = None
+    obj.rotation_mode = "XYZ"  # glTF imports as quaternion, which silently ignores rotation_euler
+
     bpy.context.view_layer.update()
     dims = obj.dimensions
     s = float(height) / max(dims.z, 1e-4)
     obj.scale = (obj.scale[0] * s, obj.scale[1] * s, obj.scale[2] * s)
-    obj.rotation_euler.z += float(rotation)
+    obj.rotation_euler.z += _three_quarter_turn(obj) + float(rotation)
     x, y, z = _vec(location)
     obj.location = (x, y, z)
     bpy.context.view_layer.update()
