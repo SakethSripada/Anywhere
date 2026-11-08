@@ -84,26 +84,45 @@ export const VncScreen = forwardRef<
     c.compressionLevel = QUALITY[quality].c;
   }, [viewOnly, scale, quality]);
 
+  const lastRect = useRef<ScreenRect | null | undefined>(undefined);
   const measure = useCallback(() => {
     const canvas = target.current?.querySelector("canvas");
     const box = frame.current?.getBoundingClientRect();
-    if (!canvas || !box || !canvas.width) return callbacks.current.onRect?.(null);
-    const r = canvas.getBoundingClientRect();
-    callbacks.current.onRect?.({ left: r.left - box.left, top: r.top - box.top, width: r.width, height: r.height, fbWidth: canvas.width, fbHeight: canvas.height });
+    let next: ScreenRect | null = null;
+    if (canvas && box && canvas.width) {
+      const r = canvas.getBoundingClientRect();
+      next = { left: r.left - box.left, top: r.top - box.top, width: r.width, height: r.height, fbWidth: canvas.width, fbHeight: canvas.height };
+    }
+    // Only report real changes; a fresh object every call re-renders the stage.
+    const prev = lastRect.current;
+    const same =
+      prev === next ||
+      (!!prev && !!next && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height && prev.fbWidth === next.fbWidth && prev.fbHeight === next.fbHeight);
+    if (same) return;
+    lastRect.current = next;
+    callbacks.current.onRect?.(next);
   }, []);
 
   useEffect(() => {
     if (phase !== "live") return;
-    const ro = new ResizeObserver(measure);
+    // noVNC rescales asynchronously after a resize; re-measure for a moment, then stop.
+    let timers: ReturnType<typeof setTimeout>[] = [];
+    const settle = () => {
+      timers.forEach(clearTimeout);
+      timers = [150, 500, 1200].map((d) => setTimeout(measure, d));
+    };
+    const ro = new ResizeObserver(() => {
+      measure();
+      settle();
+    });
     if (frame.current) ro.observe(frame.current);
     const canvas = target.current?.querySelector("canvas");
     if (canvas) ro.observe(canvas);
-    // noVNC rescales asynchronously after a resize; re-measure for a moment.
-    const id = setInterval(measure, 1000);
     measure();
+    settle();
     return () => {
       ro.disconnect();
-      clearInterval(id);
+      timers.forEach(clearTimeout);
     };
   }, [phase, measure, scale]);
 
