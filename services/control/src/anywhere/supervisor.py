@@ -290,6 +290,12 @@ class Supervisor:
         await self._restore_project(w, remote)
         await self._start_desktop(w, remote)
 
+    async def ensure_desktop_services(self, w: dict) -> None:
+        """Re-run the idempotent start script: starts any desktop service that's missing."""
+        result = await self.remote(w).run("bash -s", input=_env("desktop-start.sh").encode(), timeout=150)
+        if "::ready::" not in result.stdout:
+            raise RemoteError("The desktop's services didn't come up")
+
     async def _start_desktop(self, w: dict, remote: Remote) -> None:
         await self._event(w, "Starting the desktop session")
         result = await remote.run("bash -s", input=_env("desktop-start.sh").encode(), timeout=150)

@@ -38,6 +38,13 @@ def test_commands_require_authentication(tmp_path):
         assert c.get("/v1/bridge/notifications/1/attachment").status_code == 401
 
 
+def test_sharing_needs_the_owner_and_unknown_links_are_not_found(tmp_path):
+    with client(tmp_path) as c:
+        assert c.post("/v1/workloads/1/share", json={}).status_code == 401
+        assert c.delete("/v1/workloads/1/share").status_code == 401
+        assert c.get("/v1/watch/not-a-real-token").status_code == 404
+
+
 def test_vnc_tickets_are_signed_scoped_and_short_lived():
     key = b"k" * 32
     t = issue_ticket(key, 42, "owner", ttl=60)

@@ -34,6 +34,7 @@ import { AppLogo, appKey } from "../app/app-logo";
 import { AgentPanel, type AgentPanelHandle, type AgentPanelMemory } from "./agent-panel";
 import { DesktopStage } from "./desktop-stage";
 import { Insights } from "./insights";
+import { ShareButton } from "./share-dialog";
 import { JobStage } from "./job-stage";
 import { LiveCost, Uptime, useWorkloadAction } from "./shared";
 import { StatusChip } from "./status";
@@ -247,6 +248,7 @@ function Header({
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
+        {desktop && w.status === "running" && <ShareButton w={w} />}
         {running && (
           <Button size="sm" variant="outline" onClick={() => setConfirm(desktop && w.stoppable ? "stop" : "delete")}>
             {desktop && w.stoppable ? <Pause /> : <Square className="size-3" />}

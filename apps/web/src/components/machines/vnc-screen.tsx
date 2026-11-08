@@ -4,8 +4,6 @@ import type RFB from "@novnc/novnc";
 import { Loader2, RotateCw, WifiOff } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { useApi } from "@/lib/api";
-import { apiWsUrl } from "@/lib/config";
 import { cn } from "@/lib/utils";
 
 export type Phase = "connecting" | "live" | "lost" | "failed";
@@ -31,14 +29,17 @@ const QUALITY: Record<Quality, { q: number; c: number }> = {
 };
 
 /**
- * Live desktop over noVNC. The browser never talks to the VM: it trades its
- * identity for a 60-second ticket and the control plane relays the stream
- * through an SSH tunnel to the instance's loopback-only VNC server.
+ * Live desktop over noVNC. The browser never talks to the VM: `streamUrl` returns
+ * a control-plane WebSocket URL (a 60-second ticket for the owner, or a watch
+ * link's token), and the control plane relays the stream through an SSH tunnel
+ * to the instance's loopback-only VNC server.
  */
 export const VncScreen = forwardRef<
   VncHandle,
   {
-    workloadId: bigint;
+    /** Identifies the stream; a new key reconnects. */
+    streamKey: string;
+    streamUrl: () => Promise<string>;
     viewOnly: boolean;
     scale?: Scale;
     quality?: Quality;
@@ -48,8 +49,7 @@ export const VncScreen = forwardRef<
     onRect?: (rect: ScreenRect | null) => void;
     onRemoteClipboard?: (text: string) => void;
   }
->(function VncScreen({ workloadId, viewOnly, scale = "fit", quality = "balanced", overlay, className, onPhase, onRect, onRemoteClipboard }, ref) {
-  const api = useApi();
+>(function VncScreen({ streamKey, streamUrl, viewOnly, scale = "fit", quality = "balanced", overlay, className, onPhase, onRect, onRemoteClipboard }, ref) {
   const frame = useRef<HTMLDivElement>(null);
   const target = useRef<HTMLDivElement>(null);
   const rfb = useRef<RFB | null>(null);
@@ -60,11 +60,11 @@ export const VncScreen = forwardRef<
   // resetting it on a successful connect doesn't tear that connection down.
   const [generation, setGeneration] = useState(0);
   const tries = useRef(0);
-  const apiRef = useRef(api);
+  const urlRef = useRef(streamUrl);
 
   useEffect(() => {
     callbacks.current = { onPhase, onRect, onRemoteClipboard };
-    apiRef.current = api;
+    urlRef.current = streamUrl;
   });
 
   useEffect(() => {
@@ -140,12 +140,8 @@ export const VncScreen = forwardRef<
     };
     (async () => {
       try {
-        const [{ default: RFBClass }, { ticket }] = await Promise.all([
-          import("@novnc/novnc"),
-          apiRef.current.post<{ ticket: string }>(`/v1/desktops/${workloadId}/session`),
-        ]);
+        const [{ default: RFBClass }, url] = await Promise.all([import("@novnc/novnc"), urlRef.current()]);
         if (cancelled || !target.current) return;
-        const url = apiWsUrl(`/v1/desktops/${workloadId}/vnc?ticket=${encodeURIComponent(ticket)}`);
         const client = new RFBClass(target.current, url, { wsProtocols: ["binary"], shared: true });
         const o = opts.current;
         client.scaleViewport = o.scale === "fit";
@@ -181,7 +177,7 @@ export const VncScreen = forwardRef<
       rfb.current = null;
     };
     // `generation` drives reconnects; settings are applied live above.
-  }, [workloadId, generation]);
+  }, [streamKey, generation]);
 
   const reconnect = useCallback(() => {
     setPhase("connecting");
