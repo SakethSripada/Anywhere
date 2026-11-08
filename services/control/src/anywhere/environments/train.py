@@ -84,6 +84,13 @@ def main() -> None:
     )
     if quant is not None:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    else:
+        # Gradient checkpointing with a frozen base model: unless the embeddings'
+        # output requires grad, checkpointed layers return tensors without a grad_fn
+        # and the first backward() fails ("element 0 of tensors does not require
+        # grad"). prepare_model_for_kbit_training does this for QLoRA; plain LoRA
+        # needs it explicitly.
+        model.enable_input_require_grads()
     model = get_peft_model(
         model,
         LoraConfig(
@@ -144,6 +151,7 @@ def main() -> None:
         bf16=bf16,
         fp16=not bf16,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to=[],
     )
     trainer = Trainer(
