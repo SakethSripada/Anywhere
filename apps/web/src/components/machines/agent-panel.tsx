@@ -46,7 +46,14 @@ const STATUS: Record<OrbState, string> = {
  */
 export const AgentPanel = forwardRef<AgentPanelHandle, { w: Workload; onCollapse?: () => void }>(function AgentPanel({ w, onCollapse }, ref) {
   const api = useApi();
-  const [cid, setCid] = useState<bigint | null>(w.conversationId > 0n ? w.conversationId : null);
+  const linked = w.conversationId > 0n ? w.conversationId : null;
+  const [cid, setCid] = useState<bigint | null>(linked);
+  // Follow the workload when its linked conversation changes (or appears).
+  const [seenLinked, setSeenLinked] = useState(linked);
+  if (linked !== seenLinked) {
+    setSeenLinked(linked);
+    if (linked != null) setCid(linked);
+  }
   const { messages, pending, send } = useChat(cid, { workloadId: w.id });
   const composer = useRef<ComposerHandle>(null);
   const agent = useAgentState(w);
