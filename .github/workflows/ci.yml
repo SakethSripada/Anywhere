@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  control:
+    name: Control plane (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/control
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q
+
+  typescript:
+    name: SpacetimeDB module tests and type-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @anywhere/spacetime-module test
+      - run: pnpm --filter @anywhere/spacetime-module typecheck
+      - run: pnpm --filter @anywhere/stdb typecheck
+      - run: pnpm --filter @anywhere/messaging typecheck
+      - run: pnpm --filter web typecheck
