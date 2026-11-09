@@ -11,3 +11,11 @@ def test_trailing_slashes_are_trimmed(monkeypatch):
     assert s.public_api_url == "http://localhost:8010"
     assert s.spacetime_host == "http://127.0.0.1:3100"
     assert s.cors_origins == ["https://a.example"]
+
+
+def test_an_unknown_blender_version_fails_at_boot():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="no known checksum"):
+        Settings(_env_file=None, blender_version="9.9.9")

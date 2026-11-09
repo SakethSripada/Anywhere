@@ -14,16 +14,20 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 import subprocess
 from dataclasses import dataclass
 from typing import IO
 
 import boto3
+import structlog
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from .config import Settings
 from .remote import end_process, stderr_tail
+
+log = structlog.get_logger()
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -119,22 +123,46 @@ class Storage:
         return await asyncio.to_thread(_read)
 
     # ── Streaming ─────────────────────────────────────────────────────────
-    async def upload_stream(self, proc: subprocess.Popen, key: str, content_type: str) -> int:
-        """Upload a process's stdout (e.g. a remote `tar czf -`) as one object."""
+    async def upload_stream(
+        self, proc: subprocess.Popen, key: str, content_type: str, *, ok_exit: frozenset[int] = frozenset({0})
+    ) -> int:
+        """Upload a process's stdout (e.g. a remote `tar czf -`) as one object.
+
+        The bytes go to a temporary key first and only replace `key` once the
+        upload finished and the source exited cleanly, so a dropped connection or a
+        failed tar never overwrites the last good copy (say, a project snapshot).
+        `ok_exit` lists source exit codes that still count as success."""
 
         def _upload() -> int:
             assert proc.stdout is not None
+            tmp = f"{key}.{secrets.token_hex(4)}.partial"
+            done = False
             try:
                 counter = _CountingReader(proc.stdout)
-                self.client.upload_fileobj(counter, self.bucket, key, ExtraArgs={"ContentType": content_type})
+                self.client.upload_fileobj(counter, self.bucket, tmp, ExtraArgs={"ContentType": content_type})
                 code = proc.wait(timeout=60)
-                if code != 0:
+                if code not in ok_exit:
                     raise RuntimeError(f"source process exited {code}: {stderr_tail(proc)}")
+                if code != 0:
+                    log.warning("storage.source_exit_tolerated", key=key, code=code, stderr=stderr_tail(proc)[-300:])
+                # Managed copy: multipart above 5 GB, where a plain copy_object fails.
+                self.client.copy(
+                    {"Bucket": self.bucket, "Key": tmp},
+                    self.bucket,
+                    key,
+                    ExtraArgs={"ContentType": content_type, "MetadataDirective": "REPLACE"},
+                )
+                done = True
                 return counter.count
             finally:
                 # On any failure the remote tar would otherwise block forever on a
                 # full pipe, leaving an ssh process behind.
                 end_process(proc)
+                try:
+                    self.client.delete_object(Bucket=self.bucket, Key=tmp)
+                except Exception as exc:  # a leftover .partial is clutter, not data loss
+                    if done:
+                        log.warning("storage.partial_cleanup_failed", key=tmp, error=str(exc)[:200])
 
         return await asyncio.to_thread(_upload)
 

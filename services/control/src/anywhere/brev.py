@@ -282,7 +282,15 @@ class BrevCLI:
         seen: tuple[str, str] | None = None
         existed = False
         while asyncio.get_running_loop().time() < deadline:
-            last = await self.get(name)
+            try:
+                current = await self.get(name)
+            except BrevError as exc:
+                # One `brev ls` 504 or timeout must not fail the wait: callers delete
+                # the machine when it does. Keep polling until the deadline.
+                log.warning("brev.wait_poll_failed", name=name, want=want, error=str(exc)[:200])
+                await asyncio.sleep(interval)
+                continue
+            last = current
             if last and on_change and (last.status, last.shell_status) != seen:
                 seen = (last.status, last.shell_status)
                 try:
@@ -302,6 +310,16 @@ class BrevCLI:
             existed = existed or last is not None
             await asyncio.sleep(interval)
         raise BrevError(f"Instance {name} did not reach {want} within {timeout / 60:.0f} min (last: {last})")
+
+
+def foreign_instance(name: str, prefix: str) -> bool:
+    """Whether `name` looks like an Anywhere machine (`anywhere-*`, or another site's
+    `aw<site>-*`) that isn't under this deployment's `prefix`. The reconciler never
+    deletes these; usually it means DATA_DIR (its site-id) was lost, or a teammate's
+    control plane shares the Brev org."""
+    if name.startswith(f"{prefix}-"):
+        return False
+    return name.startswith("anywhere-") or bool(re.match(r"^aw[a-z0-9]{4,8}-", name))
 
 
 def parse_ls(out: str) -> list[dict]:

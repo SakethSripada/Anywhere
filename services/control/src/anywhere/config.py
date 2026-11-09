@@ -18,6 +18,11 @@ class ProvisioningMode(StrEnum):
     LIVE = "live"
 
 
+#: Blender's published checksum for each release we can install (download.blender.org).
+#: Setup scripts verify the download against it, so a version needs an entry here.
+BLENDER_SHA256 = {"4.5.15": "0d2b8bb2efe97e6c8eb57de6b7322f8800e1984e3125b60decca5f6771e4773e"}
+
+
 class Settings(BaseSettings):
     # `KEY=` (as in .env.example) means "not set", not an empty secret that counts as configured.
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore", env_ignore_empty=True)
@@ -106,6 +111,18 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("blender_version")
+    @classmethod
+    def _known_blender(cls, v: str) -> str:
+        # Fail at boot: an unknown version used to render an empty checksum and only
+        # surface minutes into a desktop's setup as "failed its checksum".
+        if v not in BLENDER_SHA256:
+            raise ValueError(
+                f"BLENDER_VERSION={v} has no known checksum (known: {', '.join(sorted(BLENDER_SHA256))}). "
+                "Add its SHA-256 from download.blender.org to BLENDER_SHA256 in config.py."
+            )
+        return v
 
     @field_validator("imessage_guest_owner")
     @classmethod

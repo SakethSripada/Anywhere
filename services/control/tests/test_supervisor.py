@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from anywhere.brev import instance_name
+from anywhere.brev import BrevError, Instance, instance_name
 from anywhere.config import ProvisioningMode, Settings
 from anywhere.storage import Storage
 from anywhere.supervisor import Supervisor
@@ -324,7 +324,7 @@ class FakeStorage:
     def __init__(self):
         self.objects: dict[str, str] = {}
 
-    async def upload_stream(self, proc, key, content_type):
+    async def upload_stream(self, proc, key, content_type, **kw):
         self.objects[key] = content_type
         return 1234
 
@@ -794,3 +794,157 @@ async def _fast_until(check, *, timeout, what, interval=8):
         if await check():
             return
     raise TimeoutError(what)
+
+
+class FlakyResumeBrev(FakeBrev):
+    """Boots fail (a resume that never comes up); stops work."""
+
+    async def wait_for(self, name, *, want="RUNNING", timeout=0, interval=0, on_change=None):
+        if want == "RUNNING":
+            raise BrevError("Instance did not reach RUNNING within 20 min")
+        return await super().wait_for(name, want=want)
+
+
+async def test_a_failed_resume_stops_the_desktop_again_and_keeps_its_disk(tmp_path):
+    brev = FlakyResumeBrev()
+    sup, store, notes = make(tmp_path, brev)
+    w = store.add(status="stopped", accruedCents=40)
+    brev.instances[instance_name(1)] = "STOPPED"
+    sup.resume(w)
+    await drain(sup)
+    assert store.rows[1]["status"] == "stopped"
+    assert not any(c[0] == "delete" for c in brev.calls)
+    assert instance_name(1) in brev.instances
+    assert any(kind == "error" and "couldn't resume" in body for kind, body in notes)
+
+
+async def test_a_stop_that_brev_never_confirms_keeps_the_disk(tmp_path):
+    brev = FakeBrev(fail_wait=True)  # `wait_for(STOPPED)` keeps failing
+    sup, store, notes = make(tmp_path, brev)  # no object storage: no snapshot either
+    w = store.add(status="running")
+    brev.instances[instance_name(1)] = "RUNNING"
+    sup.stop(w)
+    await drain(sup)
+    assert not any(c[0] == "delete" for c in brev.calls)
+    assert store.rows[1]["status"] == "stopping"  # the guard tick keeps retrying it
+    assert any(kind == "error" for kind, _ in notes)
+    brev.fail_wait = False
+    await sup.tick()
+    await drain(sup)
+    assert store.rows[1]["status"] == "stopped"
+    assert store.rows[1]["accruedCents"] >= 0 and instance_name(1) in brev.instances
+
+
+async def test_a_transient_store_error_mid_stop_does_not_leave_it_saving(tmp_path, monkeypatch):
+    from anywhere import supervisor as mod
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(mod.asyncio, "sleep", lambda s: real_sleep(0))
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    w = store.add(status="running")
+    brev.instances[instance_name(1)] = "RUNNING"
+    real = store.transition
+    failures = {"stopping": 2}
+
+    async def flaky(id, to, detail):
+        if failures.get(to):
+            failures[to] -= 1
+            raise ConnectionError("SpacetimeDB unavailable")
+        await real(id, to, detail)
+
+    store.transition = flaky
+    sup.stop(w)
+    await drain(sup)
+    assert store.rows[1]["status"] == "stopped"
+
+
+async def test_recover_finishes_interrupted_desktop_work_without_deleting(tmp_path):
+    brev = FakeBrev()
+    sup, store, notes = make(tmp_path, brev)
+    store.add(id=1, status="saving")  # a save cut short on a running machine
+    store.add(id=2, status="stopping")  # a stop cut short
+    store.add(id=3, status="provisioning")  # a resume cut short
+    store.add(id=4, status="provisioning")  # a fresh launch
+    sup.vault.update(3, resuming=True)
+    brev.instances = {
+        instance_name(i): s for i, s in [(1, "RUNNING"), (2, "STOPPING"), (3, "RUNNING"), (4, "DEPLOYING")]
+    }
+    await sup.recover()
+    await drain(sup)
+    assert store.rows[1]["status"] == "running"
+    assert store.rows[2]["status"] == "stopped"
+    assert store.rows[3]["status"] == "stopped"
+    assert store.rows[4]["status"] == "failed"
+    assert [c for c in brev.calls if c[0] == "delete"] == [("delete", instance_name(4))]
+
+
+async def test_last_months_desktop_still_in_use_counts_toward_this_months_cap(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    store.accounts_ = [{"identity": "ab" * 32, "monthlyCapCents": 1000}]
+    store.add(status="running", createdAt=ago(60 * 24 * 40), lastActiveAt=ago(1), accruedCents=1500)
+    sup.vault.update(1, segment_start=ago(1).isoformat(), segment_base=1500)
+    brev.instances[instance_name(1)] = "RUNNING"
+    await sup.tick()
+    await drain(sup)
+    assert ("stop", instance_name(1)) in brev.calls
+
+
+async def test_the_session_limit_saves_a_batch_jobs_outputs_before_deleting(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(
+        tmp_path, brev, max_session_hours=4, s3_bucket="b", s3_access_key_id="k", s3_secret_access_key="s"
+    )
+    sup.storage = FakeStorage()
+    sup.remote_factory = ScriptedRemote
+    store.add(kind="batch", status="running", stoppable=False, planJson='{"inputs": {}}')
+    sup.vault.update(1, instance=instance_name(1), segment_start=ago(5 * 60).isoformat(), segment_base=0)
+    brev.instances[instance_name(1)] = "RUNNING"
+    await sup.tick()
+    await drain(sup)
+    assert store.rows[1]["status"] == "terminated"
+    names = [a[2] for a in store.artifacts]
+    assert "Latest checkpoint (unfinished)" in names and "Training log" in names
+
+
+def test_instance_fallback_uses_the_deployment_prefix(tmp_path):
+    sup, _, _ = make(tmp_path, FakeBrev())
+    sup.instance_prefix = "awk2q7"
+    assert sup._instance(10) == "awk2q7-a"
+
+
+async def test_housekeeping_forgets_terminated_workloads(tmp_path):
+    sup, store, _ = make(tmp_path, FakeBrev())
+    sup.vault.update(1, instance="anywhere-1", cua_token="t")
+    sup.vault.update(2, instance="anywhere-2")
+    sup.housekeeping(workloads=[{"id": 1, "status": "terminated"}, {"id": 2, "status": "stopped"}])
+    assert sup.vault.get(1) == {} and sup.vault.get(2)
+
+
+async def test_reconcile_never_deletes_machines_outside_its_prefix(tmp_path):
+    brev = FakeBrev()
+    sup, store, _ = make(tmp_path, brev)
+    sup.instance_prefix = "awk2q7"
+    brev.instances = {"anywhere-5": "RUNNING", "awzzzz9-3": "STOPPED", "awk2q7-9": "RUNNING"}
+    await sup.reconcile([])
+    await sup.reconcile([])
+    assert set(brev.instances) == {"anywhere-5", "awzzzz9-3"}
+    assert sup._foreign_warned == {"anywhere-5", "awzzzz9-3"}
+
+
+async def test_brev_wait_survives_a_transient_list_error(monkeypatch):
+    from anywhere.brev import BrevCLI
+
+    cli = BrevCLI("brev", "bak-test", ProvisioningMode.LIVE)
+    answers = [BrevError("brev ls failed: 504 Gateway Timeout"), Instance("m", "i", "STOPPED", "READY", "", "")]
+
+    async def get(name):
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    monkeypatch.setattr(cli, "get", get)
+    inst = await cli.wait_for("m", want="STOPPED", timeout=5, interval=0)
+    assert inst.status == "STOPPED"

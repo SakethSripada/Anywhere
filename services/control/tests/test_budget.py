@@ -117,3 +117,20 @@ def test_split_renders_need_room_for_every_machine():
         kind="batch", cost_high_cents=100, account=acct, spend=spend, limits=PlatformLimits(5000, 5), machines=4
     )
     assert roomy.allowed
+
+
+def test_batch_jobs_that_may_outlast_the_session_limit_are_refused():
+    from anywhere.budget import AccountPolicy, PlatformLimits, SpendSnapshot, evaluate
+
+    args = dict(
+        kind="batch",
+        cost_high_cents=100,
+        account=AccountPolicy(True, 5000, 1000),
+        spend=SpendSnapshot(account_month_cents=0, platform_cents=0, active_instances=0),
+        limits=PlatformLimits(5000, 4),
+        max_session_hours=4,
+    )
+    long = evaluate(**args, hours_high=6.5)
+    assert not long.allowed and any("4 h limit" in b for b in long.blockers)
+    assert evaluate(**args, hours_high=3.5).allowed
+    assert evaluate(**{**args, "kind": "desktop"}, hours_high=6.5).allowed  # desktops stop and resume
