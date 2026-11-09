@@ -625,8 +625,9 @@ async def test_relay_times_out_and_kills_both_sides():
     from anywhere.remote import RemoteError
     from anywhere.supervisor import _relay
 
+    # `exec` so killing the shell kills the sleep: dash (Linux's sh) would leave it holding the pipe.
     with pytest.raises(RemoteError, match="too long"):
-        await _relay(_LocalShell(), "sleep 30", _LocalShell(), "cat >/dev/null", timeout=0.5)
+        await _relay(_LocalShell(), "exec sleep 30", _LocalShell(), "cat >/dev/null", timeout=0.5)
 
 
 async def test_relay_copies_between_machines(tmp_path):

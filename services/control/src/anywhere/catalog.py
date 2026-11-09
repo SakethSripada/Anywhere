@@ -98,7 +98,9 @@ class Catalog:
         self._failed_until: dict[str, float] = {}
         self._failed_path: Path | None = None
         self._ttl = ttl_seconds
-        self._refreshed_at = 0.0
+        # Never refreshed: stale from the start. (0.0 isn't enough, since monotonic time counts
+        # from boot, so a freshly booted host would skip live prices for the first TTL.)
+        self._refreshed_at = float("-inf")
 
     def offers(self) -> list[Offer]:
         """What planning may choose: listed by Brev and not recently failed."""

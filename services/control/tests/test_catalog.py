@@ -59,3 +59,10 @@ def test_snapshot_types_are_listed_on_brev():
         "g6e.2xlarge",
     }
     assert {o.type for o in Catalog().offers()} == verified
+
+
+def test_a_new_catalog_is_stale_even_on_a_freshly_booted_host(monkeypatch):
+    import time
+
+    monkeypatch.setattr(time, "monotonic", lambda: 5.0)  # five seconds since boot
+    assert Catalog().stale
