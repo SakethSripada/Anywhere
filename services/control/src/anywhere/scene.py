@@ -22,7 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
 from .desktop import connect_screen
-from .llm import _key
+from .llm import TIMEOUT, _key, ainvoke
 from .operator import run_in_blender
 
 if TYPE_CHECKING:
@@ -131,6 +131,7 @@ def coder(settings: Settings) -> ChatNVIDIA:
         temperature=0.6,
         top_p=0.95,
         max_completion_tokens=4096,
+        timeout=TIMEOUT,
     )
     known = model._client.model
     if known is not None and known.supports_thinking:
@@ -155,7 +156,7 @@ Examples: "a pirate ship on the ocean at sunset" -> {"object": "a wooden pirate 
 
 
 async def pick_subject(settings: Settings, request: str) -> tuple[str, float] | None:
-    reply = await coder(settings).ainvoke([SystemMessage(SUBJECT_PROMPT), HumanMessage(request)])
+    reply = await ainvoke(coder(settings), [SystemMessage(SUBJECT_PROMPT), HumanMessage(request)])
     text = _THINK.sub("", reply.content if isinstance(reply.content, str) else str(reply.content))
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
@@ -216,7 +217,7 @@ async def write_script(
                 "Reply with the whole corrected script only."
             )
         )
-    reply = await coder(settings).ainvoke(messages)
+    reply = await ainvoke(coder(settings), messages)
     content = reply.content if isinstance(reply.content, str) else str(reply.content)
     return extract_code(content)
 
@@ -254,9 +255,39 @@ async def _render(screen, samples: int = 32, reframe: bool = False) -> bytes:
     return base64.b64decode(b64.strip())
 
 
+def blender_in_use(app: Anywhere, w: dict) -> str:
+    """Why scripts mustn't touch this desktop's Blender right now, or "" if they may: the
+    user holds the controls (took over, or stopped the agent), or the desktop agent is at work."""
+    if w.get("controller") == "user":
+        return "The user has the controls on this desktop. Ask them to hand back (the Hand back button) first."
+    if app.supervisor.agent_running(int(w["id"])):
+        return "The desktop agent is working on this desktop. Wait for it to finish, or stop it first."
+    return ""
+
+
+#: Run before a build's script: save the user's open file as it is, then carry on in a new
+#: file, so the script's kit.clear() and kit.save() never touch their work. An untitled
+#: scene with anything in it is kept as a copy too.
+_NEW_FILE = """
+import os
+stamp = {stamp!r}
+os.makedirs(os.path.expanduser("~/Projects"), exist_ok=True)
+if bpy.data.filepath:
+    if bpy.data.is_dirty:
+        bpy.ops.wm.save_mainfile()
+elif bpy.data.objects:
+    bpy.ops.wm.save_as_mainfile(filepath=os.path.expanduser(f"~/Projects/untitled-{{stamp}}.blend"), copy=True)
+bpy.ops.wm.save_as_mainfile(filepath=os.path.expanduser(f"~/Projects/scene-{{stamp}}.blend"))
+print(bpy.data.filepath)
+"""
+
+
 async def quick_render(app: Anywhere, w: dict) -> bytes | None:
     """A camera render of whatever Blender shows, for "show me" (a desktop screenshot crops
-    the scene into a corner of Blender's UI). None when there's no scene camera."""
+    the scene into a corner of Blender's UI). None when there's no scene camera, or when
+    the user or the agent is using Blender (the render changes scene settings)."""
+    if blender_in_use(app, w):
+        return None
     try:
         async with connect_screen(app.supervisor.remote(w), app.vault.agent_token(int(w["id"]))) as screen:
             probe = await run_in_blender(screen, "print(bool(bpy.context.scene.camera))")
@@ -281,7 +312,10 @@ async def build(
 
     Progress and the picture go to the conversation the request came from and to the
     desktop's own chat, so the web shows what the phone asked for. A request that came by
-    text gets exactly one text back: the picture with its 3D link."""
+    text gets exactly one text back: the picture with its 3D link.
+
+    The build goes into a new ~/Projects/scene-<time>.blend (the open file is saved and
+    left alone). Callers check `blender_in_use` first; it is checked again here."""
     wid = int(w["id"])
     owner = w["owner"]
     started = time.monotonic()
@@ -301,6 +335,10 @@ async def build(
             await app.send_text(owner, handle, f"I couldn't build that one: {reason}")
 
     try:
+        current = await app.store.workload(wid) or w
+        if busy := blender_in_use(app, current):
+            await fail(busy)
+            return
         # A build is use: keep the idle guard from stopping the desktop under the demo.
         await app.store.record_usage(wid, int(w.get("accruedCents", 0)), touch=True)
         remote = app.supervisor.remote(w)
@@ -316,6 +354,10 @@ async def build(
             log.info("scene.no_model", workload=wid)
             hero = None
         async with connect_screen(remote, app.vault.agent_token(wid)) as screen:
+            moved = await run_in_blender(screen, _NEW_FILE.format(stamp=time.strftime("%Y%m%d-%H%M%S")))
+            if not moved.startswith("ok"):
+                await fail("couldn't start a new Blender file: " + moved.splitlines()[-1][:160])
+                return
             outcome = await run_in_blender(screen, code)
             if not outcome.startswith("ok"):
                 log.info("scene.retry", workload=wid, error=outcome[-300:])

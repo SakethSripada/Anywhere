@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from typing import TypeVar
+from typing import Any, TypeVar
 
+import aiohttp
+import structlog
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from pydantic import BaseModel, ValidationError
@@ -15,8 +18,42 @@ from .config import Settings
 T = TypeVar("T", bound=BaseModel)
 
 
+#: Seconds to wait for a reply. Calls aren't streamed and can spend up to 8192 tokens
+#: (reasoning included) before answering, which ran past the library's 60 s default.
+TIMEOUT = 180.0
+#: Attempts per call on a timeout, 429 or 5xx, with exponential backoff from RETRY_DELAY.
+ATTEMPTS = 3
+RETRY_DELAY = 2.0
+
+log = structlog.get_logger()
+
+
 class ModelUnavailable(Exception):
     pass
+
+
+def transient(exc: BaseException) -> bool:
+    """A failure worth retrying: a timeout, a dropped connection, a 429 or a 5xx.
+
+    ChatNVIDIA raises a bare Exception whose message starts "[status] ..." for HTTP errors."""
+    if isinstance(exc, (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError)):
+        return True
+    m = re.match(r"\[(\d{3})\]", str(exc).lstrip())
+    return bool(m) and (m.group(1) == "429" or m.group(1).startswith("5"))
+
+
+async def ainvoke(llm: Any, messages: list, *, attempts: int = ATTEMPTS) -> Any:
+    """`llm.ainvoke(messages)`, retried with backoff on transient failures."""
+    for attempt in range(attempts):
+        try:
+            return await llm.ainvoke(messages)
+        except Exception as exc:
+            if attempt == attempts - 1 or not transient(exc):
+                raise
+            delay = RETRY_DELAY * 2**attempt
+            log.warning("llm.retry", attempt=attempt + 1, delay=delay, error=str(exc)[:200])
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def _key(settings: Settings) -> str:
@@ -39,6 +76,7 @@ def planner(settings: Settings) -> ChatNVIDIA:
         temperature=1.0,
         top_p=0.95,
         max_completion_tokens=8192,
+        timeout=TIMEOUT,
     )
 
 
@@ -53,6 +91,7 @@ def vision(settings: Settings):
         temperature=0.6,
         top_p=0.95,
         max_completion_tokens=8192,
+        timeout=TIMEOUT,
     )
     known = model._client.model  # None for ids missing from the library's model table
     if known is not None and known.supports_thinking:
@@ -98,18 +137,36 @@ def parse_json_model(text: str, model: type[T]) -> T:
     raise error
 
 
+def without_images(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """The messages with image parts replaced by a note. A repair turn only fixes the
+    reply's format, so resending the screenshot just costs upload time and tokens."""
+    out: list[BaseMessage] = []
+    for m in messages:
+        if isinstance(m.content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m.content):
+            parts = [
+                {"type": "text", "text": "(screenshot omitted; it hasn't changed)"}
+                if isinstance(p, dict) and p.get("type") == "image_url"
+                else p
+                for p in m.content
+            ]
+            m = m.model_copy(update={"content": parts})
+        out.append(m)
+    return out
+
+
 async def ainvoke_json(llm: ChatNVIDIA, messages: list[BaseMessage], model: type[T], retries: int = 1) -> T:
     """Ask for JSON, validate it, and give the model one chance to repair errors."""
     history = list(messages)
     last_error: Exception | None = None
     for _ in range(retries + 1):
-        reply = await llm.ainvoke(history)
+        reply = await ainvoke(llm, history)
         content = reply.content if isinstance(reply.content, str) else json.dumps(reply.content)
         try:
             return parse_json_model(content, model)
         except (ValueError, ValidationError) as exc:
             last_error = exc
-            history += [
+            history = [
+                *without_images(history),
                 reply,
                 HumanMessage(f"That reply was invalid ({exc}). Reply with only the corrected JSON object."),
             ]

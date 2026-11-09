@@ -1,6 +1,7 @@
 import io
 import json
 
+import pytest
 from langchain_core.messages import AIMessage
 from PIL import Image
 
@@ -111,7 +112,6 @@ async def test_destructive_shell_commands_are_refused():
 
 
 def test_action_schema_requires_fields():
-    import pytest
 
     with pytest.raises(ValueError):
         Action(action="drag", x=1, y=1)
@@ -181,12 +181,16 @@ async def test_the_agent_stops_when_the_desktop_keeps_failing():
 
 
 async def test_a_model_that_never_gives_a_usable_reply_fails_with_a_readable_message():
-    import pytest
 
+    # Each bad reply (after its repair turn) counts as one error; MAX_ERRORS of them end the run.
+    final, screen, _ = await run([{"action": "click"}] * 6)
+    assert final["status"] == "failed" and screen.calls == []
+    assert "validation" not in final["result"] and "vision model" in final["result"]
     with pytest.raises(ValueError) as caught:
-        await run([{"action": "click"}, {"action": "click"}])
-    message = describe_failure(caught.value)
-    assert "validation" not in message and "vision model" in message
+        from anywhere.llm import ainvoke_json
+
+        await ainvoke_json(ScriptedLLM([{"action": "click"}] * 2), [], Action)
+    assert "vision model" in describe_failure(caught.value)
     assert "set up" in describe_failure(ModelUnavailable("NVIDIA_API_KEY is not configured"))
     assert describe_failure(RuntimeError("tunnel closed\ntraceback...")).endswith("tunnel closed")
 
@@ -307,3 +311,85 @@ def test_python_style_escapes_and_a_missing_closing_brace_are_repaired():
 
     reply = '{"thought": "fix", "action": "blender_python", "code": "print(\\\'hi\\\')"</action>'
     assert parse_json_model(reply, Action).code == "print('hi')"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf ~/",
+        "rm -rf ~/Projects",
+        "rm -r -f /",
+        "rm -rf /*",
+        "find ~ -delete",
+        "rm -fr $HOME",
+        'sudo rm -Rf --no-preserve-root "$HOME/"',
+        "rm --recursive ~/Projects/*",
+        "cd /tmp && rm -rf ~/Projects/",
+        "bash -c 'rm -rf ~/*'",
+        "echo $(rm -rf ~)",
+        "find ~/Projects -exec rm -f {} +",
+        "mkfs.ext4 /dev/sda1",
+        "dd if=/dev/zero of=/dev/sda bs=1M",
+        ":(){ :|:& };:",
+        "chmod -R 777 /",
+        "shutdown -h now",
+    ],
+)
+def test_destructive_commands_are_screened_out(command):
+    assert not command_allowed(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /tmp/build",
+        "rm -rf ~/Projects/old-renders",
+        "rm ~/Projects/scene.blend1",
+        "find ~/Projects -name '*.blend'",
+        "find /tmp -name '*.png' -delete",
+        "dd if=/dev/zero of=/tmp/blank bs=1M count=1",
+        "echo 'never rm -rf ~'",
+        "cd ~/Projects && DISPLAY=:1 nohup blender --python /tmp/anywhere_autosave.py >/tmp/blender.log 2>&1 &",
+    ],
+)
+def test_ordinary_commands_pass_the_screen(command):
+    assert command_allowed(command)
+
+
+async def test_a_model_failure_counts_as_an_error_and_the_run_goes_on():
+    class Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("[400] context too long")  # not transient: no llm-level retry
+            return AIMessage(content=json.dumps({"action": "done", "text": "Done"}))
+
+    async def record(*a): ...
+
+    async def has_control():
+        return True
+
+    graph = build_operator(llm=Flaky(), screen=FakeScreen(), record=record, has_control=has_control)
+    final = await graph.ainvoke({"goal": "test", "step": 0, "history": []})
+    assert final["status"] == "done"
+
+
+async def test_a_script_blender_is_too_busy_to_take_is_not_a_reason_to_relaunch():
+    from anywhere.operator import run_in_blender
+
+    busy = await run_in_blender(BlenderScreen("NOT_PICKED_UP busy=1 age=95 proc=1"), "x = 1")
+    assert "busy" in busy and "Don't relaunch" in busy
+    assert "busy" in await run_in_blender(BlenderScreen("NOT_PICKED_UP busy=0 age=3 proc=0"), "x = 1")
+    gone = await run_in_blender(BlenderScreen("NOT_PICKED_UP busy=0 age=1731000000 proc=0"), "x = 1")
+    assert "didn't pick up" in gone and "Start it" in gone
+
+
+def test_scripts_are_capped_well_inside_the_reply_budget():
+    from anywhere.operator import MAX_CODE
+
+    assert MAX_CODE <= 12_000
+    with pytest.raises(ValueError):
+        Action(action="blender_python", code="x = 1\n" * (MAX_CODE // 6 + 1))

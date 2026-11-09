@@ -165,7 +165,7 @@ class Anywhere:
         month = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         return budget.SpendSnapshot(
             account_month_cents=sum(
-                int(w["accruedCents"]) for w in workloads if w["owner"] == owner and w["createdAt"] >= month
+                int(w["accruedCents"]) for w in workloads if w["owner"] == owner and _this_month(w, month)
             ),
             platform_cents=sum(int(w["accruedCents"]) for w in workloads),
             # An approved plan, or a stopped desktop whose resume has started, is about
@@ -327,6 +327,8 @@ class Anywhere:
             spend=await self.spend_snapshot(owner),
             limits=self._limits(),
             machines=result.machines,
+            hours_high=result.selected.estimate.hours_high,
+            max_session_hours=self.settings.max_session_hours,
         )
         plan_doc["policy"] = {
             "blockers": [b for b in decision.blockers if b not in decision.waits],
@@ -357,7 +359,11 @@ class Anywhere:
 
         auto = auto_approve and decision.allowed and not decision.requires_approval
         if auto:
-            await self.approve(owner, wid)
+            try:
+                # Not a person's yes: if spend moved over the threshold since `evaluate`, it waits.
+                await self.approve(owner, wid, by_human=False)
+            except ActionError:
+                auto = False
         return {
             "ok": True,
             "workload_id": wid,
@@ -406,14 +412,18 @@ class Anywhere:
             "message": message,
         }
 
-    async def approve(self, owner: str, workload_id: int) -> dict:
+    async def approve(self, owner: str, workload_id: int, *, by_human: bool = True) -> dict:
+        """Start a plan. `by_human` says a person explicitly approved it (the Approve
+        button, an MCP token with the spend scope, a confirmed chat reply). A plan over the
+        account's approval threshold is refused without one, so a model talked into
+        approving (prompt injection via logs, say) can't spend past it on its own."""
         # Refresh outside the admission lock so a slow `brev search` never makes
         # every other approve/resume wait behind it.
         await self.refresh_prices()
         async with self._admission:
-            return await self._approve(owner, workload_id)
+            return await self._approve(owner, workload_id, by_human=by_human)
 
-    async def _approve(self, owner: str, workload_id: int) -> dict:
+    async def _approve(self, owner: str, workload_id: int, *, by_human: bool = True) -> dict:
         w = await self.owned(owner, workload_id)
         if w["status"] != Status.PLANNED:
             raise ActionError(f"This plan is already {w['status']}")
@@ -436,9 +446,15 @@ class Anywhere:
             spend=await self.spend_snapshot(owner),
             limits=self._limits(),
             machines=machines,
+            hours_high=(plan_doc.get("selected") or {}).get("estimate", {}).get("hours_high"),
+            max_session_hours=self.settings.max_session_hours,
         )
         if not decision.allowed:
             raise ActionError(" ".join(decision.blockers))
+        if decision.requires_approval and not by_human:
+            raise ActionError(
+                "This plan needs the user's own go-ahead. Ask them to approve it (reply yes, or press Approve)."
+            )
         if machines > 1:
             parts = await self._split_render(w, plan_doc, machines)
             for part in parts:
@@ -453,14 +469,19 @@ class Anywhere:
         """Turn an approved split render into one render job per GPU, each with its own frames.
 
         The approved workload becomes part 1; the rest are created beside it in the same
-        conversation. Every part keeps the farm's id so their frames land in one folder."""
+        conversation. Every part keeps the farm's id so their frames land in one folder.
+
+        All parts are created before any is approved, and a failure part way cancels the
+        ones made and restores the farm's plan: an orphaned APPROVED part would hold a
+        concurrency slot forever (with max_concurrent_instances=1, blocking every launch)."""
         frames = int(plan_doc.get("intent", {}).get("render_frames") or 1)
         machines = max(1, min(machines, frames))
         base, extra = divmod(frames, machines)
         sizes = [base + (1 if i < extra else 0) for i in range(machines)]
         low, high = int(w["estLowCents"]), int(w["estHighCents"])
         farm = int(w["id"])
-        parts: list[dict] = []
+        part_low, part_high = math.ceil(low / machines), math.ceil(high / machines)
+        planned: list[tuple[int, str, dict]] = []  # (id, title, plan) per part, part 1 first
         offset = 0
         for i, size in enumerate(sizes):
             part_plan = json.loads(json.dumps(plan_doc))
@@ -475,12 +496,13 @@ class Anywhere:
                 "farm_id": farm,
             }
             title = f"Render part {i + 1} of {machines} (frames {offset + 1}–{offset + size} of {frames})"
-            part_low, part_high = math.ceil(low / machines), math.ceil(high / machines)
-            if i == 0:
-                await self.store.update_workload_plan(farm, title, json.dumps(part_plan), part_low, part_high)
-                pid = farm
-            else:
-                pid = new_id()
+            planned.append((farm if i == 0 else new_id(), title, part_plan))
+            offset += size
+
+        created: list[int] = []
+        farm_rewritten = False
+        try:
+            for pid, title, part_plan in planned[1:]:
                 await self.store.create_workload(
                     id=pid,
                     owner=w["owner"],
@@ -498,11 +520,31 @@ class Anywhere:
                     est_high_cents=part_high,
                     stoppable=bool(w.get("stoppable", False)),
                 )
-            await self.store.transition(pid, Status.APPROVED, f"Approved (part {i + 1} of {machines})")
+                created.append(pid)
+            _, title, part_plan = planned[0]
+            await self.store.update_workload_plan(farm, title, json.dumps(part_plan), part_low, part_high)
+            farm_rewritten = True
+            # The farm last: if anything fails before it, it is still a plan the user can retry.
+            for i, (pid, _, _) in [*list(enumerate(planned))[1:], (0, planned[0])]:
+                await self.store.transition(pid, Status.APPROVED, f"Approved (part {i + 1} of {machines})")
+        except Exception:
+            log.exception("render.split_failed", farm=farm)
+            for pid in created:
+                try:
+                    await self.store.transition(pid, Status.CANCELLED, "Cancelled: the split render couldn't start")
+                except Exception as exc:
+                    log.warning("render.split_cleanup_failed", workload=pid, error=str(exc))
+            if farm_rewritten:
+                try:
+                    await self.store.update_workload_plan(farm, w["title"], w["planJson"], low, high)
+                except Exception as exc:
+                    log.warning("render.split_restore_failed", workload=farm, error=str(exc))
+            raise ActionError("Couldn't set up the split render. Nothing was started; try approving again.") from None
+
+        parts: list[dict] = []
+        for pid, _, part_plan in planned:
             part = await self.store.workload(pid) or {**w, "id": pid}
-            part = {**part, "planJson": json.dumps(part_plan), "status": Status.APPROVED}
-            parts.append(part)
-            offset += size
+            parts.append({**part, "planJson": json.dumps(part_plan), "status": Status.APPROVED})
         return parts
 
     async def cancel(self, owner: str, workload_id: int) -> None:
@@ -558,14 +600,28 @@ class Anywhere:
     # ── Desktop agent ─────────────────────────────────────────────────────
 
     async def operate(
-        self, owner: str, workload_id: int, goal: str, *, replace: bool = False, channel: str = "web"
+        self,
+        owner: str,
+        workload_id: int,
+        goal: str,
+        *,
+        replace: bool = False,
+        channel: str = "web",
+        take_control: bool = False,
     ) -> int:
         """Start the desktop agent on `goal`. With `replace`, a task already in
         progress is stopped first (the user steering it from chat). A goal that
-        came over iMessage (`channel`) is answered there too when it finishes."""
+        came over iMessage (`channel`) is answered there too when it finishes.
+
+        While the user holds the controls (they took over, or stopped the agent) this
+        refuses, unless `take_control` says the user themselves just asked for it."""
         w = await self.owned(owner, workload_id)
         if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
             raise ActionError("The desktop needs to be running first")
+        if w["controller"] == "user" and not take_control:
+            raise ActionError(
+                "The user has the controls on this desktop. Ask them to hand back (the Hand back button) first."
+            )
         goal = goal.strip()[:2000]
         if not goal:
             raise ActionError("Tell the agent what to do")
@@ -681,6 +737,14 @@ class Anywhere:
                 await self.store.append_message(
                     int(w["conversationId"]), "assistant", "agent", result[:4000], int(w["id"]), "system"
                 )
+            # Only a paused run is continued by a hand-back; a finished or stopped one isn't
+            # redone. A replaced run's goal is already the new one, so it's left alone.
+            if (
+                status != "paused"
+                and self._halts.get(int(w["id"])) != "replaced"
+                and self.vault.get(int(w["id"])).get("last_goal") == goal
+            ):
+                self.vault.update(int(w["id"]), last_goal="")
             # A task asked for over iMessage is answered there, with a picture of the result.
             if status in ("done", "failed") and self.vault.get(int(w["id"])).get("agent_channel") == "imessage":
                 body = (
@@ -922,7 +986,10 @@ class Anywhere:
         }
 
     async def resume_agent(self, owner: str, workload_id: int) -> int | None:
-        """Hand control back to the agent and continue its last paused goal."""
+        """Hand control back to the agent and continue its last paused goal.
+
+        `last_goal` is cleared when a run finishes, fails or is stopped, so this only
+        restarts a run the user paused by taking over."""
         w = await self.owned(owner, workload_id)
         await self.store.set_controller(workload_id, "agent")
         goal = self.vault.get(workload_id).get("last_goal")
@@ -939,6 +1006,17 @@ class Anywhere:
             upload_id,
             {"owner": owner, "key": key, "name": name, "size": size, "profile": profile.model_dump(by_alias=True)},
         )
+
+
+def _this_month(w: dict, month: datetime) -> bool:
+    """Whether a workload's spend counts toward this month's cap: made this month, or
+    active in it. By createdAt alone, a desktop started last month and still running never
+    counted. Matches the supervisor's cap check; a workload spanning two months counts its
+    whole accrual (the conservative side for a cap)."""
+    return any(
+        isinstance(at, datetime) and at >= month
+        for at in (w.get("createdAt"), w.get("lastActiveAt"), w.get("updatedAt"), w.get("startedAt"))
+    )
 
 
 def _clip(text: str, limit: int) -> str:

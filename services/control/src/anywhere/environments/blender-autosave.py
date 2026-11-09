@@ -56,6 +56,12 @@ def _tick():
 
 
 RUN_DIR = "/tmp/anywhere-run"
+#: Liveness for the operator: HEARTBEAT holds the epoch second of the runner's last tick
+#: (every 0.5 s while Blender's main thread is free) and BUSY exists, holding when it
+#: started, while a script runs. A script waiting behind a long render or build then reads
+#: as "busy", not as a Blender that needs relaunching (two runners would race).
+HEARTBEAT = os.path.join(RUN_DIR, "heartbeat")
+BUSY = os.path.join(RUN_DIR, "busy")
 
 
 class kit:
@@ -1140,6 +1146,7 @@ def _run(name):
     with open(path) as f:
         source = f.read()
     os.remove(path)  # gone means picked up; the operator cleans up scripts never picked up
+    _stamp(BUSY)
     out = io.StringIO()
     try:
         with contextlib.redirect_stdout(out), bpy.context.temp_override(**_view3d()):
@@ -1162,10 +1169,26 @@ def _run(name):
     with open(done + ".tmp", "w") as f:
         f.write(result[-6000:])
     os.replace(done + ".tmp", done)
+    with contextlib.suppress(OSError):
+        os.remove(BUSY)
+
+
+def _stamp(path):
+    """Write the current epoch second to `path` atomically."""
+    with contextlib.suppress(OSError):
+        with open(path + ".tmp", "w") as f:
+            f.write(str(int(time.time())))
+        os.replace(path + ".tmp", path)
 
 
 def _scripts():
     try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        _stamp(HEARTBEAT)
+        # Ticks run on the main thread between scripts, so none is running now: clear a
+        # BUSY left by a script whose result couldn't be written.
+        with contextlib.suppress(OSError):
+            os.remove(BUSY)
         if os.path.isdir(RUN_DIR):
             for name in sorted(os.listdir(RUN_DIR)):
                 if name.endswith(".py"):
