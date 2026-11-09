@@ -59,7 +59,7 @@ def app(tmp_path, monkeypatch):
         storage=Storage(settings),
         vault=Vault(tmp_path / "vault.json"),
     )
-    store.add(id=11, owner=ALICE, kind="desktop", status="running", conversationId=1, controller="user")
+    store.add(id=11, owner=ALICE, kind="desktop", status="running", conversationId=1, controller="agent")
     screen = FakeScreen()
 
     @asynccontextmanager
@@ -147,3 +147,43 @@ async def test_two_stops_at_once_still_record_how_the_run_ended(app):
 
     await asyncio.gather(app.halt_agent(ALICE, 11, pause=True), second_click())
     assert next(r for r in store.runs if r["id"] == run_id)["status"] == "paused"
+
+
+async def test_the_agent_does_not_take_the_controls_from_the_user(app):
+    from anywhere.agent import TurnContext, _tools
+    from anywhere.core import ActionError
+
+    store = app.store
+    store.rows[11]["controller"] = "user"
+    with pytest.raises(ActionError, match="user has the controls"):
+        await app.operate(ALICE, 11, "Add a cube")
+    assert not app.supervisor.agent_running(11) and store.rows[11]["controller"] == "user"
+
+    store.conversations[1] = {"owner": ALICE}
+    ctx = TurnContext(owner=ALICE, conversation_id=1, channel="imessage", user_text="add a cube")
+    tools = {t.name: t for t in _tools(app, ctx)}
+    refused = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a cube"}))
+    assert not refused["ok"] and "hand back" in refused["message"]
+
+    # The user's own plain yes this turn takes them back.
+    ctx = TurnContext(owner=ALICE, conversation_id=1, channel="imessage", user_text="Yes, go ahead")
+    tools = {t.name: t for t in _tools(app, ctx)}
+    started = json.loads(await tools["operate_desktop"].ainvoke({"workload_id": 11, "goal": "Add a cube"}))
+    assert started["ok"] and store.rows[11]["controller"] == "agent"
+    await app.halt_agent(ALICE, 11)
+
+
+async def test_handing_back_after_a_finished_run_does_not_redo_it(app, monkeypatch):
+    class DoneLLM:
+        async def ainvoke(self, messages):
+            return AIMessage(content=json.dumps({"action": "done", "text": "Added"}))
+
+    monkeypatch.setattr(core_module.llm, "vision", lambda settings: DoneLLM())
+    store = app.store
+    run_id = await app.operate(ALICE, 11, "Add a cube")
+    await until(lambda: next((r for r in store.runs if r["id"] == run_id), {}).get("status") == "done")
+    await until(lambda: not app.supervisor.agent_running(11))
+    assert not app.vault.get(11).get("last_goal")
+    store.rows[11]["controller"] = "user"
+    assert await app.resume_agent(ALICE, 11) is None
+    assert store.rows[11]["controller"] == "agent" and len(store.runs) == 1

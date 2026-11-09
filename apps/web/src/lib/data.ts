@@ -38,7 +38,8 @@ export function useConversations() {
 }
 
 export function useMessages(conversationId: bigint | null) {
-  const { byConversation, ready } = useShared("myMessages");
+  // No conversation yet (the home composer only sends): don't hold the subscription.
+  const { byConversation, ready } = useShared("myMessages", conversationId != null);
   const messages = conversationId == null ? NONE : (byConversation.get(conversationId) ?? NONE);
   return { messages, ready };
 }
@@ -52,16 +53,21 @@ export function useForWorkload<T extends { workloadId: bigint }>(rows: readonly 
   return useMemo(() => rows.filter((r) => r.workloadId === id), [rows, id]);
 }
 
-/** Month-to-date spend across the user's workloads, in cents. */
+/**
+ * Month-to-date spend across the user's workloads, in cents. Mirrors the
+ * control plane's cap check (`_this_month` in core.py): a workload counts if it
+ * was created or active this (UTC) month, with its whole accrual. `startedAt`
+ * alone resets on every resume, so it miscounted machines spanning two months.
+ */
 export function useMonthSpend() {
   const { all } = useWorkloads();
   const now = useNow(60_000);
   return useMemo(() => {
     if (!now) return 0;
     const d = new Date(now);
-    const start = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    const start = BigInt(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
     return all
-      .filter((w) => Number((w.startedAt ?? w.createdAt).toMillis()) >= start)
+      .filter((w) => [w.createdAt, w.lastActiveAt, w.updatedAt, w.startedAt].some((at) => at != null && at.toMillis() >= start))
       .reduce((sum, w) => sum + w.accruedCents, 0);
   }, [all, now]);
 }

@@ -9,7 +9,7 @@ import { ApiError, useApi } from "@/lib/api";
 import { useNow } from "@/lib/data";
 import { bytes, centsRange, clock, compact, duration, ms } from "@/lib/format";
 import { frameTime, parsePlan } from "@/lib/plan";
-import { NONE, useShared } from "@/lib/tables";
+import { NONE, useShared, useWorkloadRows } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE } from "@/lib/workloads";
 import { PlanCard } from "../chat/plan-card";
@@ -20,7 +20,7 @@ import { BootProgress, EventFeed, LiveCost } from "./shared";
 type Point = { step: number; value: number };
 
 function useSeries(workloadId: bigint) {
-  const rows = useShared("myMetrics").byWorkload.get(workloadId) ?? NONE;
+  const rows = useWorkloadRows("myMetrics", workloadId);
   return useMemo(() => {
     const by = new Map<string, Point[]>();
     for (const r of rows) {

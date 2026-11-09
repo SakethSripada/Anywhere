@@ -13,13 +13,22 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
 
+import structlog
 from fastapi import Depends, Header, HTTPException, Request
 
 from .stdb import SpacetimeClient
 
+log = structlog.get_logger()
+
 _CACHE_TTL = 300
-_cache: dict[str, tuple[str, float]] = {}
+#: Bounded: every distinct token used to stay in here for the life of the process.
+_CACHE_MAX = 4096
+_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
+
+#: A bridge secret shorter than this is refused (fail closed); `openssl rand -hex 32` makes one.
+MIN_BRIDGE_SECRET = 32
 
 
 def _claims(token: str) -> dict:
@@ -33,8 +42,11 @@ def _claims(token: str) -> dict:
 
 async def verify_token(stdb: SpacetimeClient, token: str, claimed: str | None = None) -> str:
     digest = hashlib.sha256(f"{claimed}:{token}".encode()).hexdigest()
-    if (hit := _cache.get(digest)) and hit[1] > time.monotonic():
-        return hit[0]
+    now = time.monotonic()
+    if hit := _cache.get(digest):
+        if hit[1] > now:
+            return hit[0]
+        del _cache[digest]
     claims = _claims(token)
     # SpacetimeDB-issued tokens carry `hex_identity`; OIDC tokens don't, so the
     # client also sends the identity its SDK reported and /verify checks the pair.
@@ -45,8 +57,16 @@ async def verify_token(stdb: SpacetimeClient, token: str, claimed: str | None = 
         raise HTTPException(401, "Token expired")
     if not await stdb.verify(identity, token):
         raise HTTPException(401, "Token rejected by SpacetimeDB")
-    _cache[digest] = (identity, time.monotonic() + _CACHE_TTL)
+    _remember(digest, identity, now)
     return identity
+
+
+def _remember(digest: str, identity: str, now: float) -> None:
+    _cache[digest] = (identity, now + _CACHE_TTL)
+    _cache.move_to_end(digest)
+    # Entries are inserted in expiry order, so expired ones sit at the front.
+    while _cache and (len(_cache) > _CACHE_MAX or next(iter(_cache.values()))[1] <= now):
+        _cache.popitem(last=False)
 
 
 async def current_identity(
@@ -61,7 +81,15 @@ async def current_identity(
 
 def require_bridge(request: Request, x_bridge_secret: str | None = Header(None)) -> None:
     secret = request.app.state.anywhere.settings.messaging_bridge_secret
-    if not secret or not x_bridge_secret or not hmac.compare_digest(secret.get_secret_value(), x_bridge_secret):
+    if secret and len(secret.get_secret_value()) < MIN_BRIDGE_SECRET:
+        # Fail closed: a guessable secret would let anyone act as any linked phone.
+        log.error("bridge.secret_too_short", min_length=MIN_BRIDGE_SECRET, hint="openssl rand -hex 32")
+        raise HTTPException(503, "Bridge is misconfigured")
+    if (
+        not secret
+        or not x_bridge_secret
+        or not hmac.compare_digest(secret.get_secret_value().encode(), x_bridge_secret.encode())
+    ):
         raise HTTPException(401, "Invalid bridge credentials")
 
 

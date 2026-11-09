@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { NONE, useShared } from "@/lib/tables";
+import { useWorkloadRows } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 
 type Level = "all" | "warn" | "error";
@@ -39,7 +39,7 @@ function formatTime(d: Date) {
  * filter by text or severity without losing your place.
  */
 export function LogView({ workloadId, className, title = "Logs", toolbar }: { workloadId: bigint; className?: string; title?: ReactNode; toolbar?: ReactNode }) {
-  const rows = useShared("myLogs").byWorkload.get(workloadId) ?? NONE;
+  const rows = useWorkloadRows("myLogs", workloadId);
   // Chunks are immutable, so each is split, timestamped and classified once.
   const [cache] = useState(() => new Map<bigint, Parsed>());
   const lines = useMemo<Line[]>(() => {

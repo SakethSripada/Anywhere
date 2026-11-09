@@ -20,8 +20,10 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || fail "No NVIDI
 
 echo "::step:: Installing Blender $BLENDER_VERSION"
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
-$SUDO apt-get update -qq >/dev/null 2>&1
-$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xz-utils curl ca-certificates \
+# A fresh VM's unattended-upgrades often holds the dpkg lock for minutes: wait for it.
+APT="apt-get -o DPkg::Lock::Timeout=300"
+$SUDO $APT update -qq >/dev/null 2>&1
+$SUDO env DEBIAN_FRONTEND=noninteractive $APT install -y -qq --no-install-recommends xz-utils curl ca-certificates \
   libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libegl1 libsm6 libice6 >/dev/null 2>&1 \
   || fail "Could not install Blender's libraries"
 f="blender-$BLENDER_VERSION-linux-x64.tar.xz"

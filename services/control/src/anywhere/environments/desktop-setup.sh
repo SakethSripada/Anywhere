@@ -73,8 +73,8 @@ fi
 if ! $DOCKER exec "$NAME" test -f /opt/.anywhere-ready; then
   step "Installing Blender $BLENDER_VERSION and the browser bridge"
   $DOCKER exec -u root -e DEBIAN_FRONTEND=noninteractive "$NAME" sh -euc "
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends x11vnc novnc websockify xz-utils curl ca-certificates \
+    apt-get -o DPkg::Lock::Timeout=300 update -qq
+    apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends x11vnc novnc websockify xz-utils curl ca-certificates \
       libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libegl1 libsm6 libice6 >/dev/null
     f=blender-$BLENDER_VERSION-linux-x64.tar.xz
     # Retry, then fall back to official mirrors: one blender.org hiccup used to fail

@@ -16,7 +16,18 @@ import type {
   Workload,
   WorkloadEvent,
 } from "@anywhere/stdb";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type Context, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type Context,
+  type ReactNode,
+} from "react";
 import { tables, useTable } from "./stdb";
 import { byRecent } from "./workloads";
 
@@ -97,6 +108,43 @@ function group<T, K>(rows: readonly T[], key: (r: T) => K, sort?: (a: T, b: T) =
 const byId = (a: { id: bigint }, b: { id: bigint }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 const wid = (r: { workloadId: bigint }) => r.workloadId;
 
+const sameRows = <T,>(a: readonly T[], b: readonly T[]) => a.length === b.length && a.every((r, i) => r === b[i]);
+
+/*
+ * High-rate telemetry (GPU readings and log chunks land every 10 s per running
+ * machine) is also published as an external store keyed by workload, so a
+ * reader of one machine re-renders only when that machine's rows change rather
+ * than on every write to the table.
+ */
+type Streamed = "myMetrics" | "myLogs";
+type RowOf<K extends Streamed> = Slices[K] extends ByWorkload<infer T> ? T : never;
+
+function createRowsStore() {
+  let map: ReadonlyMap<bigint, readonly unknown[]> = EMPTY_MAP;
+  const listeners = new Set<() => void>();
+  return {
+    get: (id: bigint): readonly unknown[] => map.get(id) ?? NONE,
+    subscribe(fn: () => void) {
+      listeners.add(fn);
+      return () => void listeners.delete(fn);
+    },
+    /** Take a new grouping, keeping the previous list of each workload whose rows
+     *  didn't change (the client cache keeps row objects), and notify readers. */
+    publish(next: ReadonlyMap<bigint, readonly unknown[]>) {
+      const shared = new Map<bigint, readonly unknown[]>();
+      for (const [k, list] of next) {
+        const old = map.get(k);
+        shared.set(k, old && sameRows(old, list) ? old : list);
+      }
+      map = shared;
+      for (const fn of listeners) fn();
+    },
+  };
+}
+type RowsStore = ReturnType<typeof createRowsStore>;
+
+const Stores = createContext<Record<Streamed, RowsStore> | null>(null);
+
 /** `useTable` gated on demand; `ready` stays false while nobody reads the table. */
 function useRows<T>(rows: readonly T[], ready: boolean, enabled: boolean): Slice<T> {
   return useMemo(() => ({ rows, ready: enabled && ready }), [rows, ready, enabled]);
@@ -167,6 +215,9 @@ export function TablesProvider({ children }: { children: ReactNode }) {
   const metrics = useMemo(() => ({ ...metricsBase, byWorkload: group(metricsBase.rows, wid) }), [metricsBase]);
   const logsBase = useRows(logRows, logReady, on("myLogs"));
   const logs = useMemo(() => ({ ...logsBase, byWorkload: group(logsBase.rows, wid) }), [logsBase]);
+  const [stores] = useState<Record<Streamed, RowsStore>>(() => ({ myMetrics: createRowsStore(), myLogs: createRowsStore() }));
+  useLayoutEffect(() => stores.myMetrics.publish(metrics.byWorkload), [stores, metrics.byWorkload]);
+  useLayoutEffect(() => stores.myLogs.publish(logs.byWorkload), [stores, logs.byWorkload]);
   const artifactsBase = useRows(artifactRows, artifactReady, on("myArtifacts"));
   const artifacts = useMemo(() => ({ ...artifactsBase, byWorkload: group(artifactsBase.rows, wid) }), [artifactsBase]);
 
@@ -186,7 +237,9 @@ export function TablesProvider({ children }: { children: ReactNode }) {
                           <C.myLogs.Provider value={logs}>
                             <C.myArtifacts.Provider value={artifacts}>
                               <C.myHandles.Provider value={handles}>
-                                <C.myLinkCode.Provider value={linkCode}>{children}</C.myLinkCode.Provider>
+                                <C.myLinkCode.Provider value={linkCode}>
+                                  <Stores.Provider value={stores}>{children}</Stores.Provider>
+                                </C.myLinkCode.Provider>
                               </C.myHandles.Provider>
                             </C.myArtifacts.Provider>
                           </C.myLogs.Provider>
@@ -214,4 +267,18 @@ export function useShared<K extends TableName>(name: K, enabled = true): Slices[
   if (!register) throw new Error("useShared must be used under <TablesProvider>");
   useEffect(() => (enabled ? register(name) : undefined), [register, name, enabled]);
   return useContext(contexts[name]);
+}
+
+/**
+ * One workload's rows of a high-rate table, newest data included. Unlike
+ * `useShared(name).byWorkload.get(id)`, this re-renders only when that
+ * workload's rows change. Keeps the table subscribed while mounted.
+ */
+export function useWorkloadRows<K extends Streamed>(name: K, workloadId: bigint): readonly RowOf<K>[] {
+  const register = useContext(Registry);
+  const stores = useContext(Stores);
+  if (!register || !stores) throw new Error("useWorkloadRows must be used under <TablesProvider>");
+  useEffect(() => register(name), [register, name]);
+  const store = stores[name];
+  return useSyncExternalStore(store.subscribe, () => store.get(workloadId), () => NONE) as readonly RowOf<K>[];
 }

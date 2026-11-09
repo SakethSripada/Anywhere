@@ -4,8 +4,9 @@
  * Two loops share one process:
  *
  *  - Inbound: every iMessage that reaches our Photon line is forwarded to the
- *    control plane (`POST /v1/bridge/inbound`), which links numbers, runs the
- *    Nemotron agent turn and returns the reply we text back.
+ *    control plane (`POST /v1/bridge/inbound`), which links numbers and runs the
+ *    Nemotron agent turn. A quick turn's reply comes back inline; a long one is
+ *    acked (`queued`) and its reply arrives later through the outbox.
  *  - Outbound: the control plane enqueues notifications (progress, completion,
  *    budget alerts) in SpacetimeDB. We subscribe to the worker-only outbox view
  *    and deliver each one, marking it sent or failed through a reducer.
@@ -42,6 +43,10 @@ const config = {
 };
 
 const MAX_ATTEMPTS = 3;
+/** Retry delays are 5s, 20s, … but never longer than this. */
+const MAX_RETRY_DELAY_MS = 60_000;
+/** How long SpacetimeDB may stay unreachable before we exit and let Docker restart us. */
+const MAX_OFFLINE_MS = 5 * 60_000;
 
 /* ── Logging (one JSON object per line, matching the control plane) ───── */
 
@@ -83,7 +88,13 @@ log("info", "spectrum.ready");
 /* ── Inbound ───────────────────────────────────────────────────────────── */
 
 type InlineAttachment = { name: string; mime_type: string; data_base64: string };
-type InboundReply = { reply: string | null; duplicate?: boolean; attachments?: InlineAttachment[] };
+/** `queued`: the turn is still running; its reply comes through the outbox, not here. */
+type InboundReply = {
+  reply: string | null;
+  duplicate?: boolean;
+  queued?: boolean;
+  attachments?: InlineAttachment[];
+};
 
 async function forward(handle: string, text: string, messageId: string): Promise<InboundReply> {
   const res = await fetch(`${config.controlUrl}/v1/bridge/inbound`, {
@@ -92,6 +103,11 @@ async function forward(handle: string, text: string, messageId: string): Promise
     body: JSON.stringify({ handle, text, message_id: messageId }),
     signal: AbortSignal.timeout(config.turnTimeoutMs),
   });
+  // Rate limits carry a message meant for the person texting; pass it on.
+  if (res.status === 429) {
+    const detail = ((await res.json().catch(() => ({}))) as { detail?: unknown }).detail;
+    return { reply: typeof detail === "string" ? detail : "Slow down a little and try again in a moment." };
+  }
   if (!res.ok) throw new Error(`control plane returned ${res.status}`);
   return (await res.json()) as InboundReply;
 }
@@ -112,9 +128,10 @@ async function handleInbound(space: Space, message: Message) {
 
   await space.responding(async () => {
     try {
-      const { reply, duplicate, attachments } = await forward(handle, text.slice(0, 4000), message.id);
+      const { reply, duplicate, queued, attachments } = await forward(handle, text.slice(0, 4000), message.id);
       if (duplicate) return;
       if (reply) await message.reply(reply);
+      if (queued) log("info", "inbound.queued", { handle: redact(handle) });
       // Pictures the agent took this turn (e.g. "send me a screenshot") follow the text.
       for (const a of attachments ?? []) {
         try {
@@ -136,6 +153,7 @@ async function handleInbound(space: Space, message: Message) {
 const chains = new Map<string, Promise<void>>();
 
 async function inboundLoop() {
+  // The stream ending means Spectrum stopped delivering; the caller exits so Docker restarts us.
   for await (const [space, message] of app.messages) {
     if (message.direction !== "inbound") continue;
     const prev = chains.get(space.id) ?? Promise.resolve();
@@ -150,6 +168,19 @@ async function inboundLoop() {
 /* ── Outbound ──────────────────────────────────────────────────────────── */
 
 const inFlight = new Set<bigint>();
+/** Notifications whose text already went out. A failed `sent` mark (say, a dropped
+ *  connection) must only retry the mark, never the text, or people get duplicates. */
+const sentIds = new Set<bigint>();
+const MAX_SENT_IDS = 5_000;
+
+function rememberSent(id: bigint) {
+  sentIds.add(id);
+  // Sets iterate in insertion order, so this drops the oldest.
+  for (const old of sentIds) {
+    if (sentIds.size <= MAX_SENT_IDS) break;
+    sentIds.delete(old);
+  }
+}
 /** The attempt number each notification's latest delivery started with, so a
  *  retry we schedule and a subscription event for the same row never both send. */
 const startedAttempt = new Map<bigint, number>();
@@ -165,30 +196,62 @@ function spaceFor(handle: string) {
   return space;
 }
 
+function retryDelay(attempt: number): number {
+  return Math.min(MAX_RETRY_DELAY_MS, 5_000 * 4 ** (attempt - 1));
+}
+
+/** Mark a delivered notification sent, retrying only the mark until it lands. */
+async function markSent(conn: DbConnection, id: bigint) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await conn.reducers.markNotification({ id, status: "sent" });
+      return;
+    } catch (err) {
+      log("warn", "outbound.mark_failed", { id: String(id), attempt, error: String(err) });
+      if (attempt >= MAX_ATTEMPTS) return; // still pending; the next outbox scan retries the mark
+      await new Promise((r) => setTimeout(r, retryDelay(attempt)));
+    }
+  }
+}
+
 async function deliver(conn: DbConnection, n: Notification) {
   if (n.channel !== "imessage" || inFlight.has(n.id)) return;
+  if (sentIds.has(n.id)) {
+    // Already texted; the row is only still pending because its mark didn't land.
+    inFlight.add(n.id);
+    await markSent(conn, n.id).finally(() => inFlight.delete(n.id));
+    return;
+  }
   if ((startedAttempt.get(n.id) ?? -1) >= n.attempts) return;
+  if (n.attempts >= MAX_ATTEMPTS) {
+    // Out of attempts (e.g. after crash loops): give up now instead of waiting out a backoff.
+    await conn.reducers
+      .markNotification({ id: n.id, status: "failed" })
+      .catch((e: unknown) => log("error", "outbound.mark_failed", { id: String(n.id), error: String(e) }));
+    return;
+  }
   inFlight.add(n.id);
   startedAttempt.set(n.id, n.attempts);
   let retry = false;
   try {
-    // Back off on retries: 0s, 5s, 20s.
-    if (n.attempts > 0) await new Promise((r) => setTimeout(r, 5_000 * 4 ** (n.attempts - 1)));
+    // Back off on retries: 0s, 5s, 20s, capped at a minute.
+    if (n.attempts > 0) await new Promise((r) => setTimeout(r, retryDelay(n.attempts)));
     try {
       await (await spaceFor(n.handle)).send(n.body);
     } catch (err) {
       spaces.delete(n.handle); // don't keep reusing a space that just failed
       throw err;
     }
+    rememberSent(n.id);
     health.lastOutboundAt = Date.now();
-    await conn.reducers.markNotification({ id: n.id, status: "sent" });
+    startedAttempt.delete(n.id);
+    log("info", "outbound.sent", { id: String(n.id), handle: redact(n.handle) });
     // The text is out; a picture (a render's first frame) follows on a best-effort basis
     // so a failed image never re-sends the text.
     void sendAttachment(n).catch((err: unknown) =>
       log("warn", "outbound.attachment_failed", { id: String(n.id), error: String(err) }),
     );
-    startedAttempt.delete(n.id);
-    log("info", "outbound.sent", { id: String(n.id), handle: redact(n.handle) });
+    await markSent(conn, n.id);
   } catch (err) {
     const final = n.attempts + 1 >= MAX_ATTEMPTS;
     log(final ? "error" : "warn", "outbound.failed", { id: String(n.id), attempt: n.attempts + 1, error: String(err) });
@@ -235,6 +298,22 @@ function watchOutbox(conn: DbConnection) {
 }
 
 let initialRetry = 0;
+let offlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Without SpacetimeDB we can't deliver anything, so a long outage restarts the process. */
+function goneOffline() {
+  health.spacetime = false;
+  offlineTimer ??= setTimeout(() => {
+    log("fatal", "spacetime.unreachable", { forMs: MAX_OFFLINE_MS });
+    process.exit(1);
+  }, MAX_OFFLINE_MS);
+}
+
+function backOnline() {
+  health.spacetime = true;
+  clearTimeout(offlineTimer);
+  offlineTimer = undefined;
+}
 
 function connectSpacetime() {
   let connected = false;
@@ -246,37 +325,51 @@ function connectSpacetime() {
     .onConnect((conn, identity) => {
       connected = true;
       initialRetry = 0;
-      health.spacetime = true;
+      backOnline();
       log("info", "spacetime.connected", { identity: identity.toHexString().slice(0, 12) });
       watchOutbox(conn);
     })
     // Reconnects keep the handlers and replay the subscription (onApplied re-scans the
     // outbox), but they call this instead of onConnect, so health must be restored here.
     .onAutomaticReconnect(() => {
-      health.spacetime = true;
+      backOnline();
       log("info", "spacetime.reconnected");
     })
-    .onDisconnect(() => {
-      health.spacetime = false;
-      log("warn", "spacetime.disconnected");
+    // `nextAttempt` is undefined when the SDK has given up on this connection for good.
+    .onDisconnect((_ctx, err, nextAttempt) => {
+      goneOffline();
+      log("warn", "spacetime.disconnected", { error: err ? String(err) : undefined, nextAttempt });
+      if (nextAttempt === undefined) {
+        log("fatal", "spacetime.connection_lost");
+        process.exit(1);
+      }
     })
     .onConnectError((_ctx, err, nextAttempt) => {
-      health.spacetime = false;
+      goneOffline();
       log("error", "spacetime.connect_error", { error: String(err), nextAttempt });
-      // The SDK never retries a failed *first* connection (SpacetimeDB down at boot), so we do.
-      if (!connected) {
-        const delay = Math.min(30_000, 1_000 * 2 ** initialRetry++);
-        setTimeout(connectSpacetime, delay);
+      if (connected) {
+        if (nextAttempt === undefined) {
+          log("fatal", "spacetime.connection_lost");
+          process.exit(1);
+        }
+        return;
       }
+      // The SDK never retries a failed *first* connection (SpacetimeDB down at boot), so we
+      // do, until MAX_OFFLINE_MS runs out.
+      const delay = Math.min(30_000, 1_000 * 2 ** initialRetry++);
+      setTimeout(connectSpacetime, delay);
     })
     .build();
 }
 
 /* ── Run ───────────────────────────────────────────────────────────────── */
 
+goneOffline();
 connectSpacetime();
 
+let stopping = false;
 async function shutdown(signal: string) {
+  stopping = true;
   log("info", "shutdown", { signal });
   await app.stop().catch(() => {});
   process.exit(0);
@@ -284,9 +377,12 @@ async function shutdown(signal: string) {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
+// Either way the bridge is deaf without the loop; exit so `restart: unless-stopped` recovers it.
 try {
   await inboundLoop();
+  if (!stopping) log("fatal", "inbound.loop_ended");
 } catch (err) {
-  log("fatal", "inbound.loop_crashed", { error: String(err) });
-  process.exit(1);
+  if (!stopping) log("fatal", "inbound.loop_crashed", { error: String(err) });
 }
+health.spectrum = false;
+if (!stopping) process.exit(1);

@@ -16,6 +16,7 @@ import asyncio
 import base64
 import json
 import re
+import shlex
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Literal, TypedDict
@@ -37,12 +38,18 @@ MAX_REPEATS = 3
 MAX_REPEATS_LONG = 8
 #: Consecutive actions the desktop failed to perform before giving up.
 MAX_ERRORS = 3
-#: A blender_python script longer than this is refused (the model's reply budget is ~8k tokens).
-MAX_CODE = 24_000
+#: A blender_python script longer than this is refused. The model's reply budget is ~8k
+#: tokens (~3 characters each for code), shared with its reasoning and the JSON around it.
+MAX_CODE = 12_000
 #: Where Blender's startup script (environments/blender-autosave.py) picks up scripts to run.
 RUN_DIR = "/tmp/anywhere-run"
 #: How long to wait for Blender to run a script and write its result.
 RUN_WAIT_SECONDS = 90
+#: The runner stamps RUN_DIR/heartbeat every 0.5 s while Blender's main thread is free;
+#: older than this (and no Blender with the runner alive) means it isn't running.
+HEARTBEAT_STALE_SECONDS = 120
+#: A script can hold Blender's main thread (and so the heartbeat) this long, e.g. a big render.
+BUSY_STALE_SECONDS = 900
 
 #: What the operator says when the user takes the controls mid-task.
 PAUSED = "You took control. I'll pick up when you hand it back."
@@ -56,7 +63,8 @@ persistently; save work there.
 - A shell runs inside this desktop. Use it for file operations and to launch apps. If Blender \
 isn't open, start it with `cd ~/Projects && DISPLAY=:1 nohup blender $([ -f scene.blend ] && echo \
 scene.blend) --python /tmp/anywhere_autosave.py >/tmp/blender.log 2>&1 &` (that script is what \
-lets blender_python run and keeps the scene saved).
+lets blender_python run and keeps the scene saved). Only start it if it isn't already running: \
+when blender_python says Blender is busy, wait instead.
 
 Building in Blender with Python (blender_python):
 - For anything beyond a few objects (a scene, a procedural or repeated structure, materials, \
@@ -208,15 +216,105 @@ class Action(BaseModel):
 
 
 # Coarse guard for obviously destructive commands. Execution is already isolated
-# to the user's own container; this catches accidents, not adversaries.
+# to the user's own container; this catches accidents, not adversaries. Commands are
+# tokenised (so flag order, `-r -f`, quoting, `sudo` and `sh -c` don't hide them) and
+# checked segment by segment for recursive deletes of the places that hold the user's
+# work or the system itself.
 _BLOCKED = re.compile(
-    r"(\brm\s+-[a-z]*r[a-z]*f?\s+(/|~|\$HOME)(\s|$)|\bmkfs\b|\bdd\s+if=|\bshutdown\b|\breboot\b|"
-    r":\(\)\s*\{|\bchmod\s+-R\s+777\s+/|curl[^|]*\|\s*(sudo\s+)?(ba)?sh)"
+    r"(:\s*\(\s*\)\s*\{|\b(\w+)\s*\(\s*\)\s*\{\s*\2\s*\|\s*\2\s*&"  # fork bombs
+    r"|>\s*/dev/(sd|hd|vd|xvd|nvme|mmcblk|disk)"  # overwriting a disk
+    r"|curl[^|]*\|\s*(sudo\s+)?(ba)?sh|wget[^|]*\|\s*(sudo\s+)?(ba)?sh)"
 )
+#: Commands that only prefix the real one.
+_WRAPPERS = {"sudo", "doas", "env", "nohup", "nice", "ionice", "time", "command", "exec", "builtin", "xargs"}
+_SHELLS = {"sh", "bash", "dash", "zsh"}
+_HALT = {"shutdown", "reboot", "poweroff", "halt", "init", "telinit"}
+#: Where the user's work lives, after `_place` normalises it (~ for any home).
+_PRECIOUS = {"~", "~/Projects", "~/projects", "~/workspace", "/projects", "/workspace", "*", ".", ".."}
 
 
-def command_allowed(command: str) -> bool:
-    return not _BLOCKED.search(command)
+def _place(arg: str) -> str:
+    """A path argument, normalised: home spelt as ~, and trailing slashes and globs
+    (`/*`, `/.*`, `/.`) dropped, so `~/`, `$HOME/*` and `/home/u` all read `~`."""
+    p = arg.strip()
+    p = re.sub(r"^(\$HOME|\$\{HOME\}|/root|/home/[^/]+|~[^/]*)(?=/|$)", "~", p)
+    while True:
+        q = re.sub(r"/+(\*|\.\*|\.)?$", "", p)
+        if q == p:
+            break
+        p = q
+    return p or "/"
+
+
+def _precious(arg: str) -> bool:
+    p = _place(arg)
+    # The root, any top-level directory (/etc, /usr, /home) and the user's work folders.
+    return p in _PRECIOUS or (p.startswith("/") and p.count("/") == 1 and p != "/tmp")
+
+
+def _segments(command: str) -> list[list[str]]:
+    """Simple commands in a command line: split on ; && || | & ( ) and newlines."""
+    text = command.replace("`", " ; ").replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:  # unbalanced quotes: fall back to plain words
+        tokens = text.split()
+    out: list[list[str]] = [[]]
+    for t in tokens:
+        if t and all(c in ";&|()<>" for c in t):
+            out.append([])
+        elif t != "$":  # the `$` of `$(...)`
+            out[-1].append(t)
+    return [seg for seg in out if seg]
+
+
+def _segment_blocked(words: list[str], depth: int = 0) -> bool:
+    while words and (words[0] in _WRAPPERS or re.match(r"^\w+=", words[0]) or words[0].startswith("-")):
+        words = words[1:]  # `sudo -E`, `env A=1`, `nice -n 5`
+    if not words:
+        return False
+    cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if cmd in _SHELLS and "-c" in args and depth < 3:
+        script = args[args.index("-c") + 1 : args.index("-c") + 2]
+        return bool(script) and not command_allowed(script[0], depth + 1)
+    if cmd in _HALT or cmd == "mkfs" or cmd.startswith("mkfs.") or cmd in ("wipefs", "fdisk", "parted"):
+        return True
+    if cmd == "dd":
+        return any(a.startswith("of=/dev/") and not a.startswith(("of=/dev/null", "of=/dev/zero")) for a in args)
+    flags = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+    longs = {a for a in args if a.startswith("--")}
+    targets = [a for a in args if not a.startswith("-")]
+    if cmd == "rm":
+        recursive = "r" in flags or "R" in flags or "--recursive" in longs
+        return recursive and any(_precious(t) for t in targets)
+    if cmd == "shred":
+        return any(t.startswith("/dev/") for t in targets)
+    if cmd in ("chmod", "chown", "chgrp"):
+        return ("R" in flags or "--recursive" in longs) and any(_precious(t) for t in targets[1:])
+    if cmd == "mv":
+        return any(_precious(t) for t in targets[:-1])
+    if cmd == "find":
+        starts = []
+        for a in args:
+            if a.startswith(("-", "(", "!")):
+                break
+            starts.append(a)
+        deletes = "-delete" in args or any(
+            a in ("-exec", "-execdir", "-ok")
+            and i + 1 < len(args)
+            and args[i + 1].rsplit("/", 1)[-1] in ("rm", "shred")
+            for i, a in enumerate(args)
+        )
+        return deletes and any(_precious(t) for t in starts or ["."])
+    return False
+
+
+def command_allowed(command: str, depth: int = 0) -> bool:
+    if _BLOCKED.search(command):
+        return False
+    return not any(_segment_blocked(seg, depth) for seg in _segments(command))
 
 
 class OpState(TypedDict, total=False):
@@ -226,7 +324,7 @@ class OpState(TypedDict, total=False):
     frame_url: str
     frame_meta: dict
     jpeg: bytes
-    action: dict
+    action: dict | None
     outcome: str
     status: str  # running | paused | done | failed
     result: str
@@ -272,7 +370,18 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
                 ]
             ),
         ]
-        action = await ainvoke_json(llm, messages, Action, retries=1)
+        try:
+            action = await ainvoke_json(llm, messages, Action, retries=1)
+        except ModelUnavailable:
+            raise
+        except Exception as exc:
+            # A model timeout or bad reply (already retried) counts as one error, like a
+            # failed action, instead of ending the run outright.
+            errors = state.get("errors", 0) + 1
+            log.warning("operator.model_failed", errors=errors, error=str(exc)[:300])
+            if errors >= MAX_ERRORS:
+                return {"action": None, "errors": errors, "status": "failed", "result": describe_failure(exc)}
+            return {"action": None, "errors": errors, "outcome": "error: no usable reply from the model; try again"}
         return {"action": action.model_dump()}
 
     async def act(state: OpState) -> OpState:
@@ -357,6 +466,11 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
     def after_observe(state: OpState) -> str:
         return END if state.get("status") == "paused" else "snapshot"
 
+    def after_decide(state: OpState) -> str:
+        if state.get("action"):
+            return "act"
+        return "observe" if state.get("status") == "running" else END
+
     def after_act(state: OpState) -> str:
         return "observe" if state.get("status") == "running" else END
 
@@ -368,7 +482,7 @@ def build_operator(*, llm, screen: Screen, record: StepSink, has_control: Contro
     g.add_edge(START, "observe")
     g.add_conditional_edges("observe", after_observe, ["snapshot", END])
     g.add_edge("snapshot", "decide")
-    g.add_edge("decide", "act")
+    g.add_conditional_edges("decide", after_decide, ["act", "observe", END])
     g.add_conditional_edges("act", after_act, ["observe", END])
     return g.compile()
 
@@ -520,11 +634,24 @@ async def run_in_blender(screen: Screen, code: str) -> str:
     command = (
         f"mkdir -p {RUN_DIR} && echo {payload} | base64 -d > {script}.part && mv {script}.part {script} && "
         f"for i in $(seq 1 {polls}); do if [ -f {out} ]; then cat {out}; rm -f {out}; exit 0; fi; sleep 0.5; done; "
-        f"if [ -f {script} ]; then rm -f {script}; echo NOT_PICKED_UP; else echo STILL_RUNNING; fi"
+        f"if [ -f {script} ]; then rm -f {script}; "
+        # Why not: is the runner alive (a fresh heartbeat, a script running, or a Blender
+        # started with it, matched as anywhere[_]autosave so pgrep skips this shell)?
+        f"hb=$(cat {RUN_DIR}/heartbeat 2>/dev/null); age=$(( $(date +%s) - ${{hb:-0}} )); "
+        f"b=0; [ -f {RUN_DIR}/busy ] && b=1; p=0; pgrep -f 'anywhere[_]autosave' >/dev/null 2>&1 && p=1; "
+        f'echo "NOT_PICKED_UP busy=$b age=$age proc=$p"; else echo STILL_RUNNING; fi'
     )
     _, text = await screen.shell(command, timeout=RUN_WAIT_SECONDS + 20)
     text = text.strip()
-    if text.endswith("NOT_PICKED_UP"):
+    if m := re.search(r"NOT_PICKED_UP(?: busy=(\d) age=(-?\d+) proc=(\d))?$", text):
+        busy, age, proc = (m.group(1) == "1", int(m.group(2) or 10**9), m.group(3) == "1")
+        # A BUSY left by a Blender that crashed mid-script goes stale too (no pgrep to ask).
+        if proc or age <= HEARTBEAT_STALE_SECONDS or (busy and age <= BUSY_STALE_SECONDS):
+            return (
+                f"error: Blender is busy (still running an earlier script, or rendering) and didn't take this "
+                f"one within {RUN_WAIT_SECONDS}s. Don't relaunch Blender: wait, check the screen, then send "
+                "the code again."
+            )
         return (
             "error: Blender didn't pick up the script. It isn't open, or it was started without "
             "/tmp/anywhere_autosave.py. Start it the way the instructions say, then send the code again."

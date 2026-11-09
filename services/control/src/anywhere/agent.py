@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 
 import structlog
@@ -147,11 +148,67 @@ class TurnContext:
     attachments: list[bytes] = field(default_factory=list)
     #: The phone number this turn came from (iMessage), so results go back to that sender.
     handle: str = ""
+    #: What the user said this turn (set by Agent.respond). Spending past the approval
+    #: threshold, or taking the desktop back from the user, needs it to be a plain yes.
+    user_text: str = ""
+    #: An iMessage guest on the shared demo account (IMESSAGE_GUEST_OWNER). Guests share
+    #: one owner, so each one may only touch machines planned in their own conversation.
+    guest: bool = False
+
+
+#: The words a plain yes is made of ("yes", "ok go ahead", "approve it", "sure, do it now").
+_YES = (
+    r"yes|yeah|yep|yup|ya|y|sure|ok|okay|approve|approved|confirm|confirmed|go ahead|go for it|do it|"
+    r"lets do it|lets go|sounds good|start it|please do|go|take over|take it|lgtm"
+)
+_FILLER = r"it|that|this|the|plan|please|now|thanks|thank you|fine|great|perfect|and|you can|absolutely|definitely"
+_CONFIRMATION = re.compile(rf"^(?:(?:{_FILLER})\s+)*(?:{_YES})(?:\s+(?:{_YES}|{_FILLER}))*$")
+
+
+def confirmed(text: str) -> bool:
+    """Whether the user's message is an explicit yes and nothing else. Deliberately simple
+    and strict: only yes words and filler ("yes please", "ok, go ahead", "approve it"), so
+    "yes but cheaper" or a question isn't one. It gates actions the model mustn't take on
+    its own say-so (approving spend over the threshold, taking the controls back from the
+    user), so text injected through tool output can't stand in for the user's yes."""
+    t = " ".join(re.sub(r"[^\w\s]", " ", text.lower().replace("'", "")).split())
+    return 0 < len(t) <= 60 and "?" not in text and bool(_CONFIRMATION.match(t))
 
 
 FOCUS = """
 The user is chatting from the page of workload #{id} ("{title}", a {kind}, currently {status}).
 "this", "it", "the desktop" or "the job" mean that workload. Use its id for tools without asking."""
+
+
+#: The result given to a tool call that never got one (the turn hit its step limit, or
+#: the server restarted mid-call). The API rejects an assistant tool call with no result.
+INTERRUPTED = "Interrupted before it finished; no result. Check the current state before retrying."
+
+
+def pair_tool_calls(messages: list) -> list:
+    """The messages with every assistant tool call directly followed by its results.
+
+    A call left unanswered gets an INTERRUPTED stub, and a tool result that isn't right
+    after the call that asked for it is dropped: either one breaks the conversation for good."""
+    out: list = []
+    for i, m in enumerate(messages):
+        if isinstance(m, ToolMessage):
+            continue  # placed with the assistant message that asked for it
+        out.append(m)
+        calls = getattr(m, "tool_calls", None) if isinstance(m, AIMessage) else None
+        if not calls:
+            continue
+        results: dict[str, ToolMessage] = {}
+        for later in messages[i + 1 :]:
+            if not isinstance(later, ToolMessage):
+                break
+            results.setdefault(later.tool_call_id, later)
+        for call in calls:
+            out.append(
+                results.get(call["id"])
+                or ToolMessage(content=INTERRUPTED, tool_call_id=call["id"], name=call.get("name") or "")
+            )
+    return out
 
 
 def trim_history(messages: list, limit: int = 30) -> list:
@@ -188,6 +245,20 @@ def _failed(output: str) -> bool:
         return output.startswith(("Could not", "Tool failed"))
 
 
+async def _guest_refusal(app: Anywhere, ctx: TurnContext, kwargs: dict) -> str | None:
+    """For a guest, refuse any tool call on a machine that another guest's conversation planned."""
+    if not ctx.guest:
+        return None
+    for key in ("workload_id", "render_from_workload_id"):
+        if kwargs.get(key):
+            w = await app.store.workload(int(kwargs[key]))
+            if not w or int(w["conversationId"]) != ctx.conversation_id:
+                return json.dumps(
+                    {"ok": False, "message": "That machine belongs to someone else, so I can't touch it."}
+                )
+    return None
+
+
 def _recorded(app: Anywhere, ctx: TurnContext, tool: StructuredTool) -> StructuredTool:
     """Mirror each tool call into the conversation so every client can render it live.
 
@@ -210,7 +281,8 @@ def _recorded(app: Anywhere, ctx: TurnContext, tool: StructuredTool) -> Structur
         await post("tool_call", {"call_id": call_id, "name": tool.name, "args": kwargs}, workload_id)
         started = time.monotonic()
         try:
-            output = await inner(**kwargs)
+            refused = await _guest_refusal(app, ctx, kwargs)
+            output = refused or await inner(**kwargs)
         except Exception as exc:
             output = f"Tool failed: {exc.__class__.__name__}: {exc}"
         try:
@@ -260,13 +332,16 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
 
     async def approve_workload(workload_id: int) -> str:
         try:
-            await app.approve(ctx.owner, workload_id)
+            # Over the auto-approve threshold, only the user's own yes this turn counts.
+            await app.approve(ctx.owner, workload_id, by_human=confirmed(ctx.user_text))
             return "Approved. Provisioning has started; progress updates will follow automatically."
         except ActionError as exc:
             return f"Could not approve: {exc}"
 
     async def list_workloads() -> str:
         rows = await app.store.workloads_for(ctx.owner)
+        if ctx.guest:
+            rows = [w for w in rows if int(w["conversationId"]) == ctx.conversation_id]
         rows.sort(key=lambda w: w["createdAt"], reverse=True)
         return json.dumps(
             [
@@ -314,7 +389,15 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
             )
         try:
             # A new goal while it works is the user steering: it replaces the current task.
-            run_id = await app.operate(ctx.owner, workload_id, goal, replace=True, channel=ctx.channel)
+            # While the user holds the controls, only their own yes this turn takes them back.
+            run_id = await app.operate(
+                ctx.owner,
+                workload_id,
+                goal,
+                replace=True,
+                channel=ctx.channel,
+                take_control=confirmed(ctx.user_text),
+            )
             operated[workload_id] = str(run_id)
             return json.dumps(
                 {
@@ -435,7 +518,7 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
 
     async def build_scene(request: str, workload_id: int | None = None) -> str:
         from .lifecycle import Status
-        from .scene import build
+        from .scene import blender_in_use, build
 
         mine = [x for x in await app.store.workloads_for(ctx.owner) if x["kind"] == "desktop"]
         if workload_id is None:
@@ -450,6 +533,14 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
                 return json.dumps({"ok": False, "message": str(exc)})
         if w["status"] != Status.RUNNING:
             return json.dumps({"ok": False, "message": f"{w['title']} isn't running."})
+        if busy := blender_in_use(app, w):
+            if w.get("controller") != "user" or not confirmed(ctx.user_text):
+                return json.dumps({"ok": False, "message": busy + " Or ask them to reply yes to let you take over."})
+            # The user said yes to taking over: that's handing back, without resuming a paused task.
+            await app.store.set_controller(int(w["id"]), "agent")
+            w = {**w, "controller": "agent"}
+            if busy := blender_in_use(app, w):
+                return json.dumps({"ok": False, "message": busy})
         tasks = app.__dict__.setdefault("_scene_tasks", {})
         busy = tasks.get(int(w["id"]))
         if busy is not None and not busy.done():
@@ -591,6 +682,28 @@ def _tools(app: Anywhere, ctx: TurnContext) -> list[StructuredTool]:
     return [_recorded(app, ctx, t) for t in tools]
 
 
+async def prune_checkpoints(saver: AsyncSqliteSaver) -> int:
+    """Delete every checkpoint but each thread's latest, and the writes of deleted ones.
+
+    A turn stores a checkpoint per graph step and nothing ever removes them, so the file
+    grew without bound. Only the latest is read (`aget_tuple` takes the highest
+    checkpoint_id, and each one holds the full channel values), so the rest is history
+    nobody replays. Uses the saver's own connection and lock, so it never races a turn."""
+    await saver.setup()
+    async with saver.lock, saver.conn.cursor() as cur:
+        await cur.execute(
+            "DELETE FROM checkpoints WHERE checkpoint_id < (SELECT MAX(c.checkpoint_id) FROM checkpoints c "
+            "WHERE c.thread_id = checkpoints.thread_id AND c.checkpoint_ns = checkpoints.checkpoint_ns)"
+        )
+        removed = cur.rowcount
+        await cur.execute(
+            "DELETE FROM writes WHERE NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.thread_id = writes.thread_id "
+            "AND c.checkpoint_ns = writes.checkpoint_ns AND c.checkpoint_id = writes.checkpoint_id)"
+        )
+        await saver.conn.commit()
+    return max(removed, 0)
+
+
 class Agent:
     """Owns the checkpointer and runs one turn at a time per conversation."""
 
@@ -598,14 +711,35 @@ class Agent:
         self.app = app
         self._stack = AsyncExitStack()
         self.checkpointer: AsyncSqliteSaver | None = None
+        self._pruner: asyncio.Task | None = None
+
+    #: How often old checkpoints are deleted (also once at startup).
+    PRUNE_EVERY = 24 * 3600.0
 
     async def start(self) -> None:
         path = self.app.settings.data_dir / "agent.sqlite"
         path.parent.mkdir(parents=True, exist_ok=True)
         self.checkpointer = await self._stack.enter_async_context(AsyncSqliteSaver.from_conn_string(str(path)))
+        self._pruner = asyncio.create_task(self._prune_forever())
 
     async def close(self) -> None:
+        if self._pruner:
+            self._pruner.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._pruner
         await self._stack.aclose()
+
+    async def _prune_forever(self) -> None:
+        while True:
+            try:
+                removed = await prune_checkpoints(self.checkpointer)
+                if removed:
+                    log.info("agent.checkpoints_pruned", removed=removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("agent.checkpoint_prune_failed", error=str(exc)[:300])
+            await asyncio.sleep(self.PRUNE_EVERY)
 
     async def _state_summary(self, owner: str) -> str:
         active = await self.app.store.workloads_for(owner)
@@ -625,6 +759,7 @@ class Agent:
     async def respond(self, ctx: TurnContext, text: str) -> str:
         if self.checkpointer is None:
             raise RuntimeError("Agent not started")
+        ctx.user_text = text
         model = llm.planner(self.app.settings)
         tools = _tools(self.app, ctx)
         bound = model.bind_tools(tools)
@@ -643,7 +778,7 @@ class Agent:
 
         async def call_model(state: MessagesState) -> dict:
             try:
-                reply = await bound.ainvoke([system, *trim_history(state["messages"])])
+                reply = await llm.ainvoke(bound, [system, *pair_tool_calls(trim_history(state["messages"]))])
             except Exception as exc:
                 self.app.readiness.record_call("nemotron", "Nemotron planner model", exc)
                 raise

@@ -25,7 +25,7 @@ from starlette.routing import Route
 
 from . import budget, sharing
 from .agent import Agent, TurnContext
-from .auth import Identity, require_bridge
+from .auth import MIN_BRIDGE_SECRET, Identity, require_bridge
 from .brev import BrevCLI
 from .config import Settings, get_settings
 from .core import ActionError, Anywhere, parse_link_code
@@ -87,6 +87,15 @@ async def lifespan(api: FastAPI):
             app.supervisor.start_guard()
         else:
             log.warning("startup.spacetime_unconfigured", hint="Set SPACETIME_WORKER_TOKEN; see README")
+        bridge = settings.messaging_bridge_secret
+        if bridge and len(bridge.get_secret_value()) < MIN_BRIDGE_SECRET:
+            log.error("startup.bridge_secret_too_short", min_length=MIN_BRIDGE_SECRET, effect="bridge calls refused")
+        if settings.imessage_guest_owner:
+            log.warning(
+                "startup.imessage_guest_mode",
+                owner=settings.imessage_guest_owner[:12],
+                risk="every unlinked texter acts as this one account and can operate, stop or delete its machines",
+            )
         log.info("startup.ready", integrations=settings.integrations(), mode=settings.provisioning_mode.value)
         yield
         await app.readiness.stop()
@@ -280,6 +289,11 @@ class InboundIn(BaseModel):
 _turn_locks: dict[int, list] = {}  # conversation id -> [lock, users]
 _seen_inbound: deque[str] = deque(maxlen=2048)
 _background: set[asyncio.Task] = set()
+#: How long an inbound text waits for its turn before the reply moves to the outbox.
+#: Well under the bridge's TURN_TIMEOUT_MS.
+INBOUND_SYNC_SECONDS = 25.0
+#: A desktop keeps streaming while it saves; the web app shows it throughout.
+STREAMABLE = frozenset({Status.RUNNING, Status.SAVING})
 
 
 def _routes():
@@ -351,7 +365,10 @@ def _routes():
                 )
         await app.store.append_message(cid, "user", "text", text, 0, "web")
         agent: Agent = request.app.state.agent
-        asyncio.create_task(_agent_turn(app, agent, TurnContext(owner, cid, "web", body.workload_id), text))
+        # Keep a reference: an unreferenced task can be garbage-collected mid-run.
+        t = asyncio.create_task(_agent_turn(app, agent, TurnContext(owner, cid, "web", body.workload_id), text))
+        _background.add(t)
+        t.add_done_callback(_background.discard)
         return {"conversation_id": cid}
 
     # Workloads -------------------------------------------------------------
@@ -411,7 +428,8 @@ def _routes():
     async def agent_run(workload_id: int, body: GoalIn, owner: str = Identity, app: Anywhere = Depends(anywhere)):
         rate_limit(f"agent:{owner}", 10)
         try:
-            run_id = await app.operate(owner, workload_id, body.goal)
+            # Typing a goal on the desktop page is the user handing the controls to the agent.
+            run_id = await app.operate(owner, workload_id, body.goal, take_control=True)
         except RuntimeError as exc:
             raise ActionError(str(exc)) from exc
         return {"run_id": run_id}
@@ -436,7 +454,7 @@ def _routes():
         workload_id: int, request: Request, owner: str = Identity, app: Anywhere = Depends(anywhere)
     ):
         w = await app.owned(owner, workload_id)
-        if w["kind"] != "desktop" or w["status"] != Status.RUNNING:
+        if w["kind"] != "desktop" or w["status"] not in STREAMABLE:
             raise ActionError("The desktop isn't running")
         return {"ticket": issue_ticket(request.app.state.ticket_key, workload_id, owner)}
 
@@ -448,7 +466,7 @@ def _routes():
             await ws.close(code=4401)
             return
         w = await app.store.workload(workload_id)
-        if not w or w["owner"] != claims["o"] or w["status"] != Status.RUNNING:
+        if not w or w["owner"] != claims["o"] or w["status"] not in STREAMABLE:
             await ws.close(code=4404)
             return
         await ws.accept(subprotocol="binary" if "binary" in ws.scope.get("subprotocols", []) else None)
@@ -723,31 +741,68 @@ def _routes():
             await app.store.upsert_conversation(cid, owner, title, "imessage")
             app.vault.update(0, **{slot: cid})
         await app.store.append_message(cid, "user", "text", body.text, 0, "imessage")
-        ctx = TurnContext(owner, cid, "imessage", handle=handle)
-        reply = await _agent_turn(app, request.app.state.agent, ctx, body.text, post=True)
-        # The same pictures show in the web thread, so the browser matches the phone.
-        for jpeg in ctx.attachments:
-            try:
-                key = f"renders/{owner}/shots/{new_id()}.jpg"
-                await app.storage.put_bytes(key, jpeg, "image/jpeg")
-                url = app.storage.presign_get(key, 6 * 24 * 3600)
-                await app.store.append_message(
-                    cid, "assistant", "image", json.dumps({"url": url, "caption": "", "viewer": ""}), 0, "imessage"
-                )
-            except Exception as exc:
-                log.warning("imessage.picture_post_failed", error=str(exc)[:200])
-        # Pictures the agent took this turn (send_screenshot) go out right after the reply.
-        attachments = [
-            {
-                "name": f"screenshot-{i + 1}.jpg",
-                "mime_type": "image/jpeg",
-                "data_base64": base64.b64encode(jpeg).decode(),
-            }
-            for i, jpeg in enumerate(ctx.attachments)
-        ]
-        return {"reply": reply, "attachments": attachments}
+        ctx = TurnContext(owner, cid, "imessage", handle=handle, guest=guest)
+        detached = False
+
+        async def turn() -> dict:
+            reply = await _agent_turn(app, request.app.state.agent, ctx, body.text, post=True)
+            keys = await _post_pictures(app, owner, cid, ctx.attachments)
+            if detached:
+                # The bridge already answered with an ack; the reply goes out through the outbox.
+                await _text_reply(app, owner, handle, reply, keys)
+            # Pictures the agent took this turn (send_screenshot) go out right after the reply.
+            attachments = [
+                {
+                    "name": f"screenshot-{i + 1}.jpg",
+                    "mime_type": "image/jpeg",
+                    "data_base64": base64.b64encode(jpeg).decode(),
+                }
+                for i, jpeg in enumerate(ctx.attachments)
+            ]
+            return {"reply": reply, "attachments": attachments}
+
+        # Long turns (provisioning, desktop work) outlive the bridge's request, and a
+        # timed-out request used to make people re-send, so the action ran twice. Answer
+        # inline when the turn is quick; otherwise ack now and text the reply when it lands.
+        task = asyncio.create_task(turn())
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+        try:
+            await asyncio.wait({task}, timeout=INBOUND_SYNC_SECONDS)
+        finally:
+            # `turn` reads this only after its last await, so exactly one path sends the reply.
+            if not task.done():
+                detached = True
+        if not detached:
+            return task.result()
+        return {"reply": "Working on it. I'll text you when it's done.", "queued": True}
 
     return r
+
+
+async def _post_pictures(app: Anywhere, owner: str, cid: int, jpegs: list[bytes]) -> list[str]:
+    """The same pictures show in the web thread, so the browser matches the phone.
+    Returns their storage keys."""
+    keys = []
+    for jpeg in jpegs:
+        try:
+            key = f"renders/{owner}/shots/{new_id()}.jpg"
+            await app.storage.put_bytes(key, jpeg, "image/jpeg")
+            url = app.storage.presign_get(key, 6 * 24 * 3600)
+            await app.store.append_message(
+                cid, "assistant", "image", json.dumps({"url": url, "caption": "", "viewer": ""}), 0, "imessage"
+            )
+            keys.append(key)
+        except Exception as exc:
+            log.warning("imessage.picture_post_failed", error=str(exc)[:200])
+    return keys
+
+
+async def _text_reply(app: Anywhere, owner: str, handle: str, reply: str, keys: list[str]) -> None:
+    """Queue a finished turn's reply to the sender. The outbox carries one picture per text."""
+    await app.send_text(owner, handle, reply, keys[0] if keys else None)
+    for i, key in enumerate(keys[1:], start=2):
+        await app.send_text(owner, handle, f"Screenshot {i}", key)
 
 
 async def _agent_turn(app: Anywhere, agent: Agent, ctx: TurnContext, text: str, post: bool = True) -> str:

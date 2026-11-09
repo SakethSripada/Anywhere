@@ -7,11 +7,13 @@ A small JSON file (0600) is enough for one control-plane instance.
 
 from __future__ import annotations
 
+import asyncio
+import atexit
 import json
 import os
 import secrets
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,10 @@ class Vault:
         self._backup = path.with_suffix(path.suffix + ".bak")
         path.parent.mkdir(parents=True, exist_ok=True)
         self._data: dict[str, Any] = self._load()
+        #: Set when a write's fsync is still owed (see `_flush`).
+        self._unsynced = threading.Event()
+        self._syncer: threading.Thread | None = None
+        atexit.register(self.sync)
 
     def _load(self) -> dict[str, Any]:
         """The vault, or its previous version if the current file is missing or
@@ -46,19 +52,56 @@ class Vault:
         return {}
 
     def _flush(self) -> None:
-        """Durable, atomic write: compact JSON to a temp file, fsync it, keep the
-        previous version as a backup, then rename into place."""
+        """Atomic write: compact JSON to a temp file, keep the previous version as a
+        backup, then rename into place. Called with `_lock` held.
+
+        Off the event loop (scripts, tests) the temp file is fsynced first, as before.
+        On it, the fsync (the slow part, on every billing update) moves to a background
+        thread that batches bursts into one. A process crash loses nothing either way;
+        only a power loss inside that window can, and `_load` then falls back to the
+        backup."""
         tmp = self.path.with_suffix(".tmp")
         data = json.dumps(self._data, separators=(",", ":")).encode()
+        try:
+            asyncio.get_running_loop()
+            deferred = True
+        except RuntimeError:
+            deferred = False
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, data)
-            os.fsync(fd)
+            if not deferred:
+                os.fsync(fd)
         finally:
             os.close(fd)
         if self.path.exists():
             os.replace(self.path, self._backup)
         os.replace(tmp, self.path)
+        if deferred:
+            if self._syncer is None:
+                self._syncer = threading.Thread(target=self._sync_behind, name="vault-fsync", daemon=True)
+                self._syncer.start()
+            self._unsynced.set()
+
+    def _sync_behind(self) -> None:
+        while True:
+            self._unsynced.wait()
+            self.sync()
+
+    def sync(self) -> None:
+        """fsync the vault (and its directory) if a write since the last sync was deferred."""
+        if not self._unsynced.is_set():
+            return
+        self._unsynced.clear()
+        try:
+            for target, flags in ((self.path, os.O_RDONLY), (self.path.parent, os.O_RDONLY)):
+                fd = os.open(target, flags)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        except OSError as exc:
+            log.warning("vault.sync_failed", path=str(self.path), error=str(exc)[:200])
 
     def get(self, workload_id: int) -> dict[str, Any]:
         with self._lock:
@@ -71,6 +114,17 @@ class Vault:
                 entry.update(values)
                 self._flush()
             return dict(entry)
+
+    def drop_workloads(self, workload_ids: Iterable[int]) -> int:
+        """Forget workloads that are over for good (terminated, cancelled), in one write."""
+        with self._lock:
+            entries = self._data.get("workloads", {})
+            gone = [k for k in map(str, workload_ids) if k in entries]
+            for key in gone:
+                del entries[key]
+            if gone:
+                self._flush()
+            return len(gone)
 
     def agent_token(self, workload_id: int) -> str:
         token = self.get(workload_id).get("cua_token")

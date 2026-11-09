@@ -268,7 +268,7 @@ MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a cur
 | `BREV_API_KEY` | control | Brev org API key (`bak-…`). The CLI reads it from the environment, so no `brev login` is needed |
 | `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | control | Durable storage for projects, datasets and outputs. For R2, use `https://<account>.r2.cloudflarestorage.com` with region `auto`. For AWS, leave the endpoint empty and set the real region. Browser uploads need a bucket CORS rule that allows `PUT` from the web origin |
 | `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` | control, bridge | Photon project |
-| `MESSAGING_BRIDGE_SECRET` | control, bridge | Shared secret for `/v1/bridge/inbound` |
+| `MESSAGING_BRIDGE_SECRET` | control, bridge | Shared secret for `/v1/bridge/inbound`, at least 32 characters |
 | `MCP_ENABLED`, `MCP_OAUTH_ENABLED`, `MCP_MAX_TOKENS_PER_ACCOUNT`, `MCP_MAX_TOKEN_DAYS` | control | MCP server and OAuth switches, token limits |
 | `PUBLIC_API_URL` | control | Where clients reach the control plane; the OAuth issuer (`https://$DOMAIN/api` in Compose) |
 
@@ -302,7 +302,7 @@ MCP can't carry the desktop's live video. `get_desktop_screenshot` returns a cur
 
 Use this instead of step 3 if you'd rather not use Maincloud. It's how the 639Cloud demo VM runs.
 
-1. In `deploy/.env`, set `SPACETIME_HOST=http://spacetime:3000` and `SPACETIME_PUBLIC_URL=wss://stdb.$DOMAIN`. In `deploy/Caddyfile`, uncomment the `stdb` block and change its address to `stdb.{$DOMAIN}`. `sslip.io` names such as `stdb.203-0-113-7.sslip.io` resolve without any DNS setup.
+1. In `deploy/.env`, set `SPACETIME_HOST=http://spacetime:3000`, `STDB_DOMAIN=stdb.$DOMAIN` (spelled out, e.g. `stdb.anywhere.example.com`) and `SPACETIME_PUBLIC_URL=wss://` plus that same name. Caddy picks the name up from the environment, so the Caddyfile needs no edits. `sslip.io` names such as `stdb.203-0-113-7.sslip.io` resolve without any DNS setup. Caddy only exposes what browsers need (`POST /v1/identity/websocket-token` and the `/v1/database/$SPACETIME_DATABASE/subscribe` socket) and answers 403 to everything else, so publishing and SQL only work from the Compose network, as in step 3.
 2. Start the database: `docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile spacetime up -d spacetime`. The `spacetime-init` service fixes the data volume's ownership first.
 3. Publish the module and allowlist a worker from a throwaway container on the Compose network. Keep the CLI config in `/opt/stdb-cli`: it holds the database owner's login, which you need to republish.
    ```bash
@@ -337,7 +337,11 @@ Browsers upload datasets straight to the bucket with presigned `PUT` URLs, and d
 
 `S3_ENDPOINT_URL` is `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`, and `S3_REGION` stays `auto`.
 
-Caddy provisions TLS automatically. It routes `/api/*` (including the long-lived VNC WebSockets) to the control plane and everything else to the web app.
+Caddy provisions TLS automatically. It routes `/api/*` (including the long-lived VNC WebSockets) to the control plane and everything else to the web app. `/api/v1/bridge/*` answers 404 from outside: the bridge calls the control plane directly over the Compose network.
+
+Each service has a memory limit sized for the 4 GB VM (about 3.2 GB in total with every profile) and rotated logs (3 × 10 MB). On a larger VM, raise the `mem_limit` values in `deploy/docker-compose.yml`.
+
+`MESSAGING_BRIDGE_SECRET` must be at least 32 characters (`openssl rand -hex 32`); the control plane refuses bridge calls with a shorter one. Don't set `IMESSAGE_GUEST_OWNER` on a real deployment: every unlinked number that texts the line acts as that one account, including stopping and deleting its machines.
 
 ---
 

@@ -84,3 +84,29 @@ async def test_concurrent_price_refreshes_share_one_brev_search(tmp_path):
     app.brev.search_gpu_json = search
     await asyncio.gather(*(app.refresh_prices() for _ in range(5)))
     assert len(calls) == 1
+
+
+async def test_a_plan_over_the_threshold_needs_a_person_to_approve_it(tmp_path):
+    app, store, launched = make(tmp_path)  # approval threshold 0: every plan needs a yes
+    store.add(id=1, kind="batch", status="planned", estHighCents=100)
+    with pytest.raises(ActionError, match="go-ahead"):
+        await app.approve(OWNER, 1, by_human=False)
+    assert launched == [] and store.rows[1]["status"] == "planned"
+    await app.approve(OWNER, 1)  # the Approve button
+    assert launched == [1]
+
+
+async def test_a_desktop_still_running_from_last_month_counts_toward_this_months_cap(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    app, store, _ = make(tmp_path)
+    month = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    store.add(id=1, status="running", accruedCents=900, createdAt=month - timedelta(days=3), lastActiveAt=month)
+    store.add(
+        id=2,
+        status="stopped",
+        accruedCents=500,
+        createdAt=month - timedelta(days=40),
+        lastActiveAt=month - timedelta(days=20),
+    )
+    assert (await app.spend_snapshot(OWNER)).account_month_cents == 900

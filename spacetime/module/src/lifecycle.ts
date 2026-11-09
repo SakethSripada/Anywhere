@@ -7,6 +7,7 @@
  *                                                          │  ▲
  *                                                  saving ◄┘  │
  *   running ─► stopping ─► stopped ─► provisioning (resume)   │
+ *   provisioning/configuring ─► stopping  (a resume that failed goes back to sleep)
  *   running ─► succeeded                       saving ────────┘
  *   any active ─► failed ─► terminated
  */
@@ -32,8 +33,8 @@ export type WorkloadStatus = (typeof WORKLOAD_STATUSES)[number];
 export const TRANSITIONS: Record<WorkloadStatus, readonly WorkloadStatus[]> = {
   planned:      ["approved", "cancelled"],
   approved:     ["provisioning", "cancelled", "failed"],
-  provisioning: ["configuring", "failed", "cancelled"],
-  configuring:  ["running", "failed", "cancelled"],
+  provisioning: ["configuring", "stopping", "failed", "cancelled"],
+  configuring:  ["running", "stopping", "failed", "cancelled"],
   running:      ["saving", "stopping", "succeeded", "failed"],
   saving:       ["running", "stopping", "failed"],
   stopping:     ["stopped", "terminated", "failed"],

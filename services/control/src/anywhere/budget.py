@@ -55,6 +55,8 @@ def evaluate(
     spend: SpendSnapshot,
     limits: PlatformLimits,
     machines: int = 1,
+    hours_high: float | None = None,
+    max_session_hours: float | None = None,
 ) -> Decision:
     blockers: list[str] = []
     notes: list[str] = []
@@ -62,6 +64,14 @@ def evaluate(
 
     if not account.activated:
         blockers.append("Your account hasn't been activated yet. Redeem an invite code in Settings.")
+
+    # The guard ends any machine at the session limit, and a batch job cut off there
+    # is lost work: refuse one that may not finish in time instead of starting it.
+    if kind == "batch" and hours_high is not None and max_session_hours and hours_high > max_session_hours:
+        blockers.append(
+            f"This job could take up to {hours_high:g} h, longer than the {max_session_hours:g} h limit "
+            "on one machine session. Ask for a smaller job, or split a render across more GPUs."
+        )
 
     if kind == "desktop" and "desktop" in spend.account_active_kinds:
         waits.append("You already have a desktop running. Open it, or stop it before starting another.")

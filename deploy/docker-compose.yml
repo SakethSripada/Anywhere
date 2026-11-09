@@ -12,13 +12,26 @@
 
 name: anywhere
 
+# Rotate container logs instead of letting them fill the 40 GB disk.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+# Memory limits are sized for a 4 GB VM and sum to ~3.2 GB with every profile on,
+# leaving the rest for the OS and Docker. Raise them together on a bigger VM.
 services:
   caddy:
     image: caddy:2.10
     restart: unless-stopped
+    <<: *logging
+    mem_limit: 128m
     ports: ["80:80", "443:443", "443:443/udp"]
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN}
+      # Self-hosted SpacetimeDB's public name. The default is an inert local-only site.
+      STDB_DOMAIN: ${STDB_DOMAIN:-http://stdb.localhost}
+      SPACETIME_DATABASE: ${SPACETIME_DATABASE:-anywhere}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -34,10 +47,27 @@ services:
         NEXT_PUBLIC_SPACETIME_DATABASE: ${SPACETIME_DATABASE:-anywhere}
         NEXT_PUBLIC_API_URL: /api
     restart: unless-stopped
+    <<: *logging
+    # Next.js standalone server.
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   control:
     build: ../services/control
     restart: unless-stopped
+    <<: *logging
+    # FastAPI, the LangGraph agent and SSH tunnels to the GPU boxes.
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     env_file: .env
     environment:
       PUBLIC_WEB_ORIGIN: https://${DOMAIN}
@@ -56,6 +86,15 @@ services:
       context: ..
       dockerfile: services/messaging/Dockerfile
     restart: unless-stopped
+    <<: *logging
+    mem_limit: 256m
+    # 503 while Spectrum or SpacetimeDB is down; the process exits on its own if that lasts.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     environment:
       SPECTRUM_PROJECT_ID: ${SPECTRUM_PROJECT_ID}
       SPECTRUM_PROJECT_SECRET: ${SPECTRUM_PROJECT_SECRET}
@@ -65,7 +104,9 @@ services:
       SPACETIME_DATABASE: ${SPACETIME_DATABASE:-anywhere}
       SPACETIME_WORKER_TOKEN: ${MESSAGING_SPACETIME_TOKEN:-${SPACETIME_WORKER_TOKEN}}
       TURN_TIMEOUT_MS: ${TURN_TIMEOUT_MS:-120000}
-    depends_on: [control]
+    depends_on:
+      control:
+        condition: service_healthy
 
   # A fresh named volume is owned by root, but SpacetimeDB runs as uid 1000 and
   # would crash-loop with "Permission denied". Hand the volume over once first.
@@ -74,6 +115,7 @@ services:
     image: clockworklabs/spacetime:v2.14.1
     user: root
     entrypoint: ["chown", "-R", "1000:1000", "/home/spacetime/.local/share/spacetime"]
+    <<: *logging
     volumes:
       - spacetime_data:/home/spacetime/.local/share/spacetime
 
@@ -82,6 +124,9 @@ services:
     image: clockworklabs/spacetime:v2.14.1
     command: start
     restart: unless-stopped
+    <<: *logging
+    # The biggest tenant: SpacetimeDB keeps the whole database in memory.
+    mem_limit: 1400m
     depends_on:
       spacetime-init:
         condition: service_completed_successfully

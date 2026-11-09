@@ -7,7 +7,7 @@ import { useMemo } from "react";
 import { useAgentState } from "@/lib/agent";
 import { useNow } from "@/lib/data";
 import { cents } from "@/lib/format";
-import { NONE, useShared } from "@/lib/tables";
+import { useWorkloadRows } from "@/lib/tables";
 import { cn } from "@/lib/utils";
 import { BILLABLE, href, liveCents } from "@/lib/workloads";
 import { parsePlan } from "@/lib/plan";
@@ -75,7 +75,7 @@ export function DesktopPreview({ w }: { w: Workload }) {
 }
 
 export function JobPreview({ w }: { w: Workload }) {
-  const mine = useShared("myMetrics").byWorkload.get(w.id) ?? NONE;
+  const mine = useWorkloadRows("myMetrics", w.id);
   const { loss, progress } = useMemo(() => {
     return {
       loss: mine

@@ -304,7 +304,7 @@ class SavedStorage:
     async def download_stream(self, key, proc):
         self.downloads.append((key, proc))
 
-    async def upload_stream(self, proc, key, content_type):
+    async def upload_stream(self, proc, key, content_type, **kw):
         self.uploads.append(key)
         self.keys.add(key)
         return 2048
@@ -393,3 +393,29 @@ async def test_notification_pictures_reach_the_bridge(app):
 
 async def _value(v):
     return v
+
+
+async def test_a_split_render_that_fails_part_way_leaves_nothing_approved(app):
+    app.settings.max_concurrent_instances = 6
+    desktop(app)
+    app.store.update_workload_plan = None  # never reached: the third part fails first
+    launched = []
+    app.supervisor.launch = lambda w: launched.append(w)
+    intent = Intent(kind="render", summary="animation", render_frames=10, render_machines=4)
+    farm = await app.propose(ALICE, 1, intent, render_from=11, auto_approve=False)
+    create, made = app.store.create_workload, []
+
+    async def flaky_create(**w):
+        if len(made) == 2:
+            raise RuntimeError("database unavailable")
+        made.append(w["id"])
+        await create(**w)
+
+    app.store.create_workload = flaky_create
+    with pytest.raises(ActionError, match="split render"):
+        await app.approve(ALICE, farm["workload_id"])
+    assert launched == []
+    # The parts made so far are cancelled, so none holds a concurrency slot; the plan can be retried.
+    assert [app.store.rows[i]["status"] for i in made] == ["cancelled", "cancelled"]
+    assert app.store.rows[farm["workload_id"]]["status"] == "planned"
+    assert (await app.spend_snapshot(ALICE)).active_instances == 1  # just the desktop

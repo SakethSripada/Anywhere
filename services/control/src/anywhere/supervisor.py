@@ -31,9 +31,9 @@ from typing import Any
 import structlog
 
 from . import budget, savings, sharing
-from .brev import BrevCLI, BrevDeployFailed, BrevError, Instance, ProvisioningDisabled, instance_name
+from .brev import BrevCLI, BrevDeployFailed, BrevError, Instance, ProvisioningDisabled, foreign_instance, instance_name
 from .catalog import Catalog, Offer
-from .config import ProvisioningMode, Settings
+from .config import BLENDER_SHA256, ProvisioningMode, Settings
 from .desktop import Screenshots, VncTunnels, connect_screen
 from .ids import new_id
 from .lifecycle import BILLABLE, Status
@@ -47,6 +47,10 @@ from .vault import Vault
 log = structlog.get_logger()
 
 JOB_DIR = "~/workspace/anywhere/job"
+#: GNU tar exit codes for an archive that is complete (1: a file changed as it was read).
+TAR_CHANGED_OK = frozenset({0, 1})
+#: Upper bound for saving a batch job's outputs before the guard deletes its machine.
+OUTPUT_SAVE_TIMEOUT = 10 * 60
 #: Polls a batch job may report "starting" (no pid file yet) before it counts as dead.
 STARTING_POLL_LIMIT = 6
 #: run.log bytes one poll reads (see `poll_command`).
@@ -74,9 +78,6 @@ SAVE_NOW = (
     "(docker exec anywhere-desktop touch /tmp/anywhere-save-now 2>/dev/null"
     " || sudo -n docker exec anywhere-desktop touch /tmp/anywhere-save-now) && sleep 5"
 )
-
-#: Blender's published checksum for the pinned release (download.blender.org).
-BLENDER_SHA256 = {"4.5.15": "0d2b8bb2efe97e6c8eb57de6b7322f8800e1984e3125b60decca5f6771e4773e"}
 
 
 def _env(name: str) -> str:
@@ -134,6 +135,8 @@ class Supervisor:
         #: Unowned instances seen on the previous reconcile pass. An instance is only
         #: deleted after it is unowned on two passes in a row.
         self._orphan_candidates: set[str] = set()
+        #: Anywhere-looking instances outside our prefix, already logged once.
+        self._foreign_warned: set[str] = set()
         self._last_reconcile = 0.0
         self._last_platform: tuple | None = None
 
@@ -239,7 +242,7 @@ class Supervisor:
     def _instance(self, workload_id: int) -> str:
         """The Brev instance a workload runs on. Usually `instance_name(id)`, but a
         launch that fell back to another provider records a suffixed name."""
-        return self.vault.get(workload_id).get("instance") or instance_name(workload_id)
+        return self.vault.get(workload_id).get("instance") or instance_name(workload_id, self.instance_prefix)
 
     def remote(self, w: dict) -> Remote:
         name = self._instance(w["id"])
@@ -256,8 +259,8 @@ class Supervisor:
     def resume(self, w: dict) -> None:
         self._spawn(w["id"], self._resume(w), name="resume")
 
-    def terminate(self, w: dict, reason: str = "Deleted by you") -> None:
-        self._spawn(w["id"], self._terminate(w, reason), name="terminate")
+    def terminate(self, w: dict, reason: str = "Deleted by you", *, save_outputs: bool = False) -> None:
+        self._spawn(w["id"], self._terminate(w, reason, save_outputs=save_outputs), name="terminate")
 
     def save(self, w: dict) -> None:
         self._spawn(w["id"], self._save_running(w), name="save")
@@ -390,7 +393,7 @@ class Supervisor:
             _env("desktop-setup.sh"),
             DESKTOP_IMAGE=self.settings.desktop_image,
             BLENDER_VERSION=version,
-            BLENDER_SHA256=BLENDER_SHA256.get(version, ""),
+            BLENDER_SHA256=BLENDER_SHA256[version],
             CUA_TOKEN=token,
         )
         await self._run_streamed(w, remote, setup, f"{STATE_DIR}/desktop-setup.sh", timeout=30 * 60)
@@ -445,7 +448,9 @@ class Supervisor:
             with contextlib.suppress(Exception):
                 await remote.run(SAVE_NOW, timeout=20, check=False)
         proc = remote.popen(f"tar -czf - -C {PROJECTS_DIR} .", stdout=subprocess.PIPE)
-        size = await self.storage.upload_stream(proc, key, "application/gzip")
+        # GNU tar exits 1 when a file changed while it was read (Blender's autosave, a
+        # running render). The archive is still complete and worth keeping.
+        size = await self.storage.upload_stream(proc, key, "application/gzip", ok_exit=TAR_CHANGED_OK)
         await self.store.upsert_project(pid, w["owner"], w["title"], "blender", key, size, True)
         await self._event(w, f"Project saved ({size / 1e6:.1f} MB)", "success")
         return size
@@ -470,32 +475,123 @@ class Supervisor:
             await self.vnc.close(w["id"])
             await self.shots.close(w["id"])
             remote = self.remote(w)
-            if w["kind"] == "desktop" and w["status"] == Status.RUNNING:
-                await self._transition(w, Status.SAVING, "Saving before stopping")
-                try:
-                    await self.snapshot_project(w, remote)
-                except Exception as exc:
-                    # The disk persists across a stop, so a failed upload is not data loss.
-                    await self._event(
-                        w, f"Couldn't upload a snapshot ({exc}); files remain on the stopped disk.", "warn"
-                    )
-            await self._transition(w, Status.STOPPING, reason)
             name = self._instance(w["id"])
-            await self._settle_usage(w)
+            keep_disk = bool(w["stoppable"]) and w["kind"] == "desktop"
+            saved = False
             try:
-                if w["stoppable"] and w["kind"] == "desktop":
+                if w["kind"] == "desktop" and w["status"] == Status.RUNNING:
+                    await self._transition_retrying(w, Status.SAVING, "Saving before stopping")
+                    try:
+                        saved = await self.snapshot_project(w, remote) is not None
+                    except Exception as exc:
+                        # The disk persists across a stop, so a failed upload is not data loss.
+                        await self._event(
+                            w, f"Couldn't upload a snapshot ({exc}); files remain on the stopped disk.", "warn"
+                        )
+                await self._transition_retrying(w, Status.STOPPING, reason)
+                if keep_disk:
                     await self.brev.stop(name)
                     await self.brev.wait_for(name, want="STOPPED", timeout=10 * 60)
-                    await self._transition(w, Status.STOPPED, reason)
+                    # Settle once the machine has stopped: it bills until then.
+                    await self._settle_usage(w)
+                    await self._transition_retrying(w, Status.STOPPED, reason)
                     await self.notify(
                         w, "status", f"{w['title']} stopped. Your files are saved, so you can resume anytime."
                     )
                 else:
                     await self.brev.delete(name)
-                    await self._transition(w, Status.TERMINATED, reason)
+                    await self._settle_usage(w)
+                    await self._transition_retrying(w, Status.TERMINATED, reason)
             except Exception as exc:
+                if keep_disk:
+                    # Retry the stop before anything else; the disk may hold the only copy
+                    # of the user's files. The guard tick keeps retrying after this.
+                    log.error("supervisor.stop_failed", workload=w["id"], error=repr(exc))
+                    await self._event(w, f"Stopping hit a problem ({exc}). Retrying; your disk is kept.", "error")
+                    with contextlib.suppress(Exception):
+                        await self._back_to_stopping(w, reason)
+                    if w["status"] == Status.STOPPING and await self._finish_stop(w, reason):
+                        await self.notify(w, "status", f"{w['title']} stopped. Your files are on its disk.")
+                        return
+                    if not saved:
+                        # No snapshot: never delete. Better billed a while than the files gone.
+                        if w["status"] == Status.STOPPING:
+                            await self.notify(
+                                w,
+                                "error",
+                                f"Couldn't stop {w['title']} yet, so it may still be billing. Anywhere keeps "
+                                "retrying, and your files stay on its disk.",
+                            )
+                        return
                 await self._event(w, f"Stopping failed: {exc}. Deleting the machine instead.", "error")
+                await self._settle_usage(w)
                 await self._force_delete(w, name, "Deleted after a failed stop")
+
+    async def _transition_retrying(self, w: dict, to: Status, detail: str, attempts: int = 4) -> None:
+        """`_transition`, retried through transient SpacetimeDB errors. A crash between
+        two steps of a stop used to leave the workload stuck in `saving`, still billing."""
+        for attempt in range(attempts):
+            try:
+                await self._transition(w, to, detail)
+                return
+            except ReducerRejected:
+                raise
+            except Exception as exc:
+                if attempt == attempts - 1:
+                    raise
+                log.warning("supervisor.transition_retry", workload=w["id"], to=to.value, error=str(exc)[:200])
+                await asyncio.sleep(2 * 2**attempt)
+
+    async def _back_to_stopping(self, w: dict, detail: str) -> None:
+        """A (re)starting or saving desktop heads back to `stopping`, keeping its disk."""
+        if w["status"] in (Status.SAVING, Status.PROVISIONING, Status.CONFIGURING):
+            await self._transition_retrying(w, Status.STOPPING, detail)
+
+    async def _finish_stop(self, w: dict, reason: str) -> bool:
+        """Drive a stoppable desktop in `stopping` to `stopped`, never deleting its disk.
+        False (and still `stopping`) when Brev didn't confirm; the guard tick retries."""
+        name = self._instance(w["id"])
+        try:
+            inst = await self.brev.get(name)
+            if inst is None:
+                # Nothing is billing and there is no disk left to keep.
+                await self._fail(w, BrevError("The machine disappeared from Brev while stopping"))
+                return False
+            if inst.status not in ("STOPPED", "STOPPING"):
+                await self.brev.stop(name)
+            await self.brev.wait_for(name, want="STOPPED", timeout=10 * 60)
+        except Exception as exc:
+            log.warning("supervisor.finish_stop_failed", workload=w["id"], error=str(exc)[:200])
+            await self._event(w, f"Still trying to stop the machine ({str(exc)[:200]})", "warn")
+            return False
+        await self._settle_usage(w)
+        await self._transition_retrying(w, Status.STOPPED, reason)
+        return True
+
+    async def _settle_interrupted(self, w: dict) -> None:
+        """Finish a desktop whose save, stop or resume was cut short (a restart, or a
+        crash): back to `running` if a save was interrupted on a running machine,
+        otherwise stopped with its disk kept. Never deletes the disk."""
+        async with self._lock(w["id"]):
+            name = self._instance(w["id"])
+            if w["status"] == Status.SAVING:
+                try:
+                    inst = await self.brev.get(name)
+                except BrevError as exc:  # can't tell; the next guard tick asks again
+                    log.warning("supervisor.settle_lookup_failed", workload=w["id"], error=str(exc)[:200])
+                    return
+                if inst and inst.running:
+                    await self._transition_retrying(w, Status.RUNNING, "Desktop is live (a save was interrupted)")
+                    await self._event(w, "Saving your files was interrupted; the desktop is still running.", "warn")
+                    return
+            resuming = w["status"] in (Status.PROVISIONING, Status.CONFIGURING)
+            if resuming:
+                await self._event(w, "Resuming was interrupted. Stopping the machine again; your disk is kept.", "warn")
+            await self._back_to_stopping(w, "Finishing an interrupted stop")
+            reason = "Resume interrupted, stopped again" if resuming else "Stopped"
+            if await self._finish_stop(w, reason) and resuming:
+                self.vault.update(w["id"], resuming=False)
+                await self.notify(w, "error", f"Resuming {w['title']} was interrupted. It's stopped; resume it again.")
 
     def _record_idle_stop(self, w: dict, segment_start: datetime | None) -> None:
         now = _now()
@@ -535,6 +631,8 @@ class Supervisor:
         async with self._lock(w["id"]):
             name = self._instance(w["id"])
             try:
+                # Marks a resume (not a fresh launch) for `recover`, should a restart cut it short.
+                self.vault.update(w["id"], resuming=True)
                 await self._transition(w, Status.PROVISIONING, "Resuming your machine")
                 await self._event(w, BOOT_RESUME)
                 await self.brev.start(name)
@@ -542,18 +640,58 @@ class Supervisor:
                 remote = await self._reach(w, name)
                 await self._transition(w, Status.CONFIGURING, "Reconnecting the desktop")
                 await self._start_desktop(w, remote)
+                self.vault.update(w["id"], resuming=False)
             except Exception as exc:
-                await self._fail(w, exc)
+                if w["status"] == Status.STOPPED:
+                    # Nothing started (the first transition failed): it's still stopped.
+                    await self._event(w, f"Couldn't resume: {exc}", "error")
+                    await self.notify(w, "error", f"{w['title']} couldn't resume: {exc}. It's still stopped.")
+                elif w["stoppable"] and w["kind"] == "desktop":
+                    await self._resume_failed(w, exc)
+                else:
+                    await self._fail(w, exc)
                 return
         await self.notify(w, "status", f"{w['title']} is back online.")
 
-    async def _terminate(self, w: dict, reason: str) -> None:
+    async def _resume_failed(self, w: dict, exc: Exception) -> None:
+        """A resume that didn't come up: stop the machine again and keep its disk.
+        `_fail` would delete it, and the disk may be the only copy of the user's files."""
+        lines = str(exc).strip().splitlines()
+        message = lines[0][:300] if lines else exc.__class__.__name__
+        log.error("supervisor.resume_failed", workload=w["id"], error=repr(exc))
+        await self._event(w, f"Couldn't resume: {message}. Stopping the machine again; your disk is kept.", "error")
+        await self.vnc.close(w["id"])
+        await self.shots.close(w["id"])
+        try:
+            await self._back_to_stopping(w, f"Resume failed: {message}")
+        except Exception as inner:
+            log.error("supervisor.resume_unwind_failed", workload=w["id"], error=repr(inner))
+            return
+        stopped = await self._finish_stop(w, f"Resume failed: {message}")
+        if stopped:
+            self.vault.update(w["id"], resuming=False)
+        elif w["status"] != Status.STOPPING:
+            return  # the machine was gone; `_fail` already told the user
+        tail = (
+            "It's stopped again with your files on its disk; try resuming later."
+            if stopped
+            else "Anywhere is still stopping it; your files stay on its disk."
+        )
+        await self.notify(w, "error", f"{w['title']} couldn't resume: {message}. {tail}")
+
+    async def _terminate(self, w: dict, reason: str, *, save_outputs: bool = False) -> None:
         await self._stop_monitor(w["id"])
         async with self._lock(w["id"]):
             await self.stop_agent(w["id"])
             await self.vnc.close(w["id"])
             await self.shots.close(w["id"])
             name = self._instance(w["id"])
+            if save_outputs and w["kind"] == "batch" and w["status"] == Status.RUNNING:
+                # The guard is ending this job early: keep what it produced so far.
+                try:
+                    await asyncio.wait_for(self._save_partial_outputs(w, self.remote(w)), OUTPUT_SAVE_TIMEOUT)
+                except Exception as exc:
+                    await self._event(w, f"Couldn't save the job's outputs before stopping it ({exc})", "warn")
             if w["status"] == Status.RUNNING and w["kind"] == "desktop":
                 await self._transition(w, Status.SAVING, "Saving before deleting")
                 with contextlib.suppress(Exception):
@@ -732,20 +870,7 @@ class Supervisor:
         async with self._lock(w["id"]):
             await self._event(w, "Training finished. Saving outputs")
             try:
-                adapter_key = Storage.artifact_key(w["owner"], w["id"], "adapter.tar.gz")
-                proc = remote.popen(f"tar -czf - -C {JOB_DIR}/outputs adapter", stdout=subprocess.PIPE)
-                size = await self.storage.upload_stream(proc, adapter_key, "application/gzip")
-                await self.store.add_artifact(new_id(), w["id"], "LoRA adapter", adapter_key, "application/gzip", size)
-                for name, ctype, path in (
-                    ("Training log", "text/plain", f"{JOB_DIR}/run.log"),
-                    ("Metrics", "application/x-ndjson", f"{JOB_DIR}/metrics.jsonl"),
-                    ("Sample generations", "application/json", f"{JOB_DIR}/outputs/samples.json"),
-                ):
-                    data = (await remote.run(f"cat {path}", check=False, timeout=60)).stdout.encode()
-                    if data:
-                        key = Storage.artifact_key(w["owner"], w["id"], Path(path).name)
-                        await self.storage.put_bytes(key, data, ctype)
-                        await self.store.add_artifact(new_id(), w["id"], name, key, ctype, len(data))
+                await self._save_training_outputs(w, remote)
                 await self._transition(w, Status.SUCCEEDED, "Training complete")
             except Exception as exc:
                 await self._fail(w, exc)
@@ -754,6 +879,49 @@ class Supervisor:
             name = self._instance(w["id"])
             await self._force_delete(w, name, "Machine released after training", final=None)
         await self.notify(w, "status", f"{w['title']} finished. Your adapter and samples are ready to download.")
+
+    async def _save_training_outputs(self, w: dict, remote: Remote, *, partial: bool = False) -> None:
+        """Upload the adapter (or, for a job cut short, its latest checkpoint) and the
+        job's text outputs as artifacts."""
+        if partial:
+            label, what, file = "Latest checkpoint (unfinished)", "checkpoints", "checkpoint.tar.gz"
+        else:
+            label, what, file = "LoRA adapter", "adapter", "adapter.tar.gz"
+        try:
+            adapter_key = Storage.artifact_key(w["owner"], w["id"], file)
+            proc = remote.popen(f"tar -czf - -C {JOB_DIR}/outputs {what}", stdout=subprocess.PIPE)
+            size = await self.storage.upload_stream(proc, adapter_key, "application/gzip")
+            await self.store.add_artifact(new_id(), w["id"], label, adapter_key, "application/gzip", size)
+        except Exception as exc:
+            if not partial:
+                raise
+            log.info("batch.no_checkpoint", workload=w["id"], error=str(exc)[:200])  # before the first save
+        for name, ctype, path in (
+            ("Training log", "text/plain", f"{JOB_DIR}/run.log"),
+            ("Metrics", "application/x-ndjson", f"{JOB_DIR}/metrics.jsonl"),
+            ("Sample generations", "application/json", f"{JOB_DIR}/outputs/samples.json"),
+        ):
+            data = (await remote.run(f"cat {path}", check=False, timeout=60)).stdout.encode()
+            if data:
+                key = Storage.artifact_key(w["owner"], w["id"], Path(path).name)
+                await self.storage.put_bytes(key, data, ctype)
+                await self.store.add_artifact(new_id(), w["id"], name, key, ctype, len(data))
+
+    async def _save_partial_outputs(self, w: dict, remote: Remote) -> None:
+        """What a batch job produced before the guard ended it (the normal finish path's uploads)."""
+        if not self.settings.storage_ready:
+            return
+        await self._event(w, "Saving what the job produced so far")
+        if json.loads(w["planJson"]).get("requirements", {}).get("environment") == "blender-render":
+            await self._save_frames(w, remote)
+        else:
+            await self._save_training_outputs(w, remote, partial=True)
+
+    async def _save_frames(self, w: dict, remote: Remote) -> None:
+        key = Storage.artifact_key(w["owner"], w["id"], "frames.tar.gz")
+        proc = remote.popen(f"tar -czf - -C {JOB_DIR} renders", stdout=subprocess.PIPE)
+        size = await self.storage.upload_stream(proc, key, "application/gzip")
+        await self.store.add_artifact(new_id(), w["id"], "Rendered frames", key, "application/gzip", size)
 
     # ── Render jobs ───────────────────────────────────────────────────────
 
@@ -791,7 +959,7 @@ class Supervisor:
             raise RemoteError(f"Rename {blend} to use only letters, numbers, spaces and - _ . (no quotes)")
         version = self.settings.blender_version
         runner = render(
-            _env("render-run.sh"), BLENDER_VERSION=version, BLENDER_SHA256=BLENDER_SHA256.get(version, ""), BLEND=blend
+            _env("render-run.sh"), BLENDER_VERSION=version, BLENDER_SHA256=BLENDER_SHA256[version], BLEND=blend
         )
         chunk = inputs.get("chunk") or {}
         cfg = {
@@ -828,10 +996,7 @@ class Supervisor:
             folder = int(chunk.get("farm_id") or w["id"])
             try:
                 if self.settings.storage_ready:
-                    key = Storage.artifact_key(w["owner"], w["id"], "frames.tar.gz")
-                    proc = remote.popen(f"tar -czf - -C {JOB_DIR} renders", stdout=subprocess.PIPE)
-                    size = await self.storage.upload_stream(proc, key, "application/gzip")
-                    await self.store.add_artifact(new_id(), w["id"], "Rendered frames", key, "application/gzip", size)
+                    await self._save_frames(w, remote)
                     where = "Your frames are ready to download."
                     if not int(chunk.get("offset") or 0):
                         await self._save_preview(w, remote)
@@ -1038,11 +1203,16 @@ class Supervisor:
         platform_cents = sum(int(w["accruedCents"]) for w in workloads)
         per_account: dict[str, int] = {}
         for w in workloads:
-            if w["createdAt"] >= month:
+            if _this_month(w, month):
                 per_account[w["owner"]] = per_account.get(w["owner"], 0) + int(w["accruedCents"])
 
         for w in live:
             if self.busy(w["id"]):
+                continue
+            if w["status"] in (Status.SAVING, Status.STOPPING) and w["kind"] == "desktop" and w["stoppable"]:
+                # Nothing is working on it: an earlier stop or save was cut short. Finish it
+                # (keeping the disk) rather than leave it stuck and billing.
+                self._spawn(w["id"], self._settle_interrupted(w), name="finish-stop")
                 continue
             acct = accounts.get(w["owner"], {})
             start, _ = self._segment(w)
@@ -1072,7 +1242,7 @@ class Supervisor:
                 if action.action == "save_and_stop":
                     self.stop(w, action.reason)
                 else:
-                    self.terminate(w, action.reason)
+                    self.terminate(w, action.reason, save_outputs=w["kind"] == "batch")
 
         platform = (
             self.settings.provisioning_mode.value,
@@ -1095,14 +1265,20 @@ class Supervisor:
         loop_now = asyncio.get_running_loop().time()
         if loop_now - self._last_reconcile >= RECONCILE_SECONDS:
             self._last_reconcile = loop_now
-            self.housekeeping()
+            self.housekeeping(workloads=workloads)
             await self.reconcile(workloads)
 
-    def housekeeping(self, now: datetime | None = None) -> int:
+    def housekeeping(self, now: datetime | None = None, workloads: list[dict] | None = None) -> int:
         """Drop vault records nothing will read again. Every vault write rewrites (and
         fsyncs) the whole file, so these used to make every later write slower."""
         now = now or _now()
-        dropped = self.vault.purge_records(sharing.SECTION, lambda r: not sharing.live(r, now))
+        if workloads is not None:
+            # Over for good: no machine, no billing segment, no agent token left to use.
+            done = [w["id"] for w in workloads if w["status"] in (Status.TERMINATED, Status.CANCELLED)]
+            dropped = self.vault.drop_workloads(wid for wid in done if not self.busy(wid))
+        else:
+            dropped = 0
+        dropped += self.vault.purge_records(sharing.SECTION, lambda r: not sharing.live(r, now))
         # The bridge fetches a text's picture seconds after sending the text.
         day_ago = (now - timedelta(days=1)).isoformat()
         dropped += self.vault.purge_records("notification_attachments", lambda r: (r.get("at") or "") < day_ago)
@@ -1129,6 +1305,23 @@ class Supervisor:
             if w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])
         }
         owned |= {self._instance(wid) for wid, t in self._tasks.items() if not t.done()}
+        for inst in instances:
+            if (
+                inst.name not in owned
+                and inst.name not in self._foreign_warned
+                and foreign_instance(inst.name, self.instance_prefix)
+            ):
+                # Never deleted: it may be a teammate's, or ours from before DATA_DIR (its
+                # site-id and vault) was lost. Either way someone must look, and it may bill.
+                self._foreign_warned.add(inst.name)
+                log.error(
+                    "reconcile.unattributed_instance",
+                    instance=inst.name,
+                    status=inst.status,
+                    prefix=self.instance_prefix,
+                    hint="Not this deployment's prefix. If DATA_DIR was lost, restore its site-id; "
+                    "otherwise stop or delete it in Brev by hand.",
+                )
         candidates = {
             inst.name
             for inst in instances
@@ -1138,9 +1331,10 @@ class Supervisor:
         self._orphan_candidates = candidates - confirmed
         if not confirmed:
             return
-        fresh = {w["id"]: w for w in await self.store.workloads()}
+        # Re-read only the workloads these names belong to, not every workload ever made.
+        known = {self._instance(w["id"]): w["id"] for w in workloads}
         for name in sorted(confirmed):
-            w = next((w for w in fresh.values() if self._instance(w["id"]) == name), None)
+            w = await self.store.workload(known[name]) if name in known else None
             if w and (w["status"] in BILLABLE | {Status.STOPPED, Status.APPROVED} or self.busy(w["id"])):
                 continue
             log.warning("reconcile.orphan", instance=name)
@@ -1163,7 +1357,16 @@ class Supervisor:
                 log.warning("recover.refresh_failed", error=str(exc))
         for w in workloads:
             status = w["status"]
-            if status in (Status.PROVISIONING, Status.CONFIGURING, Status.SAVING, Status.STOPPING, Status.APPROVED):
+            keeps_disk = w["kind"] == "desktop" and bool(w["stoppable"])
+            interrupted = status in (Status.SAVING, Status.STOPPING) or (
+                status in (Status.PROVISIONING, Status.CONFIGURING) and self.vault.get(w["id"]).get("resuming")
+            )
+            if keeps_disk and interrupted:
+                # A save, stop or resume of a desktop whose disk may be the only copy of
+                # the user's files: finish it (running again, or stopped), never delete.
+                self._spawn(w["id"], self._settle_interrupted(w), name="recover")
+            elif status in (Status.PROVISIONING, Status.CONFIGURING, Status.SAVING, Status.STOPPING, Status.APPROVED):
+                # A fresh launch (or a batch job being torn down): nothing worth keeping yet.
                 await self._fail(w, RuntimeError("Interrupted by a control-plane restart"))
             elif status == Status.RUNNING and w["kind"] == "batch":
                 self._start_monitor(w)
@@ -1406,6 +1609,18 @@ async def _safe(coro: Awaitable[Any]) -> None:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _this_month(w: dict, month: datetime) -> bool:
+    """Whether a workload's spend counts toward this month's cap: made this month, or
+    active in it (every transition stamps updatedAt and lastActiveAt; startedAt marks
+    a billing start). By createdAt alone, a desktop started last month and still in use
+    never counted. Rows only hold lifetime spend, so a workload spanning two months
+    counts all of it: the conservative side for a cap. Mirrors core.py's `_this_month`."""
+    return any(
+        isinstance(at, datetime) and at >= month
+        for at in (w.get("createdAt"), w.get("lastActiveAt"), w.get("updatedAt"), w.get("startedAt"))
+    )
 
 
 __all__ = ["Supervisor", "StorageUnavailable", "render"]
