@@ -399,9 +399,13 @@ export const setController = spacetimedb.reducer(
     }
     const row = ctx.db.workload.id.find(workloadId);
     if (!row) throw new SenderError("Workload not found");
-    if (!row.owner.isEqual(ctx.sender) && !isWorker(ctx)) throw new SenderError("Not your workload");
+    const worker = isWorker(ctx);
+    if (!row.owner.isEqual(ctx.sender) && !worker) throw new SenderError("Not your workload");
     if (row.kind !== "desktop") throw new SenderError("Only desktops can change hands");
-    ctx.db.workload.id.update({ ...row, controller, updatedAt: ctx.timestamp, lastActiveAt: ctx.timestamp });
+    if (!worker && row.status !== "running") throw new SenderError("Only a running desktop can change hands");
+    // `updatedAt` is left alone: on a settled workload it starts the telemetry
+    // retention clock in run_maintenance, which a hand-off must not reset.
+    ctx.db.workload.id.update({ ...row, controller, lastActiveAt: ctx.timestamp });
   },
 );
 
@@ -840,7 +844,15 @@ export const myConversations = spacetimedb.view(
 export const myMessages = spacetimedb.view(
   { name: "my_messages", public: true },
   t.array(message.rowType),
-  (ctx) => [...ctx.db.message.owner.filter(ctx.sender)],
+  // Archived conversations can't be opened (my_conversations hides them), so
+  // their history isn't sent; walk the user's conversations and their index.
+  (ctx) => {
+    const out: (typeof message.rowType.type)[] = [];
+    for (const c of ctx.db.conversation.owner.filter(ctx.sender)) {
+      if (!c.archived) out.push(...ctx.db.message.conversationId.filter(c.id));
+    }
+    return out;
+  },
 );
 
 export const myWorkloads = spacetimedb.view(
@@ -858,21 +870,26 @@ export const myEvents = spacetimedb.view(
 /** The log tail shows the last few thousand lines; older chunks only cost bandwidth. */
 const LOG_VIEW_CHUNKS_PER_WORKLOAD = 300;
 
+/** A deleted machine's page has nothing live to show, so its bulky telemetry isn't sent. */
+const sendsTelemetry = (w: { status: string }) => w.status !== "terminated";
+
+const byIdAsc = (a: { id: bigint }, b: { id: bigint }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
 export const myLogs = spacetimedb.view(
   { name: "my_logs", public: true },
   t.array(logChunk.rowType),
   (ctx) => {
     // Newest chunks per workload only: a long training job appends a chunk every
-    // 10 s, and without a cap every browser downloaded the whole history.
-    const rows = [...ctx.db.logChunk.owner.filter(ctx.sender)].sort((a, b) => (a.id > b.id ? -1 : 1));
-    const kept = new Map<bigint, number>();
-    return rows
-      .filter((r) => {
-        const n = kept.get(r.workloadId) ?? 0;
-        kept.set(r.workloadId, n + 1);
-        return n < LOG_VIEW_CHUNKS_PER_WORKLOAD;
-      })
-      .reverse();
+    // 10 s, and without a cap every browser downloaded the whole history. Walk the
+    // user's (few) workloads and read each through the workloadId index, so only
+    // a workload with more than the cap is sorted.
+    const out: (typeof logChunk.rowType.type)[] = [];
+    for (const w of ctx.db.workload.owner.filter(ctx.sender)) {
+      if (!sendsTelemetry(w)) continue;
+      const rows = [...ctx.db.logChunk.workloadId.filter(w.id)];
+      out.push(...(rows.length > LOG_VIEW_CHUNKS_PER_WORKLOAD ? rows.sort(byIdAsc).slice(-LOG_VIEW_CHUNKS_PER_WORKLOAD) : rows));
+    }
+    return out;
   },
 );
 
@@ -880,8 +897,16 @@ export const myMetrics = spacetimedb.view(
   { name: "my_metrics", public: true },
   t.array(metricPoint.rowType),
   // GPU telemetry adds a reading per series every 10 s for every running machine;
-  // browsers get the newest hour of it (training metrics are kept whole).
-  (ctx) => newestTelemetry([...ctx.db.metricPoint.owner.filter(ctx.sender)].sort((a, b) => (a.id < b.id ? -1 : 1))),
+  // browsers get the newest hour of it (training metrics are kept whole). Rows are
+  // read per workload through its index; the per-workload sort is near-linear
+  // because index order is already mostly insertion order.
+  (ctx) => {
+    const out: (typeof metricPoint.rowType.type)[] = [];
+    for (const w of ctx.db.workload.owner.filter(ctx.sender)) {
+      if (sendsTelemetry(w)) out.push(...newestTelemetry([...ctx.db.metricPoint.workloadId.filter(w.id)].sort(byIdAsc)));
+    }
+    return out;
+  },
 );
 
 export const myAgentRuns = spacetimedb.view(
@@ -952,40 +977,47 @@ export const workerOutbox = spacetimedb.view(
   (ctx) => (isWorker(ctx) ? [...ctx.db.notification.status.filter("pending")] : []),
 );
 
-/* Read-side for the agent's `inspect_workload` tool. */
+/*
+ * Read-side for the agent's `inspect_workload` tool.
+ *
+ * These return a query rather than rows, so the host plans them as SQL: the
+ * control plane's `SELECT … WHERE workloadId = X` (or `runId = X`) is answered
+ * through that column's index instead of materializing every user's telemetry
+ * first. Anyone else gets only their own rows, which `my_*` already exposes.
+ */
 
 export const workerEvents = spacetimedb.view(
   { name: "worker_events", public: true },
   t.array(workloadEvent.rowType),
-  (ctx) => (isWorker(ctx) ? [...ctx.db.workloadEvent.iter()] : []),
+  (ctx) => (isWorker(ctx) ? ctx.from.workloadEvent.build() : ctx.from.workloadEvent.where((r) => r.owner.eq(ctx.sender)).build()),
 );
 
 export const workerLogs = spacetimedb.view(
   { name: "worker_logs", public: true },
   t.array(logChunk.rowType),
-  (ctx) => (isWorker(ctx) ? [...ctx.db.logChunk.iter()] : []),
+  (ctx) => (isWorker(ctx) ? ctx.from.logChunk.build() : ctx.from.logChunk.where((r) => r.owner.eq(ctx.sender)).build()),
 );
 
 export const workerMetrics = spacetimedb.view(
   { name: "worker_metrics", public: true },
   t.array(metricPoint.rowType),
-  (ctx) => (isWorker(ctx) ? [...ctx.db.metricPoint.iter()] : []),
+  (ctx) => (isWorker(ctx) ? ctx.from.metricPoint.build() : ctx.from.metricPoint.where((r) => r.owner.eq(ctx.sender)).build()),
 );
 
 export const workerArtifacts = spacetimedb.view(
   { name: "worker_artifacts", public: true },
   t.array(artifact.rowType),
-  (ctx) => (isWorker(ctx) ? [...ctx.db.artifact.iter()] : []),
+  (ctx) => (isWorker(ctx) ? ctx.from.artifact.build() : ctx.from.artifact.where((r) => r.owner.eq(ctx.sender)).build()),
 );
 
 export const workerAgentRuns = spacetimedb.view(
   { name: "worker_agent_runs", public: true },
   t.array(agentRun.rowType),
-  (ctx) => (isWorker(ctx) ? [...ctx.db.agentRun.iter()] : []),
+  (ctx) => (isWorker(ctx) ? ctx.from.agentRun.build() : ctx.from.agentRun.where((r) => r.owner.eq(ctx.sender)).build()),
 );
 
 export const workerAgentSteps = spacetimedb.view(
   { name: "worker_agent_steps", public: true },
   t.array(agentStep.rowType),
-  (ctx) => (isWorker(ctx) ? [...ctx.db.agentStep.iter()] : []),
+  (ctx) => (isWorker(ctx) ? ctx.from.agentStep.build() : ctx.from.agentStep.where((r) => r.owner.eq(ctx.sender)).build()),
 );

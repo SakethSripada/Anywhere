@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { useNow } from "./data";
 import { ms } from "./format";
-import { NONE, useShared } from "./tables";
+import { NONE, useShared, useWorkloadRows } from "./tables";
 
 /* ── GPU telemetry ─────────────────────────────────────────────────────────
  * The control plane samples `nvidia-smi` on running machines and stores each
@@ -17,7 +17,7 @@ const KEYS = { "gpu.util_pct": "util", "gpu.mem_used_gb": "mem", "gpu.temp_c": "
 export function useGpuTelemetry(workloadId: bigint): GpuSeries {
   // The shared subscription, already grouped by machine: no second subscription,
   // and no scan of every machine's readings on each new one.
-  const rows = useShared("myMetrics").byWorkload.get(workloadId) ?? NONE;
+  const rows = useWorkloadRows("myMetrics", workloadId);
   return useMemo(() => {
     const out: GpuSeries = { util: [], mem: [], temp: [], power: [], memTotal: null };
     for (const r of rows) {

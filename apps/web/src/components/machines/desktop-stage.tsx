@@ -73,6 +73,21 @@ function LiveDesktop({ w, onAskAgent }: { w: Workload; onAskAgent: () => void })
   const working = agent.working;
   const viewOnly = working && !shared;
 
+  // The stream can drop and give up while the machine is saving; once it's
+  // running again, start a fresh connection instead of leaving it offline. A
+  // live or still-connecting stream is left alone.
+  const lastStatus = useRef(w.status);
+  const phaseNow = useRef(phase);
+  useEffect(() => {
+    phaseNow.current = phase;
+  });
+  useEffect(() => {
+    const was = lastStatus.current;
+    lastStatus.current = w.status;
+    const stalled = phaseNow.current === "failed" || phaseNow.current === "lost";
+    if (was !== "running" && w.status === "running" && stalled) screen.current?.reconnect();
+  }, [w.status]);
+
   useEffect(() => {
     const on = () => setIsFull(document.fullscreenElement === stage.current);
     document.addEventListener("fullscreenchange", on);
